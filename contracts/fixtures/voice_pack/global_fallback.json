@@ -1,0 +1,34 @@
+{
+  "schema_version": "voice_pack.v1",
+  "voice_pack_version": "vp_00000001",
+  "contact_id": null,
+  "scope": "global",
+  "n_exemplars": 4,
+  "register": {
+    "median_len_chars": 41,
+    "p90_len_chars": 110,
+    "emoji_rate": 0.08,
+    "top_emoji": [
+      "😂"
+    ],
+    "punctuation": "lowercase_no_period",
+    "greeting_rate": 0.06,
+    "signoff_rate": 0.0,
+    "abbreviations": [
+      "lmk",
+      "rn"
+    ],
+    "avg_msgs_per_burst": 1.9,
+    "question_rate": 0.28,
+    "apology_openers": [
+      "sorry"
+    ]
+  },
+  "exemplars": [
+    "sorry just seeing this",
+    "yeah for sure",
+    "lmk what works",
+    "im down whenever"
+  ],
+  "as_of": "2026-08-01T09:14:00Z"
+}

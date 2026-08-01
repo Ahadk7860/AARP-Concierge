@@ -1,0 +1,353 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://boi.app/schema/digest.v1.json",
+  "title": "Digest v1 \u2014 T0 aggregates leaving the Mac",
+  "description": "Aggregates only. Contains NO message text from anyone. See BOI_ARCHITECTURE.md section 6.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "user_id",
+    "device_id",
+    "generated_at",
+    "corpus",
+    "relationships",
+    "whole_life"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "digest.v1"
+    },
+    "user_id": {
+      "type": "string",
+      "pattern": "^usr_[0-9a-zA-Z]{8,32}$"
+    },
+    "device_id": {
+      "type": "string",
+      "pattern": "^dev_[0-9a-zA-Z]{8,32}$"
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "corpus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "message_count",
+        "thread_count",
+        "span_days",
+        "health",
+        "as_of"
+      ],
+      "properties": {
+        "message_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "thread_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "first_message_at": {
+          "oneOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "last_message_at": {
+          "oneOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "span_days": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "green_share": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "messages_in_icloud": {
+          "oneOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "retention_boundary": {
+          "enum": [
+            null,
+            "30d",
+            "365d",
+            "1y_exact",
+            "30d_exact"
+          ]
+        },
+        "days_since_newest": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "health": {
+          "enum": [
+            "healthy",
+            "fixable",
+            "thin"
+          ]
+        },
+        "health_reasons": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "icloud_off",
+              "keep_messages_30d",
+              "keep_messages_1y",
+              "new_mac",
+              "low_green_share",
+              "stale_sync",
+              "low_power_mode",
+              "none"
+            ]
+          }
+        },
+        "as_of": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "relationships": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/relationship"
+      }
+    },
+    "whole_life": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "as_of"
+      ],
+      "properties": {
+        "total_messages": {
+          "type": "integer"
+        },
+        "unique_people": {
+          "type": "integer"
+        },
+        "global_median_reply_s": {
+          "type": "integer"
+        },
+        "concentration_top1": {
+          "type": "number"
+        },
+        "concentration_top5": {
+          "type": "number"
+        },
+        "concentration_top10": {
+          "type": "number"
+        },
+        "relationships_gone_quiet": {
+          "type": "integer"
+        },
+        "relationships_ranked": {
+          "type": "integer"
+        },
+        "late_night_share": {
+          "type": "number"
+        },
+        "as_of": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "relationship": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contact_id",
+        "display",
+        "is_group",
+        "message_count",
+        "sent_count",
+        "received_count",
+        "days_since_last_contact",
+        "momentum_90d",
+        "initiation_ratio",
+        "as_of"
+      ],
+      "properties": {
+        "contact_id": {
+          "type": "string",
+          "pattern": "^h_[0-9a-f]{8,32}$"
+        },
+        "display": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "is_group": {
+          "type": "boolean"
+        },
+        "message_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sent_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "received_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "first_contact_at": {
+          "oneOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "last_contact_at": {
+          "oneOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "days_since_last_contact": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "momentum_90d": {
+          "type": "number",
+          "minimum": 0,
+          "description": "messages in recent 90d divided by prior 90d. 0.0 to 13.9 observed."
+        },
+        "initiation_ratio": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "median_reply_latency_s": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "user": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "them": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          }
+        },
+        "p90_reply_latency_s": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "user": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "them": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          }
+        },
+        "tapbacks": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "given": {
+              "type": "integer"
+            },
+            "received": {
+              "type": "integer"
+            }
+          }
+        },
+        "muted_by_them": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "derived from was_delivered_quietly on messages we sent"
+        },
+        "green_share": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "calls": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "count": {
+              "type": "integer"
+            },
+            "total_seconds": {
+              "type": "integer"
+            },
+            "initiated_by_user": {
+              "type": "integer"
+            },
+            "missed": {
+              "type": "integer"
+            }
+          }
+        },
+        "archetype": {
+          "enum": [
+            null,
+            "fade",
+            "chapter",
+            "one_way_enthusiasm",
+            "the_one_you_keep_waiting",
+            "rising_fastest"
+          ]
+        },
+        "as_of": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    }
+  }
+}

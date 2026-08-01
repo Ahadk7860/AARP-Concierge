@@ -1,0 +1,20 @@
+{
+  "schema_version": "outbound.v1",
+  "user_id": "usr_demo0001",
+  "idempotency_key": "welcome-usr_demo0001",
+  "blocks": [
+    {
+      "type": "text",
+      "text": "hey — this is Boi. save me so i don't end up in your filtered messages. when the Mac app is set up, text me your pairing code."
+    },
+    {
+      "type": "contact_card",
+      "name": "Boi",
+      "handle": "+15550100123"
+    }
+  ],
+  "reply_to_message_id": null,
+  "requested_capabilities": [
+    "contact_cards"
+  ]
+}

@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://boi.app/schema/draft_bundle.v1.json",
+  "title": "Draft bundle v1 \u2014 the two candidates",
+  "description": "Exactly two candidates, or exactly zero when the validator refused both after one retry. Never one, never three. Zero is a legitimate degraded outcome; a bad draft is not.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "contact_id",
+    "gist_id",
+    "candidates",
+    "model_id",
+    "prompt_version",
+    "voice_pack_version",
+    "validator",
+    "as_of"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "draft_bundle.v1"
+    },
+    "contact_id": {
+      "type": "string",
+      "pattern": "^h_[0-9a-f]{8,32}$"
+    },
+    "gist_id": {
+      "type": "string"
+    },
+    "candidates": {
+      "type": "array",
+      "oneOf": [
+        {
+          "minItems": 2,
+          "maxItems": 2
+        },
+        {
+          "maxItems": 0
+        }
+      ],
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "stance",
+          "text",
+          "chars"
+        ],
+        "properties": {
+          "stance": {
+            "enum": [
+              "answer",
+              "defer"
+            ],
+            "description": "answer = acknowledge and commit. defer = acknowledge and buy time. The two candidates MUST differ in stance, not merely in phrasing."
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 400
+          },
+          "chars": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      }
+    },
+    "model_id": {
+      "type": "string"
+    },
+    "prompt_version": {
+      "type": "string"
+    },
+    "voice_pack_version": {
+      "type": "string"
+    },
+    "validator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "passed",
+        "attempts",
+        "failures"
+      ],
+      "properties": {
+        "passed": {
+          "type": "boolean"
+        },
+        "attempts": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2
+        },
+        "failures": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "length_gate",
+              "register_gate",
+              "fabrication_gate",
+              "forbidden_phrase",
+              "stance_collision",
+              "empty"
+            ]
+          }
+        }
+      }
+    },
+    "latency_ms": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "as_of": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "note": "Inbound webhook body plus its signature header. Signature scheme UNVERIFIED; the mock uses HMAC-SHA256 of the raw body with LINQ_WEBHOOK_SECRET, hex, prefixed 'sha256='.",
+  "headers": {
+    "X-Boi-Signature": "sha256=<hex>",
+    "Content-Type": "application/json"
+  },
+  "body": {
+    "id": "lmsg_01J8ZM",
+    "line_id": "line_a1",
+    "from": "+15551234567",
+    "type": "message",
+    "text": "2",
+    "protocol": "imessage",
+    "received_at": "2026-08-02T12:04:02Z",
+    "reply_to": "lmsg_01J8ZK"
+  }
+}

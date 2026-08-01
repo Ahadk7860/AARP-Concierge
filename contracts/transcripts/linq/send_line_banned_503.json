@@ -1,0 +1,14 @@
+{
+  "note": "The failure mode that actually hurts. Platform uptime can be 100% while this user's thread is dead. UNRESOLVED whether Linq's 99.95% SLA covers it \u2014 see prompts/CONTRACTS.md section 11.",
+  "request": {
+    "method": "POST",
+    "path": "/api/partner/v3/chats"
+  },
+  "response": {
+    "status": 503,
+    "body": {
+      "error": "line_banned",
+      "line_id": "line_a1"
+    }
+  }
+}

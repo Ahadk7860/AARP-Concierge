@@ -1,0 +1,35 @@
+{
+  "note": "UNVERIFIED against a live Linq account. Reconstructed from docs.linqapp.com, 1 Aug 2026. First task when a token lands: diff a real response against this and amend through the contract procedure.",
+  "request": {
+    "method": "POST",
+    "path": "/api/partner/v3/chats",
+    "headers": {
+      "Authorization": "Bearer <token>",
+      "Content-Type": "application/json"
+    },
+    "body": {
+      "from": "+15550100123",
+      "to": [
+        "+15551234567"
+      ],
+      "message": {
+        "parts": [
+          {
+            "type": "text",
+            "text": "3 people are waiting on you."
+          }
+        ],
+        "protocol": "auto"
+      }
+    }
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "id": "lmsg_01J8ZK",
+      "status": "queued",
+      "protocol": "imessage",
+      "trace_id": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+    }
+  }
+}

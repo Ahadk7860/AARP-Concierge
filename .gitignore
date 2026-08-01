@@ -1,0 +1,34 @@
+node_modules/
+dist/
+.venv/
+__pycache__/
+*.pyc
+.env
+.env.local
+.DS_Store
+
+# Build products
+.build/
+DerivedData/
+*.xcuserstate
+
+# Per-track scratch. CONTRACTS.md section 9 assigns these.
+/tmp-boi-*/
+out/
+
+# Fixtures generated locally, never committed
+/boi-fixtures/
+*.chat.db
+chat.db
+chat.db-wal
+chat.db-shm
+
+# NEVER COMMIT REAL MESSAGE DATA. If you find yourself adding an exception here,
+# stop and report instead.
+*personal*
+*real-chatdb*
+
+# Bootstrap artifact
+.bootstrap.tar.gz
+.pytest_cache/
+.ruff_cache/

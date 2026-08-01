@@ -1,0 +1,147 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://boi.app/schema/gist.v1.json",
+  "title": "Gist v1 \u2014 T1",
+  "description": "An abstraction of a thread state. NEVER contains verbatim text from anyone but the user. The `facts` object is the complete set of specifics the drafter is permitted to use; the validator's fabrication gate rejects any date, time, place, amount or name in a draft that is not present here.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "gist_id",
+    "contact_id",
+    "state",
+    "days_silent",
+    "unanswered_question",
+    "gist",
+    "facts",
+    "priority",
+    "producer",
+    "as_of"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "gist.v1"
+    },
+    "gist_id": {
+      "type": "string",
+      "pattern": "^g_[0-9a-f]{8,32}$"
+    },
+    "contact_id": {
+      "type": "string",
+      "pattern": "^h_[0-9a-f]{8,32}$"
+    },
+    "display": {
+      "type": "string",
+      "maxLength": 64
+    },
+    "state": {
+      "enum": [
+        "action_needed",
+        "fading",
+        "birthday",
+        "dormant",
+        "revived"
+      ]
+    },
+    "days_silent": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "unanswered_question": {
+      "type": "boolean"
+    },
+    "topic": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 40,
+      "description": "a category label, never a quotation"
+    },
+    "has_deadline": {
+      "type": "boolean"
+    },
+    "deadline_hint": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 40
+    },
+    "gist": {
+      "type": "string",
+      "maxLength": 140,
+      "description": "<=140 chars, second person, describing what the user owes. Not a quotation."
+    },
+    "facts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dates",
+        "times",
+        "places",
+        "amounts",
+        "names"
+      ],
+      "description": "THE FABRICATION GATE ALLOWLIST. A draft may reference a specific only if it appears here.",
+      "properties": {
+        "dates": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 40
+          }
+        },
+        "times": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 40
+          }
+        },
+        "places": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 60
+          }
+        },
+        "amounts": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 30
+          }
+        },
+        "names": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 60
+          }
+        }
+      }
+    },
+    "priority": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "producer": {
+      "enum": [
+        "sql",
+        "local_model"
+      ]
+    },
+    "model_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "as_of": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

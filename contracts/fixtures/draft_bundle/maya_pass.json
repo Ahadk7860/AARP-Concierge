@@ -1,0 +1,27 @@
+{
+  "schema_version": "draft_bundle.v1",
+  "contact_id": "h_8f21a4c0",
+  "gist_id": "g_11aa22bb",
+  "candidates": [
+    {
+      "stance": "answer",
+      "text": "sorry been mia — yes im still coming on the 14th, book it",
+      "chars": 56
+    },
+    {
+      "stance": "defer",
+      "text": "sorry been mia, been slammed. still figuring out the 14th, can i tell u by tmrw",
+      "chars": 78
+    }
+  ],
+  "model_id": "gemini-2.5-flash-lite",
+  "prompt_version": "draft.v1",
+  "voice_pack_version": "vp_4a91cc02",
+  "validator": {
+    "passed": true,
+    "attempts": 1,
+    "failures": []
+  },
+  "latency_ms": 740,
+  "as_of": "2026-08-01T09:14:00Z"
+}

@@ -1,0 +1,24 @@
+{
+  "schema_version": "gist.v1",
+  "gist_id": "g_33cc44dd",
+  "contact_id": "h_3c77e910",
+  "display": "Yu",
+  "state": "fading",
+  "days_silent": 51,
+  "unanswered_question": false,
+  "topic": null,
+  "has_deadline": false,
+  "deadline_hint": null,
+  "gist": "used to reply in 16 seconds; 51 days quiet and you sent the last message",
+  "facts": {
+    "dates": [],
+    "times": [],
+    "places": [],
+    "amounts": [],
+    "names": []
+  },
+  "priority": 0.71,
+  "producer": "sql",
+  "model_id": null,
+  "as_of": "2026-08-01T09:14:00Z"
+}

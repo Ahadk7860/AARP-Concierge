@@ -1,0 +1,27 @@
+{
+  "schema_version": "gist.v1",
+  "gist_id": "g_11aa22bb",
+  "contact_id": "h_8f21a4c0",
+  "display": "Maya",
+  "state": "action_needed",
+  "days_silent": 12,
+  "unanswered_question": true,
+  "topic": "travel_planning",
+  "has_deadline": true,
+  "deadline_hint": "friday",
+  "gist": "asked if you're still coming on the 14th, needs an answer by Friday",
+  "facts": {
+    "dates": [
+      "the 14th",
+      "Friday"
+    ],
+    "times": [],
+    "places": [],
+    "amounts": [],
+    "names": []
+  },
+  "priority": 0.87,
+  "producer": "local_model",
+  "model_id": "qwen3-4b-q4",
+  "as_of": "2026-08-01T09:14:00Z"
+}
