@@ -80,6 +80,25 @@ must understand is somebody else's, and those separate. Section 7 covers the gua
 specifics a draft is permitted to name. Anything outside it — a date, a time, a place,
 an amount, a person — is an invented commitment sent in the user's own name.
 
+**And it crosses the digest boundary, so it is subject to the no-verbatim rule.**
+Tightened 2 Aug to **max 3 words and 40 characters per entry**, because a 60-character
+cap let a place pattern capture four consecutive capitalised words and put
+`"Jenny And Marks Wedding"` — the other person's sentence, verbatim — into the cloud
+inside the object built to prevent exactly that. A specific is `the 14th`, `Friday`,
+`$120`. It is never a phrase.
+
+**Licensing is by anchored match, not substring containment.** `$120` in `facts` must
+not license a draft that says `$12`, and `8/14/2026` must not license `8/14`. A
+bidirectional `in` check licenses every prefix of every specific, which turns the
+fabrication gate into a generator of *wrong* commitments in the user's own name — worse
+than the invented ones it was built to stop.
+
+**Known and bounded:** spelled-out numbers (`seven`, `the fourteenth`), abbreviated
+weekdays (`next thurs`), lowercase places (`the ferry building`) and single first names
+(`Sarah`) are not extracted today, so a draft can name them freely. Those are the four
+highest-frequency fabrications in real texting. Ship it if you ship it, but say so on
+the trust page rather than describing the gate as complete.
+
 ### The length gate, corrected 2 Aug
 
 The original spec said "within 2× the user's median message length." That is too tight
@@ -308,6 +327,18 @@ differently has to be pinned. Three are:
 - **Don't ship reciprocity.** Across 25 real relationships the spread was 0.465–0.615,
   sd 0.034 — it carries almost no information, and it is the most legally dangerous
   metric in the category. Momentum (0.0×–13.9×) is where the signal is.
+
+  *Corrected 2 Aug:* several prompts asked for `grep -rin 'reciproc' <dir>` to return
+  nothing. **That criterion is unsatisfiable and it was wrong.** The foundation's own
+  `Contracts.swift` and `FoundationTests.swift` explain why the metric is excluded, a
+  track cannot edit a frozen file, and build artifacts inherit the string. Worse, it
+  punishes exactly the behaviour we want: documenting *why* a tempting metric is absent
+  is how the decision survives the next engineer who rediscovers it.
+
+  The real criterion: **no code computes it, and nothing renders it.** Verify by reading
+  the metric library and the card's string list, not by grepping for a substring. A
+  comment naming the thing you refused to build is evidence of judgement, not a
+  violation.
 - **Degrade, never fabricate.** No drafts beats bad drafts. A vague gist beats a
   hallucinated one. "Haven't seen your Mac since Sunday" beats a confident wrong
   answer.

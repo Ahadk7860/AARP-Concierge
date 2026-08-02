@@ -83,41 +83,46 @@
         "amounts",
         "names"
       ],
-      "description": "THE FABRICATION GATE ALLOWLIST. A draft may reference a specific only if it appears here.",
+      "description": "THE FABRICATION-GATE ALLOWLIST, and it crosses the digest boundary. Every string here is subject to the same no-verbatim rule as `gist` itself. Max 3 words and 40 chars per entry: a specific is 'the 14th' or 'Friday' or '$120', never a phrase. Four consecutive capitalised words is not a place, it is somebody's sentence.",
       "properties": {
         "dates": {
           "type": "array",
           "items": {
             "type": "string",
-            "maxLength": 40
+            "maxLength": 40,
+            "pattern": "^\\S+(?:\\s+\\S+){0,2}$"
           }
         },
         "times": {
           "type": "array",
           "items": {
             "type": "string",
-            "maxLength": 40
+            "maxLength": 40,
+            "pattern": "^\\S+(?:\\s+\\S+){0,2}$"
           }
         },
         "places": {
           "type": "array",
           "items": {
             "type": "string",
-            "maxLength": 60
+            "maxLength": 40,
+            "pattern": "^\\S+(?:\\s+\\S+){0,2}$"
           }
         },
         "amounts": {
           "type": "array",
           "items": {
             "type": "string",
-            "maxLength": 30
+            "maxLength": 40,
+            "pattern": "^\\S+(?:\\s+\\S+){0,2}$"
           }
         },
         "names": {
           "type": "array",
           "items": {
             "type": "string",
-            "maxLength": 60
+            "maxLength": 40,
+            "pattern": "^\\S+(?:\\s+\\S+){0,2}$"
           }
         }
       }
