@@ -382,7 +382,9 @@ def test_register_match_is_exact_on_all_three_axes():
 def test_the_review_file_is_written_and_human_readable(tmp_path):
     db = _conversation(tmp_path)
     cases = build_cases(str(db), salt=SALT, limit=10)
-    results = [run_model("oracle", cases, 100)]
+    # A real model row, not the oracle: controls are excluded from this file by design
+    # (see test_the_review_file_never_reviews_the_oracle).
+    results = [run_model("oracle", cases, 100), _terse_result(cases)]
 
     path = write_review_file(results, cases, tmp_path / "review.txt", pairs=5)
     text = path.read_text()
@@ -450,3 +452,114 @@ def test_the_price_source_is_always_recorded():
     for model, price in PRICING.items():
         assert price["source"], model
         assert {"in", "out"} <= set(price), model
+
+
+# ---- PASS 2: the review file is the send-rate kill test, so it must be able to fail --
+
+
+class _Terse:
+    """A stand-in live model: answers, but with something other than the real reply."""
+
+    model_id = "terse-model"
+
+    def __init__(self) -> None:
+        self.last_usage = {"input_tokens": 10, "output_tokens": 5}
+
+    def complete(self, system, cached_prefix, suffix):
+        return json.dumps(
+            {
+                "candidates": [
+                    {"stance": "answer", "text": "yeah im in"},
+                    {"stance": "defer", "text": "lmk tmrw"},
+                ]
+            }
+        )
+
+
+def _terse_result(cases):
+    from boi_intel.draft import draft
+    from boi_intel.eval import ModelResult, score_case
+
+    r = ModelResult(model="terse-model")
+    provider = _Terse()
+    for case in cases:
+        bundle = draft(case.voice_pack, case.gist, provider=provider, as_of="2026-08-01T00:00:00Z")
+        r.cases.append(score_case(case, bundle, 12, provider.last_usage))
+    return r
+
+
+def test_the_review_file_never_reviews_the_oracle(tmp_path):
+    """`OracleProvider` emits the message the user already sent, so a max-by-answered
+    pick always chose it — asking the reviewer whether they would send something they
+    demonstrably already sent. Guaranteed ~100% send rate, zero information, from the
+    one artifact whose job is to be able to come back bad."""
+    db = _conversation(tmp_path)
+    cases = build_cases(str(db), salt=SALT, limit=8)
+
+    oracle = run_model("oracle", cases, 100)
+    terse = _terse_result(cases)
+    assert len(oracle.answered) >= len(terse.answered), "oracle should win on volume"
+
+    path = write_review_file([oracle, terse], cases, tmp_path / "review.txt", pairs=5)
+    text = path.read_text()
+
+    assert "model: terse-model" in text
+    assert "model: oracle" not in text
+    # the real replies appear only on the "what they actually sent" lines
+    for case in cases[:5]:
+        assert text.count(case.actual_reply) <= 1
+
+
+def test_the_review_file_refuses_loudly_when_only_controls_answered(tmp_path):
+    """A reviewer handed an oracle-built file would mark 20/20 send and conclude the
+    feature ships. Silence here would be the most expensive kind."""
+    db = _conversation(tmp_path)
+    cases = build_cases(str(db), salt=SALT, limit=5)
+
+    text = write_review_file(
+        [run_model("oracle", cases, 100), run_model("fake", cases, 100)],
+        cases,
+        tmp_path / "review.txt",
+    ).read_text()
+
+    assert "NOT A SEND-RATE TEST" in text
+    assert "[ ] send" not in text, "no reviewable pairs may be offered"
+
+
+def test_a_real_model_still_produces_a_reviewable_file(tmp_path):
+    db = _conversation(tmp_path)
+    cases = build_cases(str(db), salt=SALT, limit=5)
+    text = write_review_file(
+        [run_model("oracle", cases, 100), _terse_result(cases)],
+        cases,
+        tmp_path / "review.txt",
+        pairs=3,
+    ).read_text()
+    assert "[ ] send" in text and "[ ] edit" in text and "[ ] delete" in text
+    assert "NOT A SEND-RATE TEST" not in text
+
+
+# ---- PASS 2: gist_id must be stable ACROSS processes ----------------------------
+
+
+def test_gist_ids_are_stable_across_processes(tmp_path):
+    """`hash()` is seed-randomised per process. The existing determinism test builds
+    both sets inside ONE process, so it could never catch that — the same shape as the
+    cache-key test that passed against the pure helper while the caller was wrong."""
+    import subprocess
+    import sys as _sys
+
+    db = _conversation(tmp_path)
+    script = (
+        "from boi_intel.evalset import build_cases;"
+        f"print(' '.join(c.gist['gist_id'] for c in build_cases({str(db)!r},"
+        " limit=4, salt=b'eval-test-salt')))"
+    )
+    runs = [
+        subprocess.run(
+            [_sys.executable, "-c", script], capture_output=True, text=True, cwd=str(ROOT)
+        ).stdout.strip()
+        for _ in range(3)
+    ]
+    assert runs[0], runs
+    assert all(r == runs[0] for r in runs), runs

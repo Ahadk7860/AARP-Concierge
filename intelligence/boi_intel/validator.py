@@ -161,8 +161,16 @@ def fabricated_specifics(text: str, facts: dict) -> list[str]:
     guarantee disagreement: the gist would license "the 14th" and the gate would object
     to "14th".
 
-    Containment counts in both directions — a draft saying "14th" against a licensed
-    "the 14th" is naming the same day, not inventing one.
+    Containment counts in both directions, but only when it is **anchored on token
+    boundaries** — a draft saying "14th" against a licensed "the 14th" is naming the
+    same day, whereas "$12" against a licensed "$120" is a different number.
+
+    Bare substring matching got this catastrophically wrong: every prefix of a licensed
+    specific was licensed, so a gist recording that somebody is owed **$120** licensed a
+    draft committing to **$12**. That is the gate itself generating a wrong commitment in
+    the user's own name, which is worse than the invented ones it exists to stop —
+    an invented number is at least obviously unfamiliar, while a plausible wrong one gets
+    sent.
     """
     allowed = [
         _normalise(v)
@@ -175,10 +183,27 @@ def fabricated_specifics(text: str, facts: dict) -> list[str]:
     for key in ("dates", "times", "places", "amounts", "names"):
         for value in found.get(key, []):
             norm = _normalise(value)
-            if any(norm in a or a in norm for a in allowed):
+            if any(_licenses(a, norm) for a in allowed):
                 continue
             unlicensed.append(value)
     return unlicensed
+
+
+def _token_aligned(needle: str, haystack: str) -> bool:
+    """`needle` occurs in `haystack` bounded by non-word characters on both sides.
+
+    "12" is token-aligned in "$12 total" and NOT in "$120", which is the whole point.
+    """
+    if not needle:
+        return False
+    return re.search(rf"(?<!\w){re.escape(needle)}(?!\w)", haystack) is not None
+
+
+def _licenses(licensed: str, found: str) -> bool:
+    """Does an allowlisted specific license this one? Both already normalised."""
+    if licensed == found:
+        return True
+    return _token_aligned(found, licensed) or _token_aligned(licensed, found)
 
 
 def fabrication_failures(candidates: list[dict], gist: dict) -> bool:

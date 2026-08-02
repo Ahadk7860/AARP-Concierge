@@ -10,7 +10,13 @@ and carried into a document that crosses the boundary to the cloud.
 from __future__ import annotations
 
 import pytest
-from boi_intel.facts import MAX_FACT_WORDS, MAX_PER_CATEGORY, extract_facts, infer_topic
+from boi_intel.facts import (
+    MAX_FACT_CHARS,
+    MAX_FACT_WORDS,
+    MAX_PER_CATEGORY,
+    extract_facts,
+    infer_topic,
+)
 
 CATEGORIES = ("dates", "times", "places", "amounts", "names")
 
@@ -168,3 +174,76 @@ def test_topic_is_never_a_quotation():
     topic = infer_topic(messages)
     assert topic is None or topic not in messages[0]
     assert topic is None or len(topic) <= 40
+
+
+# ------------------------- PRIVACY: facts must never carry the other person's prose
+# Pass 2 finding. `facts.places` captured up to four consecutive capitalised words, so
+# "we ended up at Jenny And Marks Wedding Reception" produced
+# places: ['Jenny And Marks Wedding'] — verbatim inbound prose inside the object built
+# to keep it out, crossing to the cloud. CONTRACTS.md § 1 now bounds an entry to
+# 3 words / 40 chars and gist.v1 enforces it.
+
+
+@pytest.mark.parametrize(
+    "message,must_not_survive",
+    [
+        (
+            "we ended up at Jenny And Marks Wedding Reception",
+            ("jenny", "marks", "wedding", "reception"),
+        ),
+        ("meet me at The Old Red Lion Pub", ("old", "red", "lion", "pub")),
+        (
+            "ill be at Grand Central Station Main Concourse",
+            ("main", "concourse"),
+        ),
+        ("it was at The Museum Of Modern Art Cafe", ("modern", "art", "cafe")),
+    ],
+)
+def test_a_long_capitalised_run_is_dropped_whole_not_sliced(message, must_not_survive):
+    """Dropped, not truncated.
+
+    Bounding the pattern instead would emit two plausible 3-word spans of the same
+    sentence — the same leak wearing a better shape. Note this does NOT assert "no fact
+    is a substring of the message": every legitimate fact is, by construction. What must
+    not survive is the *identifying* multi-word proper-noun run.
+    """
+    facts = extract_facts([message])
+    flat = " ".join(v.lower() for values in facts.values() for v in values)
+    for token in must_not_survive:
+        assert token not in flat, f"{token!r} survived in {facts}"
+    for category, values in facts.items():
+        for value in values:
+            assert len(value.split()) <= MAX_FACT_WORDS, f"{category}: {value!r}"
+
+
+def test_a_generic_venue_word_is_not_identifying_and_may_survive():
+    """ "the museum" comes from a closed vocabulary, not from the capitalised-run
+    pattern. It licenses a draft to say "the museum" and identifies nobody."""
+    places = extract_facts(["it was at The Museum Of Modern Art Cafe"])["places"]
+    assert places == ["The Museum"], places
+
+
+def test_short_confident_spans_still_survive():
+    """The fix must not empty the allowlist — under-population makes drafts vague."""
+    assert "Ferry Building" in extract_facts(["lets meet at the Ferry Building"])["places"]
+    assert "Grand Central Station" in extract_facts(["ill be at Grand Central Station"])["places"]
+    assert "Jordan Feldman" in extract_facts(["Jordan Feldman is coming"])["names"]
+    assert "john smith" in extract_facts(["ill ask john smith about it"])["names"]
+
+
+def test_every_fact_satisfies_the_gist_schema_bound():
+    """`^\\S+(?:\\s+\\S+){0,2}$` and maxLength 40, straight from gist.v1."""
+    import re as _re
+
+    pattern = _re.compile(r"^\S+(?:\s+\S+){0,2}$")
+    messages = [
+        "are you still coming on the 14th",
+        "we ended up at Jenny And Marks Wedding Reception",
+        "meet me at the Ferry Building at 3pm",
+        "you owe me $40 for the tickets",
+        "Jordan Feldman and maria garcia are coming",
+    ]
+    for category, values in extract_facts(messages).items():
+        for value in values:
+            assert pattern.match(value), f"{category}: {value!r} is more than 3 words"
+            assert len(value) <= MAX_FACT_CHARS, f"{category}: {value!r} exceeds 40 chars"

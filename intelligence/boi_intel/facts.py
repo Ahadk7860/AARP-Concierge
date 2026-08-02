@@ -103,8 +103,13 @@ _AMOUNT_PATTERNS = [
 # end of one message and into the next, splicing two people's sentences into one "fact".
 _PLACE_PATTERNS = [
     (
+        # MAXIMAL run, deliberately unbounded. `_is_a_token` then DROPS anything over
+        # the 3-word bound rather than keeping a prefix of it. Bounding the pattern
+        # instead would slice "Jenny And Marks Wedding Reception" into two plausible
+        # 3-word spans and emit both — still the other person's prose, now wearing a
+        # shape that looks like a legitimate fact.
         r"\b(?:at|in|to|near|by)[^\S\n]+(?:the[^\S\n]+)?"
-        r"([A-Z][\w'&-]+(?:[^\S\n]+[A-Z][\w'&-]+){0,3})\b",
+        r"([A-Z][\w'&-]+(?:[^\S\n]+[A-Z][\w'&-]+)*)\b",
         _CS,
     ),
     (
@@ -119,12 +124,20 @@ _PLACE_PATTERNS = [
 _NAME_PATTERNS = [
     # Capitalised full name. Case-sensitive on purpose — under IGNORECASE this pattern
     # degrades into "any two to four words" and starts harvesting whole sentences.
-    (r"\b[A-Z][a-z]{1,20}(?:[^\S\n]+[A-Z][a-z]{1,20}){1,3}\b", _CS),
+    # Also maximal, for the same reason: a five-word capitalised run is a venue or a
+    # title, not a person, and it is dropped whole rather than chopped to fit.
+    (r"\b[A-Z][a-z]{1,20}(?:[^\S\n]+[A-Z][a-z]{1,20})+\b", _CS),
 ]
 
 # A fact is a token, not a clause. Anything longer is a prose span that slipped through
 # a pattern, and prose spans are exactly what must not cross the boundary.
-MAX_FACT_WORDS = 5
+#
+# CONTRACTS.md § 1 bounds a facts entry to 3 words / 40 chars, and `gist.v1` now enforces
+# it with `^\S+(?:\s+\S+){0,2}$`. At the old cap of 5 the capitalised-place pattern
+# harvested "Jenny And Marks Wedding" out of "we ended up at Jenny And Marks Wedding
+# Reception" — the other person's prose, verbatim, inside the object built to keep it out.
+MAX_FACT_WORDS = 3
+MAX_FACT_CHARS = 40
 
 # Words that pass the ordinal/weekday shapes but are not dates in context.
 _DATE_STOPWORDS = frozenset({"may"})
@@ -221,7 +234,7 @@ def extract_facts(messages: list[str]) -> dict[str, list[str]]:
     amounts = _findall(_AMOUNT_PATTERNS, messages)
     names = _findall(_NAME_PATTERNS, messages) + _lowercase_names(messages)
 
-    resolved_places = _dedupe_preserving_order(places, MAX_PER_CATEGORY, 60)
+    resolved_places = _dedupe_preserving_order(places, MAX_PER_CATEGORY, MAX_FACT_CHARS)
     # A capitalised venue matches the full-name pattern too. Listing "Ferry Building"
     # as both a place and a person is not harmful — the allowlist permits the same
     # string either way — but it spends two slots on one referent and misreports what
@@ -230,11 +243,11 @@ def extract_facts(messages: list[str]) -> dict[str, list[str]]:
     names = [n for n in names if n.lower() not in place_keys]
 
     return {
-        "dates": _dedupe_preserving_order(dates, MAX_PER_CATEGORY, 40),
-        "times": _dedupe_preserving_order(times, MAX_PER_CATEGORY, 40),
+        "dates": _dedupe_preserving_order(dates, MAX_PER_CATEGORY, MAX_FACT_CHARS),
+        "times": _dedupe_preserving_order(times, MAX_PER_CATEGORY, MAX_FACT_CHARS),
         "places": resolved_places,
-        "amounts": _dedupe_preserving_order(amounts, MAX_PER_CATEGORY, 30),
-        "names": _dedupe_preserving_order(names, MAX_PER_CATEGORY, 60),
+        "amounts": _dedupe_preserving_order(amounts, MAX_PER_CATEGORY, MAX_FACT_CHARS),
+        "names": _dedupe_preserving_order(names, MAX_PER_CATEGORY, MAX_FACT_CHARS),
     }
 
 

@@ -17,6 +17,7 @@ built from a slice that ends strictly before its own cutoff, and
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 
 from boi_intel import chatdb
@@ -186,7 +187,13 @@ def build_cases(
             gist = producer.produce(contact_id, stats, state, as_of)
             # Make the gist id unique per case so a provider keyed on it, and any cache,
             # cannot collapse two different moments into one.
-            gist["gist_id"] = f"g_{abs(hash((contact_id, cutoff))) % (16**12):012x}"
+            # sha256, NOT Python's hash(): PYTHONHASHSEED is randomised per process, so
+            # `hash()` here made gist_ids differ between runs while the determinism test
+            # — which builds both sets inside one process — could never see it. Same
+            # shape as the cache-key test that passed against the pure helper while the
+            # caller was wrong.
+            digest = hashlib.sha256(f"{contact_id}|{cutoff}".encode()).hexdigest()
+            gist["gist_id"] = f"g_{digest[:12]}"
             gist["facts"] = extract_facts(pending)
             gist["topic"] = infer_topic(pending)
 

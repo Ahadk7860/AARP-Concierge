@@ -43,6 +43,10 @@ from boi_intel.providers.kimi import KimiProvider
 from boi_intel.register import EMOJI
 
 DEFAULT_MODELS = ("oracle", "fake")
+
+# Instruments, not candidates. They calibrate the metrics and prove determinism;
+# they must never be the source of the human review file. See `write_review_file`.
+CONTROL_MODELS = frozenset({"oracle", "fake"})
 REVIEW_PAIRS = 20
 HELD_OUT_PAIRS = 50
 
@@ -449,6 +453,10 @@ def render_table(results: list[ModelResult]) -> str:
     lines.append("")
     lines.append("reg  = register match vs the real reply (case, terminal period, emoji),")
     lines.append("       best of the two candidates — the user picks one.")
+    lines.append("       CAVEAT: three bits, and the validator's register_gate already")
+    lines.append("       pre-filtered two of them, so a high score here is near-structural.")
+    lines.append("       This column CANNOT settle one model against another. Use `pass`,")
+    lines.append("       `failure_counts` and the send/edit/delete review file for that.")
     lines.append("Δlen = median (draft length - real reply length), in characters.")
     lines.append("pass = validator pass rate over ALL cases, degraded ones included.")
     lines.append("ans  = cases the provider actually answered; the rest had no recording.")
@@ -467,8 +475,20 @@ def write_review_file(
     by_id = {c.case_id: c for c in cases}
     labels = {cid: f"Person {i + 1}" for i, cid in enumerate(sorted({c.contact_id for c in cases}))}
 
-    live = [r for r in results if not r.skipped_reason and r.answered]
+    # The oracle is EXCLUDED here, and that exclusion is the point of the file.
+    #
+    # `OracleProvider` emits the message the user already sent, so it answers every case
+    # and would always win a max-by-answered contest. The reviewer would then be asked
+    # whether they would send a message they demonstrably already sent — a guaranteed
+    # ~100% send rate carrying zero information, from the one artifact whose whole job
+    # is to be able to come back bad. This file is the send-rate kill test for the
+    # drafting feature; a kill test that cannot fail is not a test.
+    live = [
+        r for r in results if not r.skipped_reason and r.answered and r.model not in CONTROL_MODELS
+    ]
     chosen = max(live, key=lambda r: len(r.answered)) if live else None
+
+    control_only = not live and any(r.model in CONTROL_MODELS and r.answered for r in results)
 
     out = [
         "BOI DRAFT REVIEW",
@@ -484,7 +504,19 @@ def write_review_file(
     ]
 
     if chosen is None:
-        out.append("No model produced candidates, so there is nothing to review.")
+        if control_only:
+            # Loud, not silent. A reviewer handed a file built from the oracle would
+            # mark 20/20 send and conclude the feature ships.
+            out += [
+                "!! NO REAL MODEL ANSWERED — THIS FILE IS NOT A SEND-RATE TEST !!",
+                "",
+                "Only control rows (oracle / fake) produced candidates. The oracle",
+                "replays what the user already sent, so reviewing it would return ~100%",
+                "send and mean nothing. Re-run with a live model before using this to",
+                "decide whether the feature ships.",
+            ]
+        else:
+            out.append("No model produced candidates, so there is nothing to review.")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("\n".join(out) + "\n")
         return path

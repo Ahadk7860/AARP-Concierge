@@ -484,3 +484,56 @@ def test_the_cli_exits_zero_on_a_passing_bundle(tmp_path):
         ]
     )
     assert rc == 0
+
+
+# ---- PASS 2: a prefix of a licensed specific is NOT licensed --------------------
+# Bare substring containment meant a gist recording $120 licensed a draft committing to
+# $12 — the gate generating a WRONG commitment in the user's name, worse than the
+# invented ones it exists to stop. Containment is now anchored on token boundaries.
+
+
+def _facts(**kw):
+    return {k: kw.get(k, []) for k in ("dates", "times", "places", "amounts", "names")}
+
+
+@pytest.mark.parametrize(
+    "draft_text,licensed,refused",
+    [
+        # the reported bug, both directions
+        ("ill send you $12", _facts(amounts=["$120"]), True),
+        ("ill send you $1200", _facts(amounts=["$120"]), True),
+        ("ill send you $120", _facts(amounts=["$120"]), False),
+        ("ill pay 12 dollars", _facts(amounts=["120 dollars"]), True),
+        ("ill pay 120 dollars", _facts(amounts=["120 dollars"]), False),
+        # times are numbers too
+        ("see you at 10", _facts(times=["100"]), True),
+        ("see you at 10", _facts(times=["10"]), False),
+        # the legitimate shortening that must keep working
+        ("still on for 14th", _facts(dates=["the 14th"]), False),
+        ("still on for the 14th", _facts(dates=["14th"]), False),
+        ("see you on the 23rd", _facts(dates=["the 14th"]), True),
+    ],
+)
+def test_a_prefix_of_a_licensed_specific_is_not_licensed(draft_text, licensed, refused):
+    assert bool(fabricated_specifics(draft_text, licensed)) is refused
+
+
+def test_the_licensing_predicate_is_token_anchored():
+    from boi_intel.validator import _licenses
+
+    assert _licenses("the 14th", "14th")  # word-boundary aligned: same day
+    assert _licenses("14th", "the 14th")
+    assert _licenses("friday", "friday")
+    assert not _licenses("$120", "$12")  # mid-token: a different number
+    assert not _licenses("$12", "$120")
+    assert not _licenses("100", "10")
+    assert not _licenses("10", "100")
+
+
+def test_the_money_case_end_to_end_through_the_gate():
+    """A draft committing to the wrong amount must degrade to zero candidates."""
+    gist = dict(MAYA_GIST, facts=_facts(amounts=["$120"]))
+    failures = validate_candidates(
+        _pair("ok ill venmo you $12 tonight", "lmk tmrw"), gist, MAYA_PACK
+    )
+    assert "fabrication_gate" in failures, failures

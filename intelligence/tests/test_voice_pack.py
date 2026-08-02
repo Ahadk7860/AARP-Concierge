@@ -650,3 +650,79 @@ def test_the_same_salt_yields_the_same_contact_id_across_runs(tmp_path):
     c = build_packs(str(db), salt=b"different", as_of="2026-08-01T00:00:00Z")
     assert list(a) == list(b)
     assert list(a) != list(c), "a different salt must produce different contact ids"
+
+
+def test_the_users_own_tapback_on_an_INBOUND_message_never_becomes_an_exemplar():
+    """The privacy-relevant tapback variant, which was unpinned until Pass 2.
+
+    When the user reacts to something the OTHER person wrote, Messages stores a row with
+    `is_from_me = 1` whose text is `Loved "<their sentence>"` — the other person's words,
+    verbatim, inside a row the `is_from_me` filter waves straight through. The existing
+    tapback test used a tapback on the user's OWN message, so it never exercised this.
+
+    CONTRACTS.md § 7's correction makes `COALESCE(associated_message_type, 0) = 0` the
+    whole defence here: redaction cannot help, because the quoted sentence is ordinary
+    prose with nothing to redact.
+    """
+    import sqlite3
+    import tempfile
+    from datetime import UTC, datetime, timedelta
+
+    from conftest import SCHEMA, to_apple_ns
+
+    tmp = pathlib.Path(tempfile.mkdtemp())
+    db = tmp / "chat.db"
+    their_secret = "the biopsy came back clear thank god"
+
+    con = sqlite3.connect(db)
+    con.executescript(SCHEMA)
+    cur = con.cursor()
+    cur.execute(
+        "INSERT INTO handle (id, service, country) VALUES (?,?,?)",
+        ("+15550100321", "iMessage", "us"),
+    )
+    hid = cur.lastrowid
+    cur.execute(
+        "INSERT INTO chat (guid, style, chat_identifier, service_name) VALUES (?,?,?,?)",
+        ("iMessage;-;+15550100321", 45, "+15550100321", "iMessage"),
+    )
+    cid = cur.lastrowid
+    cur.execute("INSERT INTO chat_handle_join VALUES (?,?)", (cid, hid))
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+
+    def add(guid, text, from_me, hours, assoc_type=0, assoc_guid=None):
+        when = start + timedelta(hours=hours)
+        cur.execute(
+            """INSERT INTO message (guid, text, handle_id, service, date, is_from_me,
+                                    associated_message_guid, associated_message_type)
+               VALUES (?,?,?,?,?,?,?,?)""",
+            (
+                guid,
+                text,
+                0 if from_me else hid,
+                "iMessage",
+                to_apple_ns(when),
+                from_me,
+                assoc_guid,
+                assoc_type,
+            ),
+        )
+        cur.execute(
+            "INSERT INTO chat_message_join VALUES (?,?,?)", (cid, cur.lastrowid, to_apple_ns(when))
+        )
+
+    for i in range(6):
+        add(f"S-{i}", f"ok that works for me {i}", 1, i)
+    add("THEIRS", their_secret, 0, 7)
+    # The user taps back on THEIR message: is_from_me = 1, text quotes their sentence.
+    add("TAP", f'Loved "{their_secret}"', 1, 8, assoc_type=2000, assoc_guid="p:0/THEIRS")
+    con.commit()
+    con.close()
+
+    packs = build_packs(str(db), salt=b"tapback-test", as_of="2026-08-01T00:00:00Z")
+    assert packs
+    for name, pack in packs.items():
+        blob = _texts(pack)
+        assert their_secret not in blob, f"inbound prose leaked via a tapback into {name}"
+        assert "biopsy" not in blob, f"inbound prose leaked via a tapback into {name}"
+        assert "Loved" not in blob, f"tapback text became an exemplar in {name}"

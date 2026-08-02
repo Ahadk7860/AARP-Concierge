@@ -479,6 +479,74 @@ real leaks** — the second was latent and had nothing to do with the amendment:
 
 Both fixes verified to bite by reverting them and watching the new tests fail.
 
+### Pass 2 — three fixes landed, two follow-ups recorded
+
+All three verified to bite by reverting each fix and watching the new tests fail.
+
+1. **PRIVACY — `facts` carried the other person's prose.** The capitalised-run patterns
+   matched up to four words, so `"we ended up at Jenny And Marks Wedding Reception"`
+   produced `places: ['Jenny And Marks Wedding']` — inbound prose, verbatim, inside the
+   object built to keep it out, crossing to the cloud. `MAX_FACT_WORDS` is now 3 and
+   `MAX_FACT_CHARS` 40, matching CONTRACTS.md § 1 and the `gist.v1` pattern
+   `^\S+(?:\s+\S+){0,2}$`.
+   **Capping the pattern was not enough and was briefly worse:** bounding the regex to
+   3 words made it emit *two* plausible 3-word spans of the same sentence
+   (`['Jenny And Marks', 'Wedding Reception']`) — the same leak in a shape that looks
+   more like a legitimate fact. The patterns now match the **maximal** run and
+   `_is_a_token` **drops** anything over the bound rather than keeping a prefix. Short
+   confident spans still survive (`Ferry Building`, `Grand Central Station`,
+   `Jordan Feldman`, `john smith`), so the allowlist is not emptied.
+   One deliberate non-change: `"The Museum"` still survives from
+   `"The Museum Of Modern Art Cafe"`, because it comes from the closed venue vocabulary
+   (`museum`), not the capitalised-run pattern. It is a category word that identifies
+   nobody. Pinned by its own test so the distinction is explicit rather than accidental.
+   The reviewer was right that the old no-verbatim tests could not catch this: they
+   inspected `g["gist"]` only and required a six-word run against a five-word cap. The
+   new tests assert over **every** `facts` category.
+
+2. **`$120` licensed `$12`.** `fabricated_specifics` used bare substring containment in
+   both directions, so every prefix of a licensed specific was licensed. A gist recording
+   that somebody is owed $120 licensed a draft committing to $12 — **the gate itself
+   generating a wrong commitment in the user's name**, which is worse than the invented
+   ones it exists to stop, because an invented number is at least unfamiliar while a
+   plausible wrong one gets sent. Containment is now anchored on token boundaries
+   (`_token_aligned`): `"14th"` against `"the 14th"` still licenses, `"$12"` against
+   `"$120"` does not, in either direction. Ten parametrised cases plus an end-to-end gate
+   test.
+
+3. **The oracle won the bake-off and hollowed out the kill test.**
+   `write_review_file` picked `max(len(answered))`, and `OracleProvider` replays the
+   message the user already sent, so it answered every case and always won. The reviewer
+   would then have been asked whether they would send something they demonstrably already
+   sent — a guaranteed ~100% send rate carrying zero information, from the one artifact
+   whose whole job is to be able to come back bad. `CONTROL_MODELS` (`oracle`, `fake`) are
+   now excluded from the file, and when only controls answered it refuses **loudly**
+   (`!! NO REAL MODEL ANSWERED — THIS FILE IS NOT A SEND-RATE TEST !!`) with no
+   reviewable pairs offered, rather than quietly producing something that reads fine.
+
+Also done, both from the reviewer's "worth doing":
+
+- **`register_match` cannot settle one model against another**, and the table now says
+  so in its own footnote. It is three bits — lowercase start, terminal period, emoji —
+  and `register_gate` already pre-filtered two of them before scoring, so a high score is
+  near-structural. Both Gemini rows scored 100%. Use `pass`, `failure_counts` and the
+  send/edit/delete file to separate models; do not use this column.
+- **`evalset` used Python's `hash()` for `gist_id`**, which is seed-randomised per
+  process, so ids differed between runs while the determinism test — building both sets
+  inside one process — could never see it. Exactly the shape of the cache-key test that
+  passed against the pure helper while the caller was wrong. Now `sha256`, with a new
+  test that shells out to **three separate processes** and compares.
+
+Recorded, not fixed:
+
+- **Mixed-case names fall between both redaction paths.** `FULL_NAME` requires every
+  word capitalised and `_redact_lowercase_names` requires every word lowercase, so
+  `"John smith"` and `"john Smith"` match neither. iOS autocapitalisation produces the
+  first form routinely — it capitalises the sentence-initial word and leaves the rest —
+  so this is not an edge case on a real corpus. The fix is a third case-insensitive pass
+  gated on the known-given-name list; it is a redaction **behaviour** change and wants
+  its own before/after on real data rather than being slipped in at review time.
+
 ### Prompt 05 — eval harness
 
 - `[prompt 05]` **`oracle` is an added matrix row.** It replays the user's real reply
