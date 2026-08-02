@@ -105,6 +105,26 @@ and attributing a send to the wrong line is exactly the datum you need to be rig
 diagnosing one. Either the real response carries a line (resolve on the first live send,
 § 11 item 1) or `line_id` should be nullable in the contract. Prompt 04 will hit this.
 
+`[prompt 02]` **Idempotency cannot be made durable inside this track, and the DoD's
+wording hides that.** The criterion is "two sends with the same `idempotency_key` result in
+exactly one request reaching the mock." That is satisfied. **"The user is not texted twice"
+is not**, in two distinct ways:
+
+1. The cache is an in-memory `Map` on the `LinqChannel` instance. It dies with the process
+   and is not shared across instances, so two workers — or one worker after a restart —
+   send twice for one key.
+2. The ambiguous outcome is uncovered. If the connection dies *after* the provider accepted
+   the message, the adapter raises `UpstreamError` code `transport` and deliberately does
+   **not** cache, because a request that never arrived must stay retryable. A timeout
+   cannot tell those two cases apart, so a caller that retries double-texts a real person.
+
+Neither is fixable here: the Linq subset documents no idempotency header, and sending one
+would be inventing wire format. **Durable idempotency belongs to Track D** — a persisted
+`(user_id, idempotency_key) -> message_id` record written before the send and settled
+after, so a restart or a second replica finds it. Track D needs to know this; nothing in
+`CONTRACTS.md` says it today. Also worth asking Linq whether `POST /chats` accepts an
+idempotency key at all, since that would collapse the whole problem.
+
 No other gap. Every contract prompts 01 and 02 needed was present and sufficient.
 
 ## Shared file changes
@@ -120,6 +140,14 @@ response against the schema the spec declares.` Node ships no YAML parser, and `
 present only transitively via eslint — too fragile to hang a contract assertion on.
 
 `[prompt 01 corrections] package-lock.json — regenerated with npm install --package-lock-only.`
+
+`[prompt 02 corrections] .env.example — appended six Track C variables to the existing
+"Track C: transport" block: LINQ_LINE_ID, CHANNEL_RATE_LIMIT_MAX,
+CHANNEL_RATE_LIMIT_INTERVAL_MS, CHANNEL_RATE_LIMIT_BEHAVIOUR, CHANNEL_REQUEST_TIMEOUT_MS,
+CHANNEL_CAPABILITIES.` Four were requested; `CHANNEL_RATE_LIMIT_BEHAVIOUR` and
+`CHANNEL_CAPABILITIES` are the other two knobs the adapter reads, and leaving them out
+would have left the file claiming a complete picture it did not have. Strictly appended
+inside Track C's own block — nothing reordered, nothing else touched.
 
 Both appends are strictly additive: one line added to the end of `devDependencies`, 26
 lines added to the lockfile, nothing reordered. Note that `npm install --save-dev` **cannot**
@@ -146,6 +174,11 @@ Format: `[prompt NN] needed <resource> — used <what> provisionally / blocked`
 Track C's assigned 3030–3039 range, so it is assigned-by-range rather than borrowed.
 `[prompt 02] needed the channel test server port — used 3032`, which `CONTRACTS.md` § 9
 assigns to Track C by name.
+
+`[prompt 02 corrections] needed a second throwaway port — used 3034`, inside Track C's
+assigned 3030–3039 range. It runs a stub server that returns error bodies the mock
+deliberately does not serve (an unclassifiable 503, a differently-worded ban, a platform
+500), so the error-mapping paths can be tested without making the mock lax.
 
 The test suite drives the mock through `fastify.inject()` rather than a socket, so it binds
 exactly one real port (3033) and running it never collides with a hand-run server on 3031.
@@ -177,10 +210,15 @@ an append. Documented in `cloud/mock-linq/README.md` instead.
 recipient handles for that user. `outbound.v1` cannot carry them. Nothing in `CONTRACTS.md`
 tells Track D this yet — see `## Contract gaps`.
 
+`[prompt 02] → Track D: durable idempotency is yours.` See `## Contract gaps`. The
+adapter's cache is in-process and cannot survive a restart or span replicas.
+
 `[prompt 02] → Track D: branch on the typed errors, not on strings.` `LineBannedError`,
 `RateLimitedError` (with `.local` distinguishing our limiter from the provider's 429),
-`UpstreamError`, `CapabilityError`, `EmptyMessageError`, all exported from
-`cloud/channel/src/errors.js`. `LineBannedError` is a migration event, never a retry.
+`LineUnavailableError`, `UpstreamError`, `CapabilityError`, `EmptyMessageError`, all
+exported from `cloud/channel/src/errors.js`. Branch on `code` (a closed, provider-neutral
+union) and `retryable`. **Never branch on `diagnostic`** — that holds Linq's own slug and
+HTTP status, for logs only. `LineBannedError` is a migration event, never a retry.
 
 Otherwise nothing is needed from Track A, B, or D. Prompts 01 and 02 reached a green
 checklist using only the foundation stubs and Track C's own code, as `CONTRACTS.md` § 10
@@ -350,6 +388,88 @@ fails. Dropping the idempotency cache, attempting a group send, swallowing `Retr
 mapping `503 line_banned` to a generic throw, leaking `trace_id`, and having `health()`
 report `up` on an unparseable body each fail 1-2 tests. A criterion never observed failing
 is a criterion that has not been tested.
+
+## Prompt 02 — audit corrections
+
+An audit reported that prompt 02's suite never compiled and therefore never ran. **That
+finding did not reproduce**, and the evidence says the audit ran against a tree that had
+the prompt-02 adapter alongside the *pre-correction* prompt-01 mock:
+
+- `bash scripts/gate.sh c` is green at HEAD: typecheck clean, 57 tests executed across two
+  files, lint clean, fixtures valid, ownership OK, no skipped suites.
+- The three symbols the audit cited — `pathPrefixes`, `loadTranscripts`, and the test named
+  "serves both the transcript path…" — have **zero** occurrences at HEAD and exist only at
+  `2d4189e~1`, the commit before the prompt-01 corrections. `2d4189e` is an ancestor of
+  HEAD.
+- The two quoted `tsc` errors are exactly what the prompt-02 test produces against that
+  older mock: `DEV_TOKEN` was not exported and the field was still `pathPrefixes`.
+
+So step 1 of the instruction — "apply the three prompt-01 corrections for real" — was not
+performed, because they were already applied in `2d4189e` and re-applying them would have
+meant fabricating a no-op commit. The rest of the instruction was performed in full.
+
+**The four substantive findings were all real at HEAD, and all are fixed.** Nothing here
+was a false alarm; a stale checkout does not make a design flaw less true.
+
+### a. Idempotency limits — recorded, not silently patched
+
+Recorded as a contract gap for Track D (see `## Contract gaps`). Both failure modes are
+now stated in `cloud/channel/README.md` under the DoD wording they violate: the criterion
+is "one request reached the mock", not "the user was not texted twice". Not fixed here
+because durable idempotency needs storage this track does not own, and inventing an
+idempotency header would be inventing wire format.
+
+### b. Provider semantics leaked through the error surface
+
+`UpstreamError.code` carried Linq's own slug (`line_degraded`, `upstream`) or
+`http_<status>` — and the README told Track D to branch on it. Provider coupling wearing a
+neutral name.
+
+Fixed structurally rather than by convention: `ChannelError.code` is now a **closed union**
+(`ChannelErrorCode`), so `tsc` rejects a provider slug there. The vendor's slug and HTTP
+status moved to `diagnostic: ProviderDiagnostic`, documented log-only. A test collects a
+real error from every failure path and asserts each `code` is in the neutral set and none
+matches `/^http_/`.
+
+The lesson for my own checking: the leakage criterion I ran was a key-set assertion on
+`SendResult` plus a filename grep. Both were blind to the error surface, which is the other
+half of what crosses the boundary. A structural check — a closed type — is worth more than
+either, because it cannot be forgotten.
+
+### c. Ban detection was exact-match while health() was tolerant
+
+`send()` raised `LineBannedError` only on `failure.error === "line_banned"`, a body nobody
+has ever seen; anything else fell through to an error the README marked retryable, so Track
+D would have retried a banned line. Meanwhile `health()` had a forty-line tolerant parser
+for precisely this reason. The inconsistency was the bug.
+
+Now `slugLooksBanned` tokenizes the slug and matches the same `BANNED_WORDS` vocabulary
+`health()` uses, so `account_suspended`, `LINE_BLOCKED` and `line.banned` all raise
+`LineBannedError`. Both call sites share it.
+
+A 503 that still cannot be classified raises the new `LineUnavailableError`:
+`retryable: false`, and the message tells the caller to consult `health()`. Raising
+`LineBannedError` there would trigger a migration on a guess; marking it retryable would
+hammer a line that may already be banned. Same discipline as `health()` returning
+`degraded` rather than `up` on an unparseable body — do not resolve an ambiguity by
+picking the convenient answer.
+
+### d. capabilities() was hardcoded, and three flags are dead
+
+The comment claimed sales-call answers "land here and not in a code change" while the
+values were a frozen literal with no env path. That comment was false as written.
+
+`CHANNEL_CAPABILITIES="groups=1,threading=0"` now overrides them, and an unknown key or
+unparseable value throws rather than being ignored — a silently-dropped override is a
+config change that looks applied and is not.
+
+And the honest part: **`tapbacks`, `richlinks` and `typing` gate no code path anywhere.**
+No outbound block produces them, nothing reads them. They exist because the frozen
+`Capabilities` type has those fields. "Capability negotiation, not assumption" is real for
+`groups`, `images`, `contact_cards` and `threading`, and **vacuous** for the other three
+until something uses them. Stated in the README and asserted by a test that flips all three
+and shows the wire payload is byte-identical, so the criterion cannot keep looking green on
+their behalf.
 
 ## Decisions made
 

@@ -1,4 +1,6 @@
 import { readFileSync } from "node:fs";
+import { createServer } from "node:http";
+import type { IncomingMessage, ServerResponse } from "node:http";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { buildServer, DEV_TOKEN, type MockLinqConfig, type MockLinqServer, type MockMode } from "../../mock-linq/src/server.js";
 import type { Capabilities, OutboundMessage, SendResult } from "../../shared/src/contracts.js";
@@ -6,9 +8,18 @@ import {
   LinqChannel,
   loadLinqChannelConfig,
   parseHealth,
+  slugLooksBanned,
   type LinqChannelConfig,
 } from "./linq-channel.js";
-import { CapabilityError, EmptyMessageError, LineBannedError, RateLimitedError, UpstreamError } from "./errors.js";
+import {
+  CapabilityError,
+  ChannelError,
+  EmptyMessageError,
+  LineBannedError,
+  LineUnavailableError,
+  RateLimitedError,
+  UpstreamError,
+} from "./errors.js";
 import { RateLimiter } from "./rate-limiter.js";
 
 const REPO_ROOT = new URL("../../../", import.meta.url);
@@ -96,6 +107,27 @@ function channel(
     resolveHandles: () => deps.handles ?? [RECIPIENT],
     ...(deps.limiter === undefined ? {} : { limiter: deps.limiter }),
   });
+}
+
+
+/** Stands up a throwaway server that answers POST /chats with a fixed status and body,
+ *  so error mapping can be tested against shapes the mock deliberately does not serve. */
+async function withBody(status: number, body: unknown, fn: (baseUrl: string) => Promise<void>): Promise<void> {
+  const server = createServer((_req: IncomingMessage, res: ServerResponse) => {
+    res.writeHead(status, { "content-type": "application/json" });
+    res.end(JSON.stringify(body));
+  });
+  await new Promise<void>((done) => server.listen(3034, "127.0.0.1", done));
+  try {
+    await fn("http://127.0.0.1:3034/api/partner/v3");
+  } finally {
+    await new Promise<void>((done, fail) => server.close((e: Error | undefined) => (e ? fail(e) : done())));
+  }
+}
+
+/** A 503 with a body no vocabulary recognizes. */
+async function withUnclassified503(fn: (baseUrl: string) => Promise<void>): Promise<void> {
+  await withBody(503, { error: "something_we_have_never_seen", line_id: "line_a1" }, fn);
 }
 
 function lastBody(): Record<string, unknown> {
@@ -193,6 +225,7 @@ describe("LinqChannel — typed errors", () => {
     if (!(err instanceof LineBannedError)) throw new Error("unreachable");
     expect(err.code).toBe("line_banned");
     expect(err.lineId).toBe("line_a1");
+    expect(err.retryable).toBe(false);
   });
 
   it("ratelimited produces RateLimitedError carrying the Retry-After value", async () => {
@@ -215,13 +248,146 @@ describe("LinqChannel — typed errors", () => {
     expect(err).toBeInstanceOf(UpstreamError);
     if (!(err instanceof UpstreamError)) throw new Error("unreachable");
     expect(err.code).toBe("unauthorized");
-    expect(err.status).toBe(401);
+    expect(err.diagnostic.status).toBe(401);
+    expect(err.retryable).toBe(false);
   });
 
   it("degraded is a successful send over sms, not an error", async () => {
     useMode("degraded");
     const result = await channel().send(BRIEF);
     expect(result.protocol).toBe("sms");
+  });
+});
+
+describe("LinqChannel — the error surface is provider-neutral", () => {
+  it("no error code is a provider slug or an HTTP status", async () => {
+    // The audit that prompted this: `code` used to carry Linq's own slug and
+    // `http_<status>`, while the README told Track D to branch on it. The key-set test on
+    // SendResult and the filename grep were both blind to it.
+    const NEUTRAL = new Set([
+      "line_banned",
+      "line_unavailable",
+      "rate_limited",
+      "unauthorized",
+      "provider_unavailable",
+      "malformed_response",
+      "transport",
+      "no_recipient",
+      "unsupported_capability",
+      "empty_message",
+    ]);
+
+    const collected: ChannelError[] = [];
+    const push = async (fn: () => Promise<unknown>) => {
+      const e = await fn().catch((x: unknown) => x);
+      if (e instanceof ChannelError) collected.push(e);
+    };
+
+    useMode("banned");
+    await push(() => channel().send({ ...BRIEF, idempotency_key: "neutral-1" }));
+    useMode("ratelimited");
+    await push(() => channel().send({ ...BRIEF, idempotency_key: "neutral-2" }));
+    useMode("up");
+    await push(() => channel({ token: "wrong" }).send({ ...BRIEF, idempotency_key: "neutral-3" }));
+    await push(() => channel({ baseUrl: "http://127.0.0.1:3039/api/partner/v3" }).send({ ...BRIEF, idempotency_key: "neutral-4" }));
+    await push(() => channel({}, { handles: [RECIPIENT, "+15559998888"] }).send({ ...BRIEF, idempotency_key: "neutral-5" }));
+
+    expect(collected.length).toBeGreaterThanOrEqual(5);
+    for (const err of collected) {
+      expect(NEUTRAL, `code '${err.code}' is not in the neutral set`).toContain(err.code);
+      expect(err.code).not.toMatch(/^http_/);
+      expect(typeof err.retryable).toBe("boolean");
+    }
+  });
+
+  it("the provider slug survives for logs, in diagnostic, not in code", async () => {
+    useMode("banned");
+    const err = await channel().send(BRIEF).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(LineBannedError);
+    if (!(err instanceof LineBannedError)) throw new Error("unreachable");
+    expect(err.diagnostic.slug).toBe("line_banned");
+    expect(err.diagnostic.status).toBe(503);
+    expect(err.code).toBe("line_banned");
+  });
+
+  it("recognizes a ban whatever the provider called it", () => {
+    for (const slug of ["line_banned", "LINE_BANNED", "account_suspended", "line.blocked", "handle-disabled", "terminated"]) {
+      expect(slugLooksBanned(slug), slug).toBe(true);
+    }
+    for (const slug of ["line_degraded", "upstream", "rate_limited", null, "", "abandoned"]) {
+      expect(slugLooksBanned(slug), String(slug)).toBe(false);
+    }
+  });
+
+  it("an unclassifiable 503 is non-retryable, not a generic retryable error", async () => {
+    // Previously a 503 whose body was not exactly {"error":"line_banned"} fell through to
+    // UpstreamError, which the README marks retryable — so Track D would have retried a
+    // line that may well have been banned.
+    await withUnclassified503(async (baseUrl) => {
+      const err = await channel({ baseUrl }).send(BRIEF).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(LineUnavailableError);
+      if (!(err instanceof LineUnavailableError)) throw new Error("unreachable");
+      expect(err.retryable).toBe(false);
+      expect(err.code).toBe("line_unavailable");
+    });
+  });
+
+  it("a differently-worded ban body still raises LineBannedError", async () => {
+    await withBody(503, { error: "account_suspended", line_id: "line_z9" }, async (baseUrl) => {
+      const err = await channel({ baseUrl }).send(BRIEF).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(LineBannedError);
+      if (!(err instanceof LineBannedError)) throw new Error("unreachable");
+      expect(err.lineId).toBe("line_z9");
+      expect(err.retryable).toBe(false);
+    });
+  });
+
+  it("a platform 500 is retryable — it is not a line-level failure", async () => {
+    await withBody(500, { error: "internal" }, async (baseUrl) => {
+      const err = await channel({ baseUrl }).send(BRIEF).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(UpstreamError);
+      if (!(err instanceof UpstreamError)) throw new Error("unreachable");
+      expect(err.code).toBe("provider_unavailable");
+      expect(err.retryable).toBe(true);
+      expect(err.diagnostic.slug).toBe("internal");
+    });
+  });
+});
+
+describe("LinqChannel — capabilities are configuration", () => {
+  it("CHANNEL_CAPABILITIES overrides the defaults", () => {
+    const base = loadLinqChannelConfig({} as NodeJS.ProcessEnv).capabilities;
+    expect(base.groups).toBe(false);
+    expect(base.images).toBe(true);
+
+    const overridden = loadLinqChannelConfig({
+      CHANNEL_CAPABILITIES: "groups=1, images=false ,threading=0",
+    } as NodeJS.ProcessEnv).capabilities;
+    expect(overridden.groups).toBe(true);
+    expect(overridden.images).toBe(false);
+    expect(overridden.threading).toBe(false);
+    expect(overridden.contact_cards).toBe(true);
+  });
+
+  it("refuses an unknown capability or an unparseable value rather than ignoring it", () => {
+    const load = (v: string) => () => loadLinqChannelConfig({ CHANNEL_CAPABILITIES: v } as NodeJS.ProcessEnv);
+    expect(load("carrier_pigeon=1")).toThrow(/unknown capability/);
+    expect(load("groups=maybe")).toThrow(/invalid value/);
+    expect(load("groups")).toThrow(/expected key=value/);
+  });
+
+  it("documents honestly which capabilities gate anything: tapbacks, richlinks and typing do not", async () => {
+    // Flipping the three dead flags changes nothing on the wire. Asserted rather than
+    // left implied, so "negotiated before use" is not read as a guarantee for them.
+    const c = channel({
+      capabilities: { ...loadLinqChannelConfig({} as NodeJS.ProcessEnv).capabilities, tapbacks: false, richlinks: false, typing: false },
+    });
+    await c.send({ ...BRIEF, idempotency_key: "dead-flags-1" });
+    const withFlagsOff = JSON.stringify(lastBody());
+
+    mock.recorder.clear();
+    await channel().send({ ...BRIEF, idempotency_key: "dead-flags-2" });
+    expect(JSON.stringify(lastBody())).toBe(withFlagsOff);
   });
 });
 

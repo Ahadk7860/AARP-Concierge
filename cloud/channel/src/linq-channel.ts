@@ -28,8 +28,10 @@ import {
   CapabilityError,
   EmptyMessageError,
   LineBannedError,
+  LineUnavailableError,
   RateLimitedError,
   UpstreamError,
+  type ProviderDiagnostic,
 } from "./errors.js";
 import { RateLimiter, RateLimitExceeded, type LimitBehaviour } from "./rate-limiter.js";
 
@@ -51,12 +53,21 @@ export type LinqChannelConfig = {
   lineId: string;
   requestTimeoutMs: number;
   rateLimit: { maxPerInterval: number; intervalMs: number; behaviour: LimitBehaviour };
-  /** Every one of these is a guess. The Linq subset documents no capabilities endpoint,
-   *  so they are configuration rather than discovery — which also means the answers from
-   *  the sales call land here and not in a code change.
+  /**
+   * Every one of these is a guess: the Linq subset documents no capabilities endpoint,
+   * so they are configuration rather than discovery. Overridable with
+   * `CHANNEL_CAPABILITIES` so a sales-call answer is a `.env` change.
    *
-   *  `groups` is false on purpose and is not merely unverified: group sends are out of
-   *  MVP scope on consent grounds. */
+   * `groups` is false on purpose and is not merely unverified — group sends are out of
+   * MVP scope on consent grounds.
+   *
+   * BE HONEST ABOUT WHICH OF THESE DO ANYTHING. Only four gate a code path today:
+   * `groups` (refuses a multi-recipient send), `images` and `contact_cards` (drop those
+   * blocks), and `threading` (drops `reply_to`). `tapbacks`, `richlinks` and `typing`
+   * gate nothing anywhere in this repo — no outbound block produces them and no code
+   * reads them. They are declared so the shape matches the frozen `Capabilities` type,
+   * and "negotiated before use" is vacuous for those three until something uses them.
+   */
   capabilities: Capabilities;
 };
 
@@ -75,6 +86,45 @@ function parseInteger(raw: string | undefined, fallback: number, label: string):
   const n = Number.parseInt(raw, 10);
   if (!Number.isInteger(n) || n < 1) throw new Error(`invalid ${label}: ${raw}`);
   return n;
+}
+
+const CAPABILITY_KEYS = [
+  "tapbacks",
+  "images",
+  "groups",
+  "typing",
+  "richlinks",
+  "contact_cards",
+  "threading",
+] as const;
+
+function isCapabilityKey(key: string): key is keyof Capabilities {
+  return (CAPABILITY_KEYS as readonly string[]).includes(key);
+}
+
+/** `CHANNEL_CAPABILITIES="groups=1,typing=true"`. Unknown key or unparseable value
+ *  throws rather than being ignored: a silently-dropped capability override is a
+ *  configuration change that looks applied and is not. */
+function parseCapabilities(raw: string | undefined, base: Capabilities): Capabilities {
+  if (raw === undefined || raw.trim() === "") return { ...base };
+  const out: Capabilities = { ...base };
+  for (const entry of raw.split(",")) {
+    const trimmed = entry.trim();
+    if (trimmed === "") continue;
+    const [key, value] = trimmed.split("=");
+    if (key === undefined || value === undefined) {
+      throw new Error(`invalid CHANNEL_CAPABILITIES entry: ${trimmed} (expected key=value)`);
+    }
+    const name = key.trim();
+    if (!isCapabilityKey(name)) {
+      throw new Error(`unknown capability in CHANNEL_CAPABILITIES: ${name}`);
+    }
+    const v = value.trim().toLowerCase();
+    if (v === "1" || v === "true") out[name] = true;
+    else if (v === "0" || v === "false") out[name] = false;
+    else throw new Error(`invalid value for ${name} in CHANNEL_CAPABILITIES: ${value}`);
+  }
+  return out;
 }
 
 function parseBehaviour(raw: string | undefined): LimitBehaviour {
@@ -98,7 +148,7 @@ export function loadLinqChannelConfig(env: NodeJS.ProcessEnv = process.env): Lin
       intervalMs: parseInteger(env.CHANNEL_RATE_LIMIT_INTERVAL_MS, 60_000, "CHANNEL_RATE_LIMIT_INTERVAL_MS"),
       behaviour: parseBehaviour(env.CHANNEL_RATE_LIMIT_BEHAVIOUR),
     },
-    capabilities: { ...DEFAULT_CAPABILITIES },
+    capabilities: parseCapabilities(env.CHANNEL_CAPABILITIES, DEFAULT_CAPABILITIES),
   };
 }
 
@@ -162,6 +212,24 @@ function readProtocol(value: unknown): SendResult["protocol"] | null {
 const UP_WORDS = new Set(["up", "ok", "active", "healthy", "enabled", "ready"]);
 const BANNED_WORDS = new Set(["banned", "blocked", "suspended", "disabled", "terminated"]);
 const DEGRADED_WORDS = new Set(["degraded", "limited", "throttled", "warning", "partial"]);
+
+/**
+ * Does this provider slug mean "this line is banned"?
+ *
+ * Tolerant on purpose, and for the same reason `parseHealth` is: the only ban body we
+ * have ever seen is a reconstruction. Exact equality against `"line_banned"` means any
+ * other wording — `account_suspended`, `LINE_BLOCKED`, `line.banned` — falls through to a
+ * generic error, and a caller that treats generic errors as retryable then hammers a
+ * banned line. That is the failure mode this whole track exists to avoid, so send() gets
+ * the same tolerance health() already had.
+ */
+export function slugLooksBanned(slug: string | null): boolean {
+  if (slug === null) return false;
+  return slug
+    .toLowerCase()
+    .split(/[^a-z]+/)
+    .some((token) => token !== "" && BANNED_WORDS.has(token));
+}
 
 function classify(word: string): ChannelHealth["status"] | null {
   const normalized = word.trim().toLowerCase();
@@ -262,7 +330,9 @@ export class LinqChannel implements Channel {
     const capabilities = await this.capabilities();
     const to = await this.resolveHandles(msg.user_id);
 
-    if (to.length === 0) throw new UpstreamError("no_recipient", null, null, `no handle for ${msg.user_id}`);
+    if (to.length === 0) {
+      throw new UpstreamError("no_recipient", false, undefined, null, `no handle for ${msg.user_id}`);
+    }
     if (to.length > 1 && !capabilities.groups) {
       // Refused, not attempted. A group send that quietly fans out to individuals is a
       // consent violation, not a formatting problem.
@@ -300,7 +370,7 @@ export class LinqChannel implements Channel {
       const response = await this.get("/lines");
       if (response.status === 200) return parseHealth(response.body, checkedAt);
       const failure = readFailure(response.body);
-      if (failure.error === "line_banned") {
+      if (slugLooksBanned(failure.error)) {
         return { status: "banned", line_id: failure.lineId, checked_at: checkedAt };
       }
       return { status: "degraded", line_id: failure.lineId, checked_at: checkedAt };
@@ -367,22 +437,44 @@ export class LinqChannel implements Channel {
       retryAfter = typeof header === "string" ? header : Array.isArray(header) ? header[0] : undefined;
       payload = await readJson(res);
     } catch (err) {
-      throw new UpstreamError("transport", null, null, `transport failure: ${String(err)}`);
+      // Ambiguous outcome: the provider may have accepted the message before the
+      // connection died. See the idempotency gap recorded in NOTES.md. Retryable only
+      // because there is nothing better to say — the caller must weigh a double-text.
+      throw new UpstreamError("transport", true, { slug: null, status: null }, null, `transport failure: ${String(err)}`);
     }
 
     if (status === 200) {
-      if (!isRecord(payload)) throw new UpstreamError("malformed_response", status, null, "response was not an object");
+      if (!isRecord(payload)) {
+        throw new UpstreamError("malformed_response", false, { slug: null, status }, null, "response was not an object");
+      }
       return payload;
     }
 
     const failure = readFailure(payload);
+    // The provider's own slug and status stop here, in a log-only field. Nothing below
+    // puts either of them somewhere Track D would branch on.
+    const diagnostic: ProviderDiagnostic = { slug: failure.error, status };
+
     if (status === 429) {
       const parsed = retryAfter === undefined ? Number.NaN : Number.parseInt(retryAfter, 10);
-      throw new RateLimitedError(Number.isInteger(parsed) ? parsed : null, false);
+      throw new RateLimitedError(Number.isInteger(parsed) ? parsed : null, false, "rate limited", diagnostic);
     }
-    if (status === 401 || status === 403) throw new UpstreamError("unauthorized", status, failure.lineId);
-    if (status === 503 && failure.error === "line_banned") throw new LineBannedError(failure.lineId);
-    throw new UpstreamError(failure.error ?? `http_${status}`, status, failure.lineId);
+    if (status === 401 || status === 403) {
+      throw new UpstreamError("unauthorized", false, diagnostic, failure.lineId);
+    }
+    if (slugLooksBanned(failure.error)) throw new LineBannedError(failure.lineId, diagnostic);
+    if (status === 503) {
+      // A 503 we cannot classify might be a ban. Not proven enough to raise
+      // LineBannedError and trigger a migration; far too likely to retry. Non-retryable,
+      // and the caller is told to consult health().
+      throw new LineUnavailableError(
+        failure.lineId,
+        diagnostic,
+        "line unavailable; cause unclassified — consult health() rather than retrying",
+      );
+    }
+    // A platform-level failure, as distinct from a line-level one: retryable.
+    throw new UpstreamError("provider_unavailable", status >= 500, diagnostic, failure.lineId);
   }
 
   /** Narrows the provider's response into the frozen `SendResult`, dropping every field
@@ -391,9 +483,17 @@ export class LinqChannel implements Channel {
   private toSendResult(payload: Record<string, unknown>): SendResult {
     const id = readString(payload, "id");
     const protocol = readProtocol(payload["protocol"]);
-    if (id === null) throw new UpstreamError("malformed_response", 200, null, "response carried no id");
+    if (id === null) {
+      throw new UpstreamError("malformed_response", false, { slug: null, status: 200 }, null, "response carried no id");
+    }
     if (protocol === null) {
-      throw new UpstreamError("malformed_response", 200, null, `unrecognized protocol: ${String(payload["protocol"])}`);
+      throw new UpstreamError(
+        "malformed_response",
+        false,
+        { slug: null, status: 200 },
+        null,
+        `unrecognized protocol: ${String(payload["protocol"])}`,
+      );
     }
     return {
       message_id: id,

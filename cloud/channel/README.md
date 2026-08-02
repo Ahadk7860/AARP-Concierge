@@ -24,13 +24,33 @@ matches `linq-channel.ts` and its test, and nothing else.
 Track D branches on these. `ChannelError.code` is a lowercase snake slug per
 `CONTRACTS.md` § 6.
 
-| Error | When | Carries |
-|---|---|---|
-| `LineBannedError` | `503 line_banned` | `lineId` |
-| `RateLimitedError` | `429`, **or** this track's own limiter refusing | `retryAfterSeconds`, `local` |
-| `UpstreamError` | 5xx, 401/403, malformed body, transport failure | `code`, `status`, `lineId` |
-| `CapabilityError` | a send refused before the wire, e.g. a group send | `capability` |
-| `EmptyMessageError` | every block degraded away | — |
+**Branch on `code` and `retryable`. Never on `diagnostic`.** `code` is a closed union of
+provider-neutral slugs, so `tsc` rejects a vendor string there. `diagnostic` carries the
+provider's own slug and HTTP status for logs only — the moment that reaches a conditional
+in Track D, a Linq string is in Track D's control flow and changes when a vendor we cannot
+see edits a response body.
+
+| Error | `code` | `retryable` | When |
+|---|---|---|---|
+| `LineBannedError` | `line_banned` | **false** | any error slug that parses as a ban |
+| `LineUnavailableError` | `line_unavailable` | **false** | a 503 we cannot classify |
+| `RateLimitedError` | `rate_limited` | true, after `retryAfterSeconds` | `429`, or our own limiter |
+| `UpstreamError` | `unauthorized` | false | 401/403 |
+| `UpstreamError` | `provider_unavailable` | true on 5xx | platform failure |
+| `UpstreamError` | `malformed_response` | false | unparseable or unrecognized body |
+| `UpstreamError` | `transport` | true | connection failed — **outcome ambiguous**, see idempotency |
+| `UpstreamError` | `no_recipient` | false | the resolver returned nothing |
+| `CapabilityError` | `unsupported_capability` | false | refused before the wire, e.g. a group send |
+| `EmptyMessageError` | `empty_message` | false | every block degraded away |
+
+Ban detection is **tolerant**, matching `health()`: any slug containing a token in
+`{banned, blocked, suspended, disabled, terminated}` raises `LineBannedError`. Exact
+equality against `"line_banned"` would let `account_suspended` fall through to a generic
+retryable error — and the one body we have ever seen is a reconstruction.
+
+A 503 we cannot classify raises `LineUnavailableError`, not `LineBannedError` and not a
+retryable error. It might be a ban: too little evidence to trigger a migration, far too
+much to retry. Consult `health()`.
 
 `LineBannedError` is the one that matters. Platform uptime can read 100% while a shared
 Apple ID is banned and every user on that line has a dead thread. It is a migration event,
@@ -54,8 +74,15 @@ governs.
   a fabrication of "we sent something".
 
 Capabilities are **configuration, not discovery**: the Linq subset documents no
-capabilities endpoint. Every value is a guess, which also means the sales-call answers land
-in config rather than in a code change.
+capabilities endpoint. Override with `CHANNEL_CAPABILITIES="groups=1,threading=0"`; an
+unknown key or unparseable value throws rather than being silently ignored.
+
+**Only four of the seven gate anything.** `groups`, `images`, `contact_cards` and
+`threading` do what is described above. **`tapbacks`, `richlinks` and `typing` gate no code
+path anywhere in this repo** — no outbound block produces them and nothing reads them. They
+exist because the frozen `Capabilities` type has those fields. "Negotiated before use" is
+vacuous for those three until something uses them, and it is written down here rather than
+left to look green.
 
 ## Health
 
@@ -74,10 +101,21 @@ failure the product rules forbid. Same for unreachable: not healthy, and not pro
 `SendResult` without a second request, and concurrent sends with one key collapse to a
 single request. A **failed** send is not cached, so the retry is allowed through.
 
-The limit worth knowing: this is in-process only. The Linq subset documents no idempotency
-header, and sending one would be inventing wire format — the one thing this track must not
-do. A retry after a process restart can therefore still double-send. That is a sales-call
-question, recorded in `NOTES.md`, not something to paper over here.
+**Two limits worth knowing, both of which can double-text a user.** The DoD this satisfies
+is "one request reached the mock"; it is not "the user was not texted twice".
+
+1. **The cache is an in-memory `Map` on the instance.** It dies with the process and is not
+   shared between instances or replicas. Two workers, or one worker after a restart, will
+   send twice for one key.
+2. **The ambiguous outcome is not covered.** If the connection dies after the provider
+   accepted the message, the adapter raises `UpstreamError` with code `transport` and does
+   not cache — deliberately, since a failure that never reached the provider must be
+   retryable. But a timeout cannot distinguish those two cases, so a caller that retries
+   double-texts.
+
+Neither is fixable inside this track: the Linq subset documents no idempotency header, and
+inventing one would be inventing wire format. Durable idempotency belongs to Track D, and
+this is recorded as a contract gap in `NOTES.md`.
 
 ## Rate limiting
 
@@ -103,6 +141,9 @@ the number lives in config and the answer lands there rather than in a diff.
 | `LINQ_FROM_HANDLE` | `""` | the line's E.164 handle |
 | `LINQ_LINE_ID` | `""` | fallback for `SendResult.line_id`; see NOTES.md |
 | `CHANNEL_REQUEST_TIMEOUT_MS` | `10000` | |
+| `CHANNEL_CAPABILITIES` | `""` | `key=bool` pairs; unknown key or bad value throws |
+
+All of these are in `.env.example`.
 
 ## Two things the caller must supply
 
