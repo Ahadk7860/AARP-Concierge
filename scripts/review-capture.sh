@@ -23,7 +23,7 @@ if [ -z "$LETTER" ]; then echo "usage: review-capture.sh <a|b|c|d>" >&2; exit 2;
 case "$LETTER" in
   a) SLUG="mac";           TEST="swift test --package-path mac"
      LINT="swift build --package-path mac -Xswiftc -warnings-as-errors" ;;
-  b) SLUG="intelligence";  TEST="python -m pytest"
+  b) SLUG="intelligence";  TEST="python3 -m pytest"
      LINT="ruff check intelligence" ;;
   c) SLUG="transport";     TEST="npm test -- cloud/channel cloud/mock-linq"
      LINT="npm run lint && npm run typecheck" ;;
@@ -33,6 +33,23 @@ case "$LETTER" in
 esac
 
 cd "$(git rev-parse --show-toplevel)"
+
+# Per-worktree virtualenvs are the norm, and a bare `python`/`ruff` that resolves to
+# nothing is how "EXIT: 0" got reported for a command that never executed.
+[ -d .venv/bin ] && PATH="$PWD/.venv/bin:$PATH" && export PATH
+
+require () {
+  command -v "$1" >/dev/null 2>&1 && return 0
+  echo "MISSING INTERPRETER: $1 is not on PATH." >&2
+  echo "A capture that cannot run its own commands is not evidence." >&2
+  exit 3
+}
+case "$LETTER" in
+  a) require swift ;;
+  b) require python3 ;;
+  c|d) require npx ;;
+esac
+
 OUT="review-capture-$LETTER.md"
 BRANCH="$(git branch --show-current)"
 
@@ -77,16 +94,20 @@ BRANCH="$(git branch --show-current)"
   echo "## Tests"
   echo "\`$TEST\`"
   echo '```'
-  eval "$TEST" 2>&1 | tail -120 || true
-  echo "EXIT: ${PIPESTATUS[0]}"
+  eval "$TEST" 2>&1 | tail -120
+  rc=${PIPESTATUS[0]}          # capture IMMEDIATELY -- no `|| true` between, ever
+  echo "EXIT: $rc"
+  [ "$rc" -ne 0 ] && echo ">>> TESTS FAILED <<<"
   echo '```'
   echo
 
   echo "## Lint"
   echo "\`$LINT\`"
   echo '```'
-  eval "$LINT" 2>&1 | tail -60 || true
-  echo "EXIT: ${PIPESTATUS[0]}"
+  eval "$LINT" 2>&1 | tail -60
+  rc=${PIPESTATUS[0]}
+  echo "EXIT: $rc"
+  [ "$rc" -ne 0 ] && echo ">>> LINT FAILED <<<"
   echo '```'
   echo
 
