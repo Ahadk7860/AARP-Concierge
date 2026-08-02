@@ -117,3 +117,38 @@ def test_emoji_rate_and_top_emoji_are_frequency_ordered():
     r = compute_register(["ok 😭", "yes 😭", "sure 🙏", "no emoji here"])
     assert r["emoji_rate"] == 0.75
     assert r["top_emoji"][0] == "😭"
+
+
+# ----------------------------- redaction covers every free-text field (CONTRACTS § 7)
+
+
+def test_apology_openers_are_redacted():
+    """`apology_openers` holds verbatim message prefixes, so a pack with spotless
+    exemplars can still carry a third-party name into storage through this array."""
+    r = compute_register(["sorry john smith cancelled on us", "sorry i forgot"])
+    assert "sorry [name]" in r["apology_openers"]
+    assert not any("john" in o or "smith" in o for o in r["apology_openers"])
+
+
+def test_no_free_text_register_field_carries_a_specific():
+    messages = [
+        "sorry john smith cancelled",
+        "sorry call me at 555-010-0042",
+        "sorry my email is bob@example.com",
+        "sorry i owe you $40",
+        "sorry im at 1600 Amphitheatre Pkwy",
+    ]
+    r = compute_register(messages)
+    blob = " ".join([*r["apology_openers"], *r["abbreviations"], *r["top_emoji"]])
+    for leaked in ("john", "smith", "555", "0042", "bob@", "example.com", "$40", "Amphitheatre"):
+        assert leaked not in blob, f"{leaked!r} reached a register field via {blob!r}"
+
+
+def test_redacting_the_openers_does_not_move_the_rates():
+    """The § 6 rule (statistics off raw text) and the § 7 rule (redact every free-text
+    field) have to hold at once: redaction happens after the arithmetic."""
+    messages = ["Hey Sarah how are you", "Hey Sarah you around", "sorry john smith cancelled"]
+    r = compute_register(messages)
+    # Rates are rounded to 4 places by `_round`, so 2/3 is emitted as 0.6667.
+    assert r["greeting_rate"] == 0.6667
+    assert r["punctuation"] == "sentence_case_no_period"

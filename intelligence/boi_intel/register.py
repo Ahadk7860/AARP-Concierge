@@ -13,6 +13,8 @@ from __future__ import annotations
 import re
 from collections import Counter
 
+from boi_intel.redact import redact
+
 # Emoji, by codepoint range. Python's `re` has no \p{Emoji}, and pulling a dependency
 # in for one character class is an append to a shared manifest for no benefit.
 EMOJI = re.compile(
@@ -271,7 +273,13 @@ def compute_register(texts: list[str], timestamps: list[int] | None = None) -> d
         "abbreviations": _by_frequency(abbrev_counter, 20),
         "avg_msgs_per_burst": _avg_msgs_per_burst(timestamps),
         "question_rate": _round(sum(1 for t in texts if "?" in t) / n),
-        "apology_openers": _by_frequency(openers, 5),
+        # CONTRACTS.md § 7: redaction covers every free-text field in the pack, not just
+        # `exemplars`. `apology_openers` holds verbatim message prefixes, so a pack with
+        # spotless exemplars can still carry a third-party name or an amount into
+        # storage through this array. Redacted here, AFTER the statistics are computed,
+        # so the two rules in §§ 6 and 7 both hold: rates come off raw text, emitted
+        # strings are redacted.
+        "apology_openers": [redact(o) for o in _by_frequency(openers, 5)],
     }
 
 

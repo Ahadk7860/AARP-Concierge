@@ -322,6 +322,36 @@ test fail (runs are in the report):
   `BOI_MODEL_PROVIDER` *and* `BOI_ALLOW_LIVE_CALLS=1` — plus a key, and `preflight()` is
   separate from `complete()` so 05 can check a whole matrix without sending anything.
 
+### Prompt 01 correction #2 — redaction scope (CONTRACTS.md § 7 amendment, 2 Aug)
+
+The amendment ("redaction covers every free-text field in the pack, not just
+`exemplars`") landed on `main` during prompt 04 and was merged forward. Re-running
+prompt 01's Definition of Done against it, per `WORKTREE-PROTOCOL.md`, surfaced **two
+real leaks** — the second was latent and had nothing to do with the amendment:
+
+1. **`register.apology_openers` carried un-redacted text.** `"sorry john smith
+   cancelled on us"` produced the opener `"sorry john smith"`, so a pack with spotless
+   exemplars shipped a third-party name into storage through that array — exactly what
+   the amendment describes. Fixed by redacting the opener strings **after** the
+   statistics are computed, which keeps both rules: § 6 requires rates off raw text, § 7
+   requires emitted strings redacted. `abbreviations` (closed list) and `top_emoji`
+   (emoji only) are structurally incapable of carrying a specific, and a test asserts
+   all three fields stay clean.
+
+2. **The lowercase name redactor missed names depending on their word offset.** This is
+   the more serious one and it was in `exemplars` too, since the same function does
+   both. `re.sub` scans non-overlapping: given `"sorry john smith"` it matched the pair
+   `"sorry john"` first, returned it unchanged because `sorry` is not a given name, and
+   resumed *after* `john` — so `"john smith"` was never tested. Whether a name leaked
+   therefore depended on its **parity** in the sentence: `"ill ask john smith about it"`
+   was redacted and `"sorry john smith cancelled"` was not. Every test written for the
+   first correction happened to use an even offset, so all of them passed. Fixed by
+   enumerating adjacent word pairs explicitly instead of using `re.sub`; a
+   parametrised test now places the same name at six different offsets, and it fails at
+   three of them against the old implementation.
+
+Both fixes verified to bite by reverting them and watching the new tests fail.
+
 ### Prompt 04 — validator
 
 - `[prompt 04]` **Extended the forbidden-phrase list by 24 entries**, never shortened

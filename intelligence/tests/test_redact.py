@@ -124,3 +124,28 @@ def test_redaction_preserves_sentence_shape():
     assert out.startswith("ill ask ")
     assert out.endswith(" thing")
     assert "[name]" in out and "[amount]" in out
+
+
+# ------------------------------------------- word-parity regression (CONTRACTS § 7)
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        # The name pair sits at every possible word offset. A non-overlapping `re.sub`
+        # catches only half of these, depending on parity, which is a silent
+        # input-dependent leak rather than a visible failure.
+        ("john smith is coming", "[name] is coming"),
+        ("hey john smith", "hey [name]"),
+        ("sorry john smith cancelled", "sorry [name] cancelled"),
+        ("ill ask john smith about it", "ill ask [name] about it"),
+        ("ok so ill ask john smith later", "ok so ill ask [name] later"),
+        ("a b john smith c", "a b [name] c"),
+    ],
+)
+def test_a_lowercase_name_is_caught_at_every_word_offset(text, expected):
+    assert redact(text) == expected
+
+
+def test_two_lowercase_names_in_one_message_are_both_caught():
+    assert redact("john smith and maria garcia are coming") == "[name] and [name] are coming"

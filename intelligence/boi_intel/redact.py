@@ -126,7 +126,8 @@ whether which while who whom why will with within without wont would yes yet you
 """.split()
 )
 
-_LOWER_FULL_NAME = re.compile(r"\b([a-z][a-z'-]{1,20})\s+([a-z][a-z'-]{1,20})\b")
+# Word tokens, used to enumerate adjacent pairs. See `_redact_lowercase_names`.
+_WORD_TOKEN = re.compile(r"[A-Za-z][A-Za-z'-]{0,20}")
 
 # Openers and common two-word phrases that FULL_NAME would otherwise eat. Redacting
 # "Thank You" as a name would corrupt the very register signal we are measuring.
@@ -163,14 +164,45 @@ def _redact_names(text: str) -> str:
         return "[name]" if m.group(0).lower() not in _NAME_ALLOWLIST else m.group(0)
 
     out = FULL_NAME.sub(capitalized, text)
+    return _redact_lowercase_names(out)
 
-    def lowercase(m: re.Match[str]) -> str:
-        first, second = m.group(1), m.group(2)
-        if first not in COMMON_GIVEN_NAMES or second in _NOT_A_SURNAME:
-            return m.group(0)
-        return "[name]"
 
-    return _LOWER_FULL_NAME.sub(lowercase, out)
+def _redact_lowercase_names(text: str) -> str:
+    """Lowercase "john smith", scanned over every adjacent word pair.
+
+    A plain `re.sub` cannot do this. Its scan is non-overlapping, so once it consumes
+    `"sorry john"` — a pair whose first token is not a given name, and is therefore
+    returned unchanged — it resumes *after* `"john"` and never tests `"john smith"`.
+    Whether a name is caught then depends on its word parity in the sentence:
+    `"ill ask john smith"` is redacted and `"sorry john smith"` is not. That is a silent,
+    input-dependent leak, and it is exactly the shape of bug CONTRACTS.md § 7 exists to
+    prevent.
+
+    So the pairs are enumerated explicitly, over word positions.
+    """
+    tokens = list(_WORD_TOKEN.finditer(text))
+    spans: list[tuple[int, int]] = []
+
+    i = 0
+    while i < len(tokens) - 1:
+        first, second = tokens[i], tokens[i + 1]
+        between = text[first.end() : second.start()]
+        looks_adjacent = between != "" and between.strip(" \t") == ""
+        if (
+            looks_adjacent
+            and first.group(0).islower()
+            and second.group(0).islower()
+            and first.group(0) in COMMON_GIVEN_NAMES
+            and second.group(0) not in _NOT_A_SURNAME
+        ):
+            spans.append((first.start(), second.end()))
+            i += 2  # a redacted pair cannot also be the start of the next pair
+            continue
+        i += 1
+
+    for start, end in reversed(spans):
+        text = text[:start] + "[name]" + text[end:]
+    return text
 
 
 def redact(text: str) -> str:
