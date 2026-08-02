@@ -16,6 +16,9 @@ adapter or crosses in a field the frozen contract already names.
 | `src/errors.ts` | no — typed errors Track D branches on |
 | `src/rate-limiter.ts` | no — a sliding-window limiter that does not know who it is calling |
 | `src/inbound.ts` | no — signature verification and `inbound.v1` assembly |
+| `src/line-registry.ts` | no — who is on which line, and who just lost their thread |
+| `src/line-health.ts` | no — health transitions and `line.health_changed` |
+| `src/routed-channel.ts` | no — sticky routing, automatic downgrade, re-introduction |
 
 That split is checked, not asserted: of the non-test sources,
 `grep -rn 'linq' cloud/channel/src --include=*.ts -il` matches **only**
@@ -200,6 +203,60 @@ new LinqChannel(loadLinqChannelConfig(), {
   resolveUser: (handle) => db.userForHandle(handle),   // optional
 });
 ```
+
+## Lines: assignment, health, downgrade
+
+A user's line changing is a **retention event dressed up as an infrastructure event** —
+their history is gone from their phone and Boi arrives as an unknown sender. And because
+lines are shared, one ban takes out every user on it simultaneously.
+
+**The blast-radius query.** `registry.usersOn(line_id)` returns every affected user in one
+call. This is the question you need answered in the first minute of a ban; needing to write
+a script for it means answering it an hour late.
+
+**Sticky assignment.** `assign()` returns the existing line untouched, so calling it on
+every send is what *enforces* stickiness rather than merely intending it. Lines fill to
+`LINE_USERS_PER_LINE` before a new one is allocated, and the registry **refuses** to
+over-pack rather than quietly exceeding tenancy — ban risk is super-linear in users per
+line, so silently adding one more is precisely the wrong degradation.
+
+**`line.health_changed` fires on a transition, never on a poll.** A poller that emits every
+cycle produces a stream nobody can alert on: "banned" arriving every thirty seconds is
+indistinguishable from a line that just went down. Consumers are entitled to assume each
+event is news. Payload is exactly `CONTRACTS.md` § 4: `{ line_id, from, to, at }`.
+
+**Automatic downgrade — green and late beats blue and never.** An unhealthy line sends over
+the fallback *in the same call*, not via a retry queue. A brief that arrives tomorrow is not
+a brief. `SendResult.provider` records which path was taken, and `routes` carries the
+richer record.
+
+The rule is one line of code — `DOWNGRADE_ON_CODES` — and it is **only** `line_banned` and
+`line_unavailable`. A rate limit is our own throttling, a malformed response is our bug, a
+500 is the platform: burning the fallback on any of those spends a second provider's quota
+to hide a signal we need. Asserted class by class.
+
+A known-banned line gets **no** doomed attempt first, because retrying a banned line is what
+deepens the ban.
+
+**Re-introduction on rotation.** The first message from a new line leads with "this is Boi,
+texting from a new number", exactly once per (user, line). Arriving from a new number and
+resuming mid-conversation reads as a stranger who somehow knows you. The mark is committed
+**after** a successful send — marking before would let a failed send burn the introduction
+and leave a user permanently un-introduced.
+
+**Metrics.** `registry.metrics()` gives users-per-line, capacity and current health for
+every line, so blast radius is visible before an incident rather than computed during one.
+
+### The fallback is a stub
+
+It is any `Channel`. Track D wires the real one. Linq's own RCS/SMS fallback covers
+per-message degradation, so this layer is business continuity, not a per-message path — the
+Twilio adapter is a later round.
+
+### State is in-process
+
+`snapshot()` / `restore()` define what Track D persists. Losing this on restart would
+re-introduce every user, which is a user-visible bug, not just a cache miss.
 
 ## Tests
 

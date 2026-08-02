@@ -167,6 +167,12 @@ present only transitively via eslint — too fragile to hang a contract assertio
 
 `[prompt 01 corrections] package-lock.json — regenerated with npm install --package-lock-only.`
 
+`[prompt 04] .env.example — appended nine LINE_* variables to the Track C block:
+LINE_POOL, LINE_USERS_PER_LINE, LINE_STICKY, LINE_ASSUME_ROTATION_NOTICE,
+LINE_BAN_COVERED_BY_SLA, LINE_DEGRADE_ON, LINE_HEALTH_POLL_INTERVAL_MS,
+LINE_INTRODUCTION_TEXT.` Each is a named stand-in for a § 11 sales-call answer, which is
+the point of prompt 04. Appended inside Track C's own block; nothing reordered.
+
 `[prompt 02 corrections] .env.example — appended six Track C variables to the existing
 "Track C: transport" block: LINQ_LINE_ID, CHANNEL_RATE_LIMIT_MAX,
 CHANNEL_RATE_LIMIT_INTERVAL_MS, CHANNEL_RATE_LIMIT_BEHAVIOUR, CHANNEL_REQUEST_TIMEOUT_MS,
@@ -200,6 +206,10 @@ Format: `[prompt NN] needed <resource> — used <what> provisionally / blocked`
 Track C's assigned 3030–3039 range, so it is assigned-by-range rather than borrowed.
 `[prompt 02] needed the channel test server port — used 3032`, which `CONTRACTS.md` § 9
 assigns to Track C by name.
+
+`[prompt 04] needed a port for the line-health suite — used 3035`, inside Track C's
+assigned 3030–3039 range. Separate from 3032 so prompt 02's and prompt 04's suites can run
+concurrently without contending for a socket.
 
 `[prompt 02 corrections] needed a second throwaway port — used 3034`, inside Track C's
 assigned 3030–3039 range. It runs a stub server that returns error bodies the mock
@@ -235,6 +245,18 @@ an append. Documented in `cloud/mock-linq/README.md` instead.
 `new LinqChannel(config, { resolveHandles })`, where `resolveHandles(user_id)` returns the
 recipient handles for that user. `outbound.v1` cannot carry them. Nothing in `CONTRACTS.md`
 tells Track D this yet — see `## Contract gaps`.
+
+`[prompt 04] → Track D: line state is in-process and must be persisted.`
+`LineRegistry.snapshot()` / `restore()` define the shape. Losing it on restart is not a
+cache miss — every user gets the "this is Boi, new number" message again, from a number
+that did not change. Assignments, introductions and per-line status all need to survive.
+
+`[prompt 04] → Track D: consume line.health_changed as news, not as a status feed.` It
+fires on a transition only. Payload is exactly `CONTRACTS.md` § 4.
+
+`[prompt 04] → Track D: the fallback Channel is yours to wire.` `RoutedChannel` takes any
+`Channel` as the fallback and the tests use the foundation's `StubChannel`. Twilio is a
+later round.
 
 `[prompt 03] → Track D: RAW BYTES ARE MANDATORY on POST /v1/webhooks/{provider}.`
 **This will break in production and look like a signature bug.** You own that endpoint.
@@ -602,6 +624,75 @@ names the fix rather than describing the symptom. The test asserts it is a
 `undefined`, an object and an array.
 
 Recorded for Track D under `## Requests to other tracks`, with the Fastify parser they need.
+
+## Prompt 04 — line health
+
+### The § 11 config map, which is the point of this prompt
+
+| § 11 | Question | Config value | Default, and why |
+|---|---|---|---|
+| 3 | real rate limits | `CHANNEL_RATE_LIMIT_MAX`, `CHANNEL_RATE_LIMIT_INTERVAL_MS`, `CHANNEL_RATE_LIMIT_BEHAVIOUR` | 30/60s, delay — far above one brief per user per day, far below anything that reads as automation |
+| 4 | does the SLA cover a line-level ban? | `LINE_BAN_COVERED_BY_SLA` | `false` — assume it does not, so a ban migrates users off immediately |
+| 5 | is a line sticky indefinitely? | `LINE_STICKY` | `true` for our behaviour, but rotation is built as a first-class migration because we assume the provider does not guarantee it |
+| 6 | are we notified before a rotation? | `LINE_ASSUME_ROTATION_NOTICE` | `false` — detect reactively and always re-introduce |
+| 7 | tenants per line, can we buy dedicated? | `LINE_USERS_PER_LINE`, `LINE_POOL` | `5` — cost is linear in lines, ban risk is super-linear in users per line |
+
+Plus `LINE_DEGRADE_ON`, `LINE_HEALTH_POLL_INTERVAL_MS`, `LINE_INTRODUCTION_TEXT`.
+
+**Every default is the pessimistic reading** — the assumption that costs least if wrong —
+and there is a test asserting exactly that, so an optimistic default cannot drift in
+unnoticed. Unparseable values throw rather than falling back to a default: a silently
+ignored config change looks applied and is not.
+
+### Decisions
+
+- **The downgrade rule is one set, `DOWNGRADE_ON_CODES`, and only line-level codes are in
+  it.** A rate limit is our own throttling; a malformed response is our bug; a 500 is the
+  platform. Burning the fallback on any of those spends a second provider's quota to hide a
+  signal we need.
+- **A known-banned line gets no attempt at all**, rather than one doomed try first.
+  Retrying a banned line is what deepens the ban.
+- **The introduction is committed after the send succeeds.** Marking before would let a
+  failed send burn it, leaving a user permanently un-introduced — silently receiving
+  messages from an unknown number forever.
+- **The registry refuses to over-pack a line** when the pool is exhausted, rather than
+  exceeding tenancy. Silently adding one more user is the wrong degradation when ban risk
+  is super-linear in tenancy.
+- **A health source that throws yields `degraded`, not `up`.** Same rule as the adapter's
+  `health()`.
+- **The monitor owns no timer.** `poll()` is called by the caller. A background interval
+  inside a library is unstoppable in tests and invisible in production.
+- **Migration returns a record** with a reason (`initial` / `rotation` / `health`) rather
+  than silently reassigning. It is the moment the product has to say something to a person.
+
+### The mutation that was not caught, and what it revealed
+
+Seven mutations; six failed a test immediately. **The seventh did not**, and that was the
+useful one: removing the `err.retryable` guard in the catch block changed no test result,
+because a second guard below it (`err.code !== "line_unavailable"`) was already doing the
+work. Two overlapping conditions, one of them dead — **redundant logic that reads as
+protected when only the other branch is load-bearing.**
+
+Replaced both with a single explicit `DOWNGRADE_ON_CODES` set and a test that pins the
+routing decision for all eight error classes. Re-mutated in both directions — widening the
+set to include `rate_limited` fails three tests, narrowing it to drop `line_unavailable`
+fails one.
+
+I would not have found this by reading the code; the mutation found it. Worth keeping as
+the argument for mutation-testing every criterion rather than the ones that feel risky.
+
+### One thing the prompt did not anticipate
+
+The 100-consecutive-sends stickiness test hits the **real rate limiter** — 30/minute with
+`delay` — and sat for two minutes before timing out. The limiter was behaving correctly.
+I raised `CHANNEL_RATE_LIMIT_MAX` in that test's channel config, which is configuration
+rather than a weakened assertion; the limiter's own behaviour is asserted separately in
+`linq-channel.test.ts`.
+
+Worth noticing for real operations though: at the shipped default, a backfill or a retry
+storm across many users on one line will serialize behind the limiter. That is the intended
+trade, but it means throughput is bounded per line, and **capacity planning is lines, not
+workers**.
 
 ## Decisions made
 
