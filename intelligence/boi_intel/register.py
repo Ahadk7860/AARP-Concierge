@@ -7,6 +7,7 @@ by Track A's Swift port. The port is verified against this implementation via
 
 Shapes conform to `contracts/schema/voice_pack.v1.json` `properties.register`.
 """
+
 from __future__ import annotations
 
 import re
@@ -33,13 +34,39 @@ EMOJI = re.compile(
 )
 
 GREETINGS = (
-    "hey", "hi", "hello", "yo", "sup", "morning", "gm", "howdy", "heyy", "heyyy",
-    "good morning", "good afternoon", "good evening", "whats up", "what's up",
+    "hey",
+    "hi",
+    "hello",
+    "yo",
+    "sup",
+    "morning",
+    "gm",
+    "howdy",
+    "heyy",
+    "heyyy",
+    "good morning",
+    "good afternoon",
+    "good evening",
+    "whats up",
+    "what's up",
 )
 
 SIGNOFFS = (
-    "thanks", "thank you", "ty", "talk soon", "later", "ttyl", "bye", "byee",
-    "love you", "love u", "lyl", "xoxo", "cheers", "see ya", "see you",
+    "thanks",
+    "thank you",
+    "ty",
+    "talk soon",
+    "later",
+    "ttyl",
+    "bye",
+    "byee",
+    "love you",
+    "love u",
+    "lyl",
+    "xoxo",
+    "cheers",
+    "see ya",
+    "see you",
 )
 
 APOLOGY_TOKENS = ("sorry", "sry", "apologies", "my bad", "omg sorry", "so sorry")
@@ -47,11 +74,55 @@ APOLOGY_TOKENS = ("sorry", "sry", "apologies", "my bad", "omg sorry", "so sorry"
 # Texting abbreviations worth reporting. A closed list beats inference here: an
 # open-ended "short token" heuristic reports typos and proper nouns as style.
 ABBREVIATIONS = (
-    "lmk", "rn", "ngl", "prob", "tmrw", "tmr", "tbh", "idk", "imo", "btw", "omw",
-    "brb", "np", "ty", "thx", "ur", "u", "r", "pls", "plz", "cuz", "bc", "fr",
-    "def", "obv", "def", "ig", "iirc", "afaik", "lol", "lmao", "haha", "smh",
-    "wyd", "hbu", "wbu", "nvm", "ofc", "rly", "srsly", "gonna", "wanna", "kinda",
-    "sorta", "gtg", "ttyl", "ily", "yall", "y'all",
+    "lmk",
+    "rn",
+    "ngl",
+    "prob",
+    "tmrw",
+    "tmr",
+    "tbh",
+    "idk",
+    "imo",
+    "btw",
+    "omw",
+    "brb",
+    "np",
+    "ty",
+    "thx",
+    "ur",
+    "u",
+    "r",
+    "pls",
+    "plz",
+    "cuz",
+    "bc",
+    "fr",
+    "def",
+    "obv",
+    "def",
+    "ig",
+    "iirc",
+    "afaik",
+    "lol",
+    "lmao",
+    "haha",
+    "smh",
+    "wyd",
+    "hbu",
+    "wbu",
+    "nvm",
+    "ofc",
+    "rly",
+    "srsly",
+    "gonna",
+    "wanna",
+    "kinda",
+    "sorta",
+    "gtg",
+    "ttyl",
+    "ily",
+    "yall",
+    "y'all",
 )
 
 _WORD = re.compile(r"[a-z']+")
@@ -105,8 +176,12 @@ def _punctuation_class(text: str) -> str | None:
 def _starts_with(text: str, options: tuple[str, ...]) -> bool:
     low = text.strip().lower()
     return any(
-        low == o or low.startswith(o + " ") or low.startswith(o + ",")
-        or low.startswith(o + "!") or low.startswith(o + "?") or low.startswith(o + ".")
+        low == o
+        or low.startswith(o + " ")
+        or low.startswith(o + ",")
+        or low.startswith(o + "!")
+        or low.startswith(o + "?")
+        or low.startswith(o + ".")
         for o in options
     )
 

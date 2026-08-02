@@ -14,6 +14,7 @@ Two shapes of row need different handling and getting it backwards is silent:
   them from timing would report a thread as quiet when it is not, which is the exact
   failure mode of confidently saying something false about a person's friend.
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -87,9 +88,27 @@ ORDER BY m.date ASC, m.ROWID ASC
 """
 
 QUESTION_WORDS = (
-    "who", "what", "when", "where", "why", "how", "which", "are you", "did you",
-    "do you", "can you", "could you", "would you", "will you", "are we", "should we",
-    "you free", "you around", "you still", "any chance", "let me know",
+    "who",
+    "what",
+    "when",
+    "where",
+    "why",
+    "how",
+    "which",
+    "are you",
+    "did you",
+    "do you",
+    "can you",
+    "could you",
+    "would you",
+    "will you",
+    "are we",
+    "should we",
+    "you free",
+    "you around",
+    "you still",
+    "any chance",
+    "let me know",
 )
 
 
@@ -114,8 +133,7 @@ def _median(values: list[int]) -> int | None:
     return ordered[(len(ordered) - 1) // 2]
 
 
-def load_threads(con: sqlite3.Connection, now_epoch: int | None = None
-                 ) -> dict[str, ThreadStats]:
+def load_threads(con: sqlite3.Connection, now_epoch: int | None = None) -> dict[str, ThreadStats]:
     """Per-contact statistics for every one-to-one thread.
 
     `now_epoch` is injectable so tests are not a function of the wall clock.

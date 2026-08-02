@@ -8,6 +8,7 @@ writes, never *what* they said.
 Every rule replaces with a bracketed token rather than deleting, so the shape of the
 sentence survives and the register statistics stay honest.
 """
+
 from __future__ import annotations
 
 import re
@@ -53,7 +54,8 @@ FULL_NAME = re.compile(r"\b[A-Z][a-z]{1,20}(?:\s+[A-Z][a-z]{1,20}){1,3}\b")
 # is a known given name followed by a plausible surname. Names that are also ordinary
 # English words (will, may, mark, grant, bill, rose, hope, joy, art, dawn, drew, chase)
 # are deliberately ABSENT: "i will call you" must not become "i [name] you".
-COMMON_GIVEN_NAMES = frozenset("""
+COMMON_GIVEN_NAMES = frozenset(
+    """
 aaron abby abigail adam adrian aisha alan albert alex alexa alexander alexis alfred
 alice alicia alison allison alyssa amanda amber amelia amy ana anders andre andrea
 andrew angela angelo anita ann anna anne annie anthony antonio april ariana arjun
@@ -102,11 +104,13 @@ tonya tracy travis trevor tricia tristan troy tyler tyrone valeria valerie vanes
 vera veronica vicente vicki victor victoria vincent violet virginia vivian walter
 wanda warren wayne wendy wesley whitney wilfredo william willie wyatt xavier yara
 yasmin yolanda yuki yusuf yvonne zachary zara zoe
-""".split())
+""".split()
+)
 
 # The token AFTER a given name has to look like a surname. These are the words that
 # most often follow a first name in ordinary texting, and none of them is one.
-_NOT_A_SURNAME = frozenset("""
+_NOT_A_SURNAME = frozenset(
+    """
 a about above after again against all also am an and any are around as asked at back
 be because been before being below between both but by came can cant come coming could
 did didnt do does doesnt doing done dont down during each else even ever every for from
@@ -119,7 +123,8 @@ takes tell tells than that the their them then there these they thing things thi
 those though thought through to today together told tomorrow tonight too took two under
 until up upon us use used very want wanted was wasnt we well went were what when where
 whether which while who whom why will with within without wont would yes yet you your
-""".split())
+""".split()
+)
 
 _LOWER_FULL_NAME = re.compile(r"\b([a-z][a-z'-]{1,20})\s+([a-z][a-z'-]{1,20})\b")
 

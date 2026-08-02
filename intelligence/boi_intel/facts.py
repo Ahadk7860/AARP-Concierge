@@ -15,6 +15,7 @@ rule is unsure, it does not add the string — a vague gist beats a hallucinated
 Extraction reads the OTHER person's messages, which is why it runs on the Mac. Only the
 extracted tokens travel, never the sentences they came from.
 """
+
 from __future__ import annotations
 
 import re
@@ -25,13 +26,42 @@ MAX_PER_CATEGORY = 8
 
 WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 MONTHS = (
-    "january", "february", "march", "april", "may", "june", "july", "august",
-    "september", "october", "november", "december",
-    "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept", "oct", "nov", "dec",
+    "january",
+    "february",
+    "march",
+    "april",
+    "may",
+    "june",
+    "july",
+    "august",
+    "september",
+    "october",
+    "november",
+    "december",
+    "jan",
+    "feb",
+    "mar",
+    "apr",
+    "jun",
+    "jul",
+    "aug",
+    "sep",
+    "sept",
+    "oct",
+    "nov",
+    "dec",
 )
 RELATIVE_DAYS = (
-    "today", "tomorrow", "tonight", "this weekend", "next weekend", "this week",
-    "next week", "this month", "next month", "the weekend",
+    "today",
+    "tomorrow",
+    "tonight",
+    "this weekend",
+    "next weekend",
+    "this week",
+    "next week",
+    "this month",
+    "next month",
+    "the weekend",
 )
 
 _I = re.IGNORECASE
@@ -72,11 +102,17 @@ _AMOUNT_PATTERNS = [
 # `[^\S\n]` is "whitespace but not a newline" — plain `\s` would let a match run off the
 # end of one message and into the next, splicing two people's sentences into one "fact".
 _PLACE_PATTERNS = [
-    (r"\b(?:at|in|to|near|by)[^\S\n]+(?:the[^\S\n]+)?"
-     r"([A-Z][\w'&-]+(?:[^\S\n]+[A-Z][\w'&-]+){0,3})\b", _CS),
-    (r"\b(?:at|in|to)[^\S\n]+(the[^\S\n]+(?:office|airport|station|gym|park|bar"
-     r"|restaurant|hotel|library|museum|beach|house|apartment|hospital|studio|cafe"
-     r"|coffee[^\S\n]+shop))\b", _I),
+    (
+        r"\b(?:at|in|to|near|by)[^\S\n]+(?:the[^\S\n]+)?"
+        r"([A-Z][\w'&-]+(?:[^\S\n]+[A-Z][\w'&-]+){0,3})\b",
+        _CS,
+    ),
+    (
+        r"\b(?:at|in|to)[^\S\n]+(the[^\S\n]+(?:office|airport|station|gym|park|bar"
+        r"|restaurant|hotel|library|museum|beach|house|apartment|hospital|studio|cafe"
+        r"|coffee[^\S\n]+shop))\b",
+        _I,
+    ),
     (r"\b((?:your|my|their|his|her)[^\S\n]+(?:place|house|apartment|office))\b", _I),
 ]
 
@@ -163,8 +199,7 @@ def _lowercase_names(messages: list[str]) -> list[str]:
     for message in messages:
         if not message:
             continue
-        for m in re.finditer(r"\b([a-z][a-z'-]{1,20})[^\S\n]+([a-z][a-z'-]{1,20})\b",
-                             message):
+        for m in re.finditer(r"\b([a-z][a-z'-]{1,20})[^\S\n]+([a-z][a-z'-]{1,20})\b", message):
             first, second = m.group(1), m.group(2)
             if first in COMMON_GIVEN_NAMES and second not in _NOT_A_SURNAME:
                 out.append(m.group(0))
@@ -180,8 +215,7 @@ def extract_facts(messages: list[str]) -> dict[str, list[str]]:
     """
     messages = [m for m in messages if m]
 
-    dates = [d for d in _findall(_DATE_PATTERNS, messages)
-             if d.lower() not in _DATE_STOPWORDS]
+    dates = [d for d in _findall(_DATE_PATTERNS, messages) if d.lower() not in _DATE_STOPWORDS]
     times = _findall(_TIME_PATTERNS, messages)
     places = _findall(_PLACE_PATTERNS, messages)
     amounts = _findall(_AMOUNT_PATTERNS, messages)
@@ -206,17 +240,82 @@ def extract_facts(messages: list[str]) -> dict[str, list[str]]:
 
 # Topic is a CATEGORY LABEL, never a quotation (gist.v1: `topic` maxLength 40).
 _TOPIC_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("travel_planning", ("flight", "flights", "book", "booking", "trip", "hotel",
-                         "airbnb", "airport", "visit", "coming to", "fly", "train")),
-    ("scheduling", ("free", "meet", "dinner", "lunch", "coffee", "brunch", "hang",
-                    "calendar", "reschedule", "time works", "still on")),
+    (
+        "travel_planning",
+        (
+            "flight",
+            "flights",
+            "book",
+            "booking",
+            "trip",
+            "hotel",
+            "airbnb",
+            "airport",
+            "visit",
+            "coming to",
+            "fly",
+            "train",
+        ),
+    ),
+    (
+        "scheduling",
+        (
+            "free",
+            "meet",
+            "dinner",
+            "lunch",
+            "coffee",
+            "brunch",
+            "hang",
+            "calendar",
+            "reschedule",
+            "time works",
+            "still on",
+        ),
+    ),
     ("money", ("venmo", "owe", "split", "pay", "paid", "invoice", "reimburse", "cost")),
-    ("work", ("meeting", "deck", "project", "deadline", "client", "standup", "review",
-              "interview", "resume", "offer")),
-    ("family", ("mom", "dad", "grandma", "grandpa", "aunt", "uncle", "cousin",
-                "birthday", "wedding", "funeral", "holidays")),
-    ("check_in", ("how are you", "how have you been", "miss you", "thinking of you",
-                  "long time", "catch up")),
+    (
+        "work",
+        (
+            "meeting",
+            "deck",
+            "project",
+            "deadline",
+            "client",
+            "standup",
+            "review",
+            "interview",
+            "resume",
+            "offer",
+        ),
+    ),
+    (
+        "family",
+        (
+            "mom",
+            "dad",
+            "grandma",
+            "grandpa",
+            "aunt",
+            "uncle",
+            "cousin",
+            "birthday",
+            "wedding",
+            "funeral",
+            "holidays",
+        ),
+    ),
+    (
+        "check_in",
+        (
+            "how are you",
+            "how have you been",
+            "miss you",
+            "thinking of you",
+            "long time",
+            "catch up",
+        ),
+    ),
 )
 
 

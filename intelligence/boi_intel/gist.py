@@ -22,6 +22,7 @@ a hallucinated one.
 intact — see `test_gist.py`, which seeds a distinctive inbound sentence and asserts it
 appears nowhere in the output.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -161,28 +162,37 @@ def sql_gist_text(stats: ThreadStats, state: str, facts: dict[str, list[str]]) -
 
     if state == "action_needed":
         if stats.unanswered_question and deadline:
-            text = (f"they asked you something {_plural(days, 'day')} ago and mentioned "
-                    f"{deadline}; you have not replied")
+            text = (
+                f"they asked you something {_plural(days, 'day')} ago and mentioned "
+                f"{deadline}; you have not replied"
+            )
         elif stats.unanswered_question:
             text = f"they asked you a question {_plural(days, 'day')} ago and you have not replied"
         elif deadline:
-            text = (f"they wrote last {_plural(days, 'day')} ago about {deadline}; "
-                    f"you have not replied")
+            text = (
+                f"they wrote last {_plural(days, 'day')} ago about {deadline}; you have not replied"
+            )
         else:
             text = f"they sent the last message {_plural(days, 'day')} ago and are waiting on you"
     elif state == "revived":
-        text = (f"back in touch {_plural(days, 'day')} ago after "
-                f"{_plural(stats.max_gap_days, 'day')} of silence")
+        text = (
+            f"back in touch {_plural(days, 'day')} ago after "
+            f"{_plural(stats.max_gap_days, 'day')} of silence"
+        )
     elif state == "dormant":
         text = f"neither of you has written in {_plural(days, 'day')}"
     elif state == "fading":
         latency = stats.median_reply_latency_seconds
         if latency is not None and latency < 3600:
-            text = (f"you used to reply within {_plural(max(1, latency // 60), 'minute')}; "
-                    f"{_plural(days, 'day')} quiet now")
+            text = (
+                f"you used to reply within {_plural(max(1, latency // 60), 'minute')}; "
+                f"{_plural(days, 'day')} quiet now"
+            )
         else:
-            text = (f"{_plural(days, 'day')} quiet after "
-                    f"{_plural(stats.total_messages, 'message')} between you")
+            text = (
+                f"{_plural(days, 'day')} quiet after "
+                f"{_plural(stats.total_messages, 'message')} between you"
+            )
     else:
         text = f"{_plural(days, 'day')} since the last message"
 
@@ -207,8 +217,7 @@ class GistProducer(Protocol):
 
     def available(self) -> bool: ...
 
-    def produce(self, contact_id: str, stats: ThreadStats, state: str,
-                as_of: str) -> dict: ...
+    def produce(self, contact_id: str, stats: ThreadStats, state: str, as_of: str) -> dict: ...
 
 
 @dataclass
@@ -221,8 +230,7 @@ class SqlGistProducer:
     def available(self) -> bool:
         return True
 
-    def produce(self, contact_id: str, stats: ThreadStats, state: str,
-                as_of: str) -> dict:
+    def produce(self, contact_id: str, stats: ThreadStats, state: str, as_of: str) -> dict:
         facts = extract_facts(stats.recent_inbound_text)
         topic = infer_topic(stats.recent_inbound_text)
         deadline = deadline_for(stats, facts)
@@ -338,9 +346,7 @@ class LocalModelGistProducer:
             import importlib
 
             if importlib.util.find_spec("huggingface_hub") is None:
-                raise ModelUnavailable(
-                    "huggingface_hub is not installed; add the `local` extra"
-                )
+                raise ModelUnavailable("huggingface_hub is not installed; add the `local` extra")
             hub = importlib.import_module("huggingface_hub")
             target.parent.mkdir(parents=True, exist_ok=True)
             hub.snapshot_download(repo_id=self.model_id, local_dir=str(target))
@@ -350,8 +356,7 @@ class LocalModelGistProducer:
             raise ModelUnavailable(f"could not download {self.model_id}: {exc}") from exc
         return target
 
-    def produce(self, contact_id: str, stats: ThreadStats, state: str,
-                as_of: str) -> dict:
+    def produce(self, contact_id: str, stats: ThreadStats, state: str, as_of: str) -> dict:
         """Model-written gist string over SQL-derived structure.
 
         The model rewrites only the 140-character sentence. Every other field — state,
@@ -366,8 +371,10 @@ class LocalModelGistProducer:
 
         text = backend.summarize(stats.recent_inbound_text, state, base["facts"])
         text = (text or "").strip().replace("\n", " ")
-        if not text or len(text) > MAX_GIST_CHARS or _quotes_the_corpus(
-            text, stats.recent_inbound_text
+        if (
+            not text
+            or len(text) > MAX_GIST_CHARS
+            or _quotes_the_corpus(text, stats.recent_inbound_text)
         ):
             return base
         base["gist"] = text
@@ -383,7 +390,7 @@ def _quotes_the_corpus(text: str, inbound: list[str], min_run: int = 6) -> bool:
     words = text.lower().split()
     if len(words) < min_run:
         return False
-    runs = {" ".join(words[i:i + min_run]) for i in range(len(words) - min_run + 1)}
+    runs = {" ".join(words[i : i + min_run]) for i in range(len(words) - min_run + 1)}
     return any(run in " ".join(m.lower().split()) for m in inbound for run in runs)
 
 
@@ -393,8 +400,11 @@ class _MlxBackend:
 
     def summarize(self, inbound: list[str], state: str, facts: dict) -> str:
         return self.mlx_lm.generate(
-            self.model, self.tokenizer,
-            prompt=_gist_prompt(inbound, state, facts), max_tokens=64, verbose=False,
+            self.model,
+            self.tokenizer,
+            prompt=_gist_prompt(inbound, state, facts),
+            max_tokens=64,
+            verbose=False,
         )
 
 
@@ -440,9 +450,14 @@ def select_producer(model_id: str | None = None) -> tuple[GistProducer, str | No
 # --------------------------------------------------------------------------- build
 
 
-def build_gists(db_path: str, top: int | None = None, salt: bytes | None = None,
-                as_of: str | None = None, now_epoch: int | None = None,
-                producer: GistProducer | None = None) -> list[dict]:
+def build_gists(
+    db_path: str,
+    top: int | None = None,
+    salt: bytes | None = None,
+    as_of: str | None = None,
+    now_epoch: int | None = None,
+    producer: GistProducer | None = None,
+) -> list[dict]:
     """Ranked gists for every thread that needs one, highest priority first.
 
     Threads `classify` returns `None` for are omitted entirely — a healthy thread has
@@ -501,11 +516,9 @@ def main(argv: list[str] | None = None) -> int:
     chosen, reason = select_producer()
     if reason:
         # Structured JSON to stdout, per CONTRACTS.md § 6. Never the prompt, never text.
-        print(json.dumps({"event": "gist.producer_degraded", "to": "sql",
-                          "reason": reason}))
+        print(json.dumps({"event": "gist.producer_degraded", "to": "sql", "reason": reason}))
 
-    gists = build_gists(a.db, top=a.top, salt=resolve_salt(a.salt), as_of=a.as_of,
-                        producer=chosen)
+    gists = build_gists(a.db, top=a.top, salt=resolve_salt(a.salt), as_of=a.as_of, producer=chosen)
     for path in write_gists(gists, a.out):
         g = json.loads(path.read_text())
         print(f"{path}  {g['state']}  priority={g['priority']}  producer={g['producer']}")

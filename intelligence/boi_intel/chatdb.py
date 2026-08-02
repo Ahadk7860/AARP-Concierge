@@ -10,6 +10,7 @@ Two properties of this module are load-bearing and easy to get silently wrong:
 2. **`is_from_me = 1` in the SQL.** The first of the three guards in CONTRACTS.md
    section 7. The serializer asserts it again over the same rows; both ship.
 """
+
 from __future__ import annotations
 
 import hashlib

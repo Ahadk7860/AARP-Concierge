@@ -6,6 +6,7 @@ building this was the second kind: `re.IGNORECASE` applied to a capitalised-name
 turns `[A-Z][a-z]+` into "any word", so whole sentences were being harvested as `names`
 and carried into a document that crosses the boundary to the cloud.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -18,10 +19,12 @@ CATEGORIES = ("dates", "times", "places", "amounts", "names")
 
 
 def test_a_thread_with_specifics_yields_them():
-    facts = extract_facts([
-        "are you still coming on the 14th",
-        "we need to book by friday",
-    ])
+    facts = extract_facts(
+        [
+            "are you still coming on the 14th",
+            "we need to book by friday",
+        ]
+    )
     assert "the 14th" in facts["dates"]
     assert "friday" in [d.lower() for d in facts["dates"]]
 
@@ -104,16 +107,21 @@ def test_facts_never_splice_two_messages_together():
 
 def test_ordinary_chatter_produces_no_names():
     """`[A-Z][a-z]+` under IGNORECASE matches every word. This is the guard."""
-    facts = extract_facts([
-        "ok sounds good", "no worries at all", "lmk what you think",
-        "did you ever hear back about that", "call me when you get a sec",
-    ])
+    facts = extract_facts(
+        [
+            "ok sounds good",
+            "no worries at all",
+            "lmk what you think",
+            "did you ever hear back about that",
+            "call me when you get a sec",
+        ]
+    )
     assert facts["names"] == []
     assert facts["places"] == []
 
 
 def test_redundant_substrings_are_suppressed():
-    """"the 14th" and "14th" are one date; keeping both spends two allowlist slots."""
+    """ "the 14th" and "14th" are one date; keeping both spends two allowlist slots."""
     facts = extract_facts(["are you still coming on the 14th"])
     assert facts["dates"] == ["the 14th"]
 

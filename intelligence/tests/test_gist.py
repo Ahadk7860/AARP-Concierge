@@ -5,6 +5,7 @@ the one that matters in `test_voice_pack.py`. The gist crosses the boundary to t
 cloud; if the other person's sentences can ride along inside it, the digest boundary is
 decorative. Do not weaken it to make a run green.
 """
+
 from __future__ import annotations
 
 import json
@@ -37,9 +38,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 SALT = b"test-salt"
 AS_OF = "2026-08-01T00:00:00Z"
 
-INBOUND_CANARY = (
-    "zzq the plumber is coming thursday and i left the spare key under the blue pot"
-)
+INBOUND_CANARY = "zzq the plumber is coming thursday and i left the spare key under the blue pot"
 
 
 def _now() -> int:
@@ -60,10 +59,14 @@ def _thread(tmp_path, messages, last_message_days_ago: int, name: str = "chat.db
 
 
 def test_the_gist_never_quotes_the_other_person(tmp_path):
-    db = _thread(tmp_path, [
-        sent("ok that works for me"),
-        received(INBOUND_CANARY),
-    ], last_message_days_ago=6)
+    db = _thread(
+        tmp_path,
+        [
+            sent("ok that works for me"),
+            received(INBOUND_CANARY),
+        ],
+        last_message_days_ago=6,
+    )
 
     gists = build_gists(str(db), salt=SALT, as_of=AS_OF, now_epoch=_now())
     assert gists, "expected a gist for a thread with an unanswered inbound message"
@@ -72,8 +75,12 @@ def test_the_gist_never_quotes_the_other_person(tmp_path):
         blob = json.dumps(g, ensure_ascii=False)
         assert INBOUND_CANARY not in blob
         # and no substantial run of it either
-        for fragment in ("the plumber is coming", "spare key", "under the blue pot",
-                         "left the spare"):
+        for fragment in (
+            "the plumber is coming",
+            "spare key",
+            "under the blue pot",
+            "left the spare",
+        ):
             assert fragment not in blob, f"{fragment!r} leaked into {blob}"
 
 
@@ -84,14 +91,13 @@ def test_no_generated_gist_contains_a_six_word_run_from_the_thread(tmp_path):
         "are you still coming on the 14th of next month or not",
         "we really need to book the flights by friday afternoon at the latest",
     ]
-    db = _thread(tmp_path, [sent("ok")] + [received(t) for t in inbound],
-                 last_message_days_ago=5)
+    db = _thread(tmp_path, [sent("ok")] + [received(t) for t in inbound], last_message_days_ago=5)
     gists = build_gists(str(db), salt=SALT, as_of=AS_OF, now_epoch=_now())
     assert gists
 
     for g in gists:
         words = g["gist"].lower().split()
-        runs = {" ".join(words[i:i + 6]) for i in range(max(0, len(words) - 5))}
+        runs = {" ".join(words[i : i + 6]) for i in range(max(0, len(words) - 5))}
         for source in inbound:
             flat = " ".join(source.lower().split())
             assert not any(r in flat for r in runs), g["gist"]
@@ -101,8 +107,7 @@ def test_the_raw_handle_never_appears_in_a_gist(tmp_path):
     """CONTRACTS.md section 3: the server never sees a raw handle for anyone but the
     account holder. `display` is omitted for exactly this reason — see NOTES.md."""
     handle = "+15550100999"
-    db = _thread(tmp_path, [sent("ok"), received("are you around")],
-                 last_message_days_ago=4)
+    db = _thread(tmp_path, [sent("ok"), received("are you around")], last_message_days_ago=4)
     gists = build_gists(str(db), salt=SALT, as_of=AS_OF, now_epoch=_now())
     assert gists
     for g in gists:
@@ -117,10 +122,14 @@ def test_the_raw_handle_never_appears_in_a_gist(tmp_path):
 
 def test_cli_writes_valid_gist_files(tmp_path, monkeypatch):
     monkeypatch.setenv("BOI_DEV_USER_SALT", "test-salt")
-    db = _thread(tmp_path, [
-        sent("ok that works"),
-        received("are you still coming on the 14th"),
-    ], last_message_days_ago=5)
+    db = _thread(
+        tmp_path,
+        [
+            sent("ok that works"),
+            received("are you still coming on the 14th"),
+        ],
+        last_message_days_ago=5,
+    )
     out = tmp_path / "gists"
 
     assert main(["--db", str(db), "--out", str(out), "--top", "5"]) == 0
@@ -129,16 +138,15 @@ def test_cli_writes_valid_gist_files(tmp_path, monkeypatch):
 
     for path in files:
         r = subprocess.run(
-            [sys.executable, str(ROOT / "scripts" / "validate_fixtures.py"),
-             "gist.v1", str(path)],
-            capture_output=True, text=True,
+            [sys.executable, str(ROOT / "scripts" / "validate_fixtures.py"), "gist.v1", str(path)],
+            capture_output=True,
+            text=True,
         )
         assert r.returncode == 0, r.stdout + r.stderr
 
 
 def test_top_limits_the_output(tmp_path):
-    db = _thread(tmp_path, [sent("hi"), received("you around")],
-                 last_message_days_ago=5)
+    db = _thread(tmp_path, [sent("hi"), received("you around")], last_message_days_ago=5)
     all_gists = build_gists(str(db), salt=SALT, as_of=AS_OF, now_epoch=_now())
     limited = build_gists(str(db), top=1, salt=SALT, as_of=AS_OF, now_epoch=_now())
     assert len(limited) <= 1
@@ -149,9 +157,14 @@ def test_top_limits_the_output(tmp_path):
 
 
 def test_every_gist_string_is_within_the_cap(tmp_path):
-    db = _thread(tmp_path, [
-        sent("ok"), received("are you still coming on the 14th and can we book friday"),
-    ], last_message_days_ago=5)
+    db = _thread(
+        tmp_path,
+        [
+            sent("ok"),
+            received("are you still coming on the 14th and can we book friday"),
+        ],
+        last_message_days_ago=5,
+    )
     for g in build_gists(str(db), salt=SALT, as_of=AS_OF, now_epoch=_now()):
         assert len(g["gist"]) <= MAX_GIST_CHARS, g["gist"]
 
@@ -164,10 +177,16 @@ def test_generated_fixture_gists_are_all_within_the_cap():
 
 @pytest.mark.parametrize("state", ["action_needed", "fading", "dormant", "revived"])
 def test_every_state_has_a_template(state):
-    stats = ThreadStats(handle="+1", days_silent=30, total_messages=100,
-                        max_gap_days=120, median_reply_latency_seconds=900)
-    text = gist_mod.sql_gist_text(stats, state, {"dates": [], "times": [], "places": [],
-                                                 "amounts": [], "names": []})
+    stats = ThreadStats(
+        handle="+1",
+        days_silent=30,
+        total_messages=100,
+        max_gap_days=120,
+        median_reply_latency_seconds=900,
+    )
+    text = gist_mod.sql_gist_text(
+        stats, state, {"dates": [], "times": [], "places": [], "amounts": [], "names": []}
+    )
     assert text and len(text) <= MAX_GIST_CHARS
 
 
@@ -176,11 +195,17 @@ def test_the_gist_string_is_an_invitation_not_a_verdict():
     and never ships."""
     stats = ThreadStats(handle="+1", days_silent=40, total_messages=200)
     for state in ("action_needed", "fading", "dormant"):
-        text = gist_mod.sql_gist_text(stats, state, {"dates": [], "times": [],
-                                                     "places": [], "amounts": [],
-                                                     "names": []}).lower()
-        for forbidden in ("doesn't", "does not text", "ignoring you", "ghosted",
-                          "you should", "you failed"):
+        text = gist_mod.sql_gist_text(
+            stats, state, {"dates": [], "times": [], "places": [], "amounts": [], "names": []}
+        ).lower()
+        for forbidden in (
+            "doesn't",
+            "does not text",
+            "ignoring you",
+            "ghosted",
+            "you should",
+            "you failed",
+        ):
             assert forbidden not in text, text
 
 
@@ -190,7 +215,7 @@ def test_the_gist_string_is_an_invitation_not_a_verdict():
 @pytest.mark.parametrize(
     "days,last_from_me,expected",
     [
-        (0, True, None),        # healthy, nothing owed
+        (0, True, None),  # healthy, nothing owed
         (1, True, None),
         (3, False, "action_needed"),
         (12, False, "action_needed"),
@@ -200,16 +225,18 @@ def test_the_gist_string_is_an_invitation_not_a_verdict():
     ],
 )
 def test_classification_table(days, last_from_me, expected):
-    stats = ThreadStats(handle="+1", days_silent=days, last_from_me=last_from_me,
-                        total_messages=100)
+    stats = ThreadStats(
+        handle="+1", days_silent=days, last_from_me=last_from_me, total_messages=100
+    )
     assert classify(stats) == expected
 
 
 def test_a_healthy_thread_gets_no_gist(tmp_path):
     """The load-bearing `None`: forcing every thread into a state would put people who
     are perfectly fine into the morning brief."""
-    db = _thread(tmp_path, [received("hey how are you"), sent("good! you?")],
-                 last_message_days_ago=0)
+    db = _thread(
+        tmp_path, [received("hey how are you"), sent("good! you?")], last_message_days_ago=0
+    )
     assert build_gists(str(db), salt=SALT, as_of=AS_OF, now_epoch=_now()) == []
 
 
@@ -218,17 +245,20 @@ def test_birthday_is_never_invented():
     from message text is fabrication — see NOTES.md."""
     for days in (0, 1, 5, 30, 200, 500):
         for last_from_me in (True, False):
-            stats = ThreadStats(handle="+1", days_silent=days,
-                                last_from_me=last_from_me, total_messages=50)
+            stats = ThreadStats(
+                handle="+1", days_silent=days, last_from_me=last_from_me, total_messages=50
+            )
             assert classify(stats) != "birthday"
 
 
 def test_revived_requires_a_long_prior_gap():
-    recent = ThreadStats(handle="+1", days_silent=3, last_from_me=True,
-                         total_messages=100, max_gap_days=120)
+    recent = ThreadStats(
+        handle="+1", days_silent=3, last_from_me=True, total_messages=100, max_gap_days=120
+    )
     assert classify(recent) == "revived"
-    no_gap = ThreadStats(handle="+1", days_silent=3, last_from_me=True,
-                         total_messages=100, max_gap_days=2)
+    no_gap = ThreadStats(
+        handle="+1", days_silent=3, last_from_me=True, total_messages=100, max_gap_days=2
+    )
     assert classify(no_gap) is None
 
 
@@ -236,8 +266,13 @@ def test_revived_requires_a_long_prior_gap():
 
 
 def test_priority_is_within_range_and_stable():
-    stats = ThreadStats(handle="+1", days_silent=5, last_from_me=False,
-                        unanswered_question=True, total_messages=1200)
+    stats = ThreadStats(
+        handle="+1",
+        days_silent=5,
+        last_from_me=False,
+        unanswered_question=True,
+        total_messages=1200,
+    )
     first = priority(stats, "action_needed")
     assert 0.0 <= first <= 1.0
     for _ in range(5):
@@ -245,10 +280,10 @@ def test_priority_is_within_range_and_stable():
 
 
 def test_someone_waiting_outranks_someone_who_is_not(tmp_path):
-    waiting = ThreadStats(handle="+1", days_silent=5, last_from_me=False,
-                          unanswered_question=True, total_messages=500)
-    quiet = ThreadStats(handle="+2", days_silent=5, last_from_me=True,
-                        total_messages=500)
+    waiting = ThreadStats(
+        handle="+1", days_silent=5, last_from_me=False, unanswered_question=True, total_messages=500
+    )
+    quiet = ThreadStats(handle="+2", days_silent=5, last_from_me=True, total_messages=500)
     assert priority(waiting, "action_needed") > priority(quiet, "fading")
 
 
@@ -257,8 +292,7 @@ def test_ranking_is_stable_across_runs(tmp_path):
     db = tmp_path / "chat.db"
     _multi_thread_db(db)
     runs = [
-        [g["contact_id"] for g in build_gists(str(db), salt=SALT, as_of=AS_OF,
-                                              now_epoch=_now())]
+        [g["contact_id"] for g in build_gists(str(db), salt=SALT, as_of=AS_OF, now_epoch=_now())]
         for _ in range(4)
     ]
     assert all(r == runs[0] for r in runs)
@@ -286,12 +320,14 @@ def _multi_thread_db(path: pathlib.Path) -> None:
     cur = con.cursor()
     spec = [("+15550100011", 4, 0), ("+15550100012", 40, 1), ("+15550100013", 250, 0)]
     for handle, quiet_days, last_from_me in spec:
-        cur.execute("INSERT INTO handle (id, service, country) VALUES (?,?,?)",
-                    (handle, "iMessage", "us"))
+        cur.execute(
+            "INSERT INTO handle (id, service, country) VALUES (?,?,?)", (handle, "iMessage", "us")
+        )
         hid = cur.lastrowid
         cur.execute(
             "INSERT INTO chat (guid, style, chat_identifier, service_name) VALUES (?,?,?,?)",
-            (f"iMessage;-;{handle}", 45, handle, "iMessage"))
+            (f"iMessage;-;{handle}", 45, handle, "iMessage"),
+        )
         cid = cur.lastrowid
         cur.execute("INSERT INTO chat_handle_join VALUES (?,?)", (cid, hid))
         for i in range(12):
@@ -300,10 +336,19 @@ def _multi_thread_db(path: pathlib.Path) -> None:
             cur.execute(
                 """INSERT INTO message (guid, text, handle_id, service, date, is_from_me)
                    VALUES (?,?,?,?,?,?)""",
-                (f"{handle}-{i}", "are you around" if not from_me else "ok sounds good",
-                 0 if from_me else hid, "iMessage", to_apple_ns(when), from_me))
-            cur.execute("INSERT INTO chat_message_join VALUES (?,?,?)",
-                        (cid, cur.lastrowid, to_apple_ns(when)))
+                (
+                    f"{handle}-{i}",
+                    "are you around" if not from_me else "ok sounds good",
+                    0 if from_me else hid,
+                    "iMessage",
+                    to_apple_ns(when),
+                    from_me,
+                ),
+            )
+            cur.execute(
+                "INSERT INTO chat_message_join VALUES (?,?,?)",
+                (cid, cur.lastrowid, to_apple_ns(when)),
+            )
     con.commit()
     con.close()
 
@@ -314,9 +359,14 @@ def _multi_thread_db(path: pathlib.Path) -> None:
 def test_a_stale_date_is_not_a_deadline(tmp_path):
     """A date mentioned 300 days ago is not something you owe an answer on. Promoting
     it to `has_deadline` is a fabricated commitment in the user's own name."""
-    db = _thread(tmp_path, [
-        sent("ok"), received("are you still coming on the 14th"),
-    ], last_message_days_ago=300)
+    db = _thread(
+        tmp_path,
+        [
+            sent("ok"),
+            received("are you still coming on the 14th"),
+        ],
+        last_message_days_ago=300,
+    )
     gists = build_gists(str(db), salt=SALT, as_of=AS_OF, now_epoch=_now())
     assert gists
     for g in gists:
@@ -325,9 +375,14 @@ def test_a_stale_date_is_not_a_deadline(tmp_path):
 
 
 def test_a_recent_date_is_a_deadline(tmp_path):
-    db = _thread(tmp_path, [
-        sent("ok"), received("are you still coming on the 14th"),
-    ], last_message_days_ago=5)
+    db = _thread(
+        tmp_path,
+        [
+            sent("ok"),
+            received("are you still coming on the 14th"),
+        ],
+        last_message_days_ago=5,
+    )
     gists = build_gists(str(db), salt=SALT, as_of=AS_OF, now_epoch=_now())
     assert gists
     g = gists[0]
@@ -351,8 +406,7 @@ def test_the_whole_path_runs_with_no_model_present(tmp_path, monkeypatch):
     """No MLX, no llama.cpp, no weights on disk — the shipped configuration for an
     Intel Mac, and the permanent fallback per CONTRACTS.md section 11 item 11."""
     monkeypatch.setenv(MODEL_ENV_VAR, "")
-    db = _thread(tmp_path, [sent("ok"), received("you around")],
-                 last_message_days_ago=5)
+    db = _thread(tmp_path, [sent("ok"), received("you around")], last_message_days_ago=5)
     gists = build_gists(str(db), salt=SALT, as_of=AS_OF, now_epoch=_now())
     assert gists
     for g in gists:
@@ -379,10 +433,8 @@ def test_build_gists_degrades_when_the_producer_raises(tmp_path):
         def produce(self, *a, **k):
             raise ModelUnavailable("weights vanished mid-run")
 
-    db = _thread(tmp_path, [sent("ok"), received("you around")],
-                 last_message_days_ago=5)
-    gists = build_gists(str(db), salt=SALT, as_of=AS_OF, now_epoch=_now(),
-                        producer=Exploding())
+    db = _thread(tmp_path, [sent("ok"), received("you around")], last_message_days_ago=5)
+    gists = build_gists(str(db), salt=SALT, as_of=AS_OF, now_epoch=_now(), producer=Exploding())
     assert gists
     assert all(g["producer"] == "sql" for g in gists)
 
@@ -409,9 +461,14 @@ def test_a_model_that_quotes_the_corpus_has_its_output_discarded():
         def summarize(self, inbound, state, facts):
             return quoted
 
-    stats = ThreadStats(handle="+1", days_silent=5, last_from_me=False,
-                        unanswered_question=True, total_messages=50,
-                        recent_inbound_text=[quoted])
+    stats = ThreadStats(
+        handle="+1",
+        days_silent=5,
+        last_from_me=False,
+        unanswered_question=True,
+        total_messages=50,
+        recent_inbound_text=[quoted],
+    )
     p = LocalModelGistProducer(model_id="stub", backend=Copycat())
     out = p.produce("h_0123456789ab", stats, "action_needed", AS_OF)
 
@@ -424,10 +481,16 @@ def test_an_overlong_model_answer_is_discarded():
         def summarize(self, inbound, state, facts):
             return "x" * (MAX_GIST_CHARS + 1)
 
-    stats = ThreadStats(handle="+1", days_silent=5, last_from_me=False,
-                        total_messages=50, recent_inbound_text=["you around"])
+    stats = ThreadStats(
+        handle="+1",
+        days_silent=5,
+        last_from_me=False,
+        total_messages=50,
+        recent_inbound_text=["you around"],
+    )
     out = LocalModelGistProducer(model_id="stub", backend=Rambler()).produce(
-        "h_0123456789ab", stats, "action_needed", AS_OF)
+        "h_0123456789ab", stats, "action_needed", AS_OF
+    )
     assert len(out["gist"]) <= MAX_GIST_CHARS
     assert out["producer"] == "sql"
 
@@ -437,10 +500,16 @@ def test_a_usable_model_answer_is_kept_and_labelled():
         def summarize(self, inbound, state, facts):
             return "they need an answer from you about the trip"
 
-    stats = ThreadStats(handle="+1", days_silent=5, last_from_me=False,
-                        total_messages=50, recent_inbound_text=["you around"])
+    stats = ThreadStats(
+        handle="+1",
+        days_silent=5,
+        last_from_me=False,
+        total_messages=50,
+        recent_inbound_text=["you around"],
+    )
     out = LocalModelGistProducer(model_id="stub-4b", backend=Terse()).produce(
-        "h_0123456789ab", stats, "action_needed", AS_OF)
+        "h_0123456789ab", stats, "action_needed", AS_OF
+    )
     assert out["gist"] == "they need an answer from you about the trip"
     assert out["producer"] == "local_model"
     assert out["model_id"] == "stub-4b"
@@ -449,18 +518,33 @@ def test_a_usable_model_answer_is_kept_and_labelled():
 def test_the_model_cannot_move_structured_fields():
     """The model rewrites the sentence and nothing else. A confused model must not be
     able to invent a deadline or push someone up the brief."""
+
     class Liar:
         def summarize(self, inbound, state, facts):
             return "totally urgent, respond immediately"
 
-    stats = ThreadStats(handle="+1", days_silent=9, last_from_me=False,
-                        total_messages=50, recent_inbound_text=["you around"])
+    stats = ThreadStats(
+        handle="+1",
+        days_silent=9,
+        last_from_me=False,
+        total_messages=50,
+        recent_inbound_text=["you around"],
+    )
     sql = SqlGistProducer().produce("h_0123456789ab", stats, "action_needed", AS_OF)
     model = LocalModelGistProducer(model_id="stub", backend=Liar()).produce(
-        "h_0123456789ab", stats, "action_needed", AS_OF)
+        "h_0123456789ab", stats, "action_needed", AS_OF
+    )
 
-    for field in ("state", "days_silent", "unanswered_question", "has_deadline",
-                  "deadline_hint", "facts", "priority", "contact_id"):
+    for field in (
+        "state",
+        "days_silent",
+        "unanswered_question",
+        "has_deadline",
+        "deadline_hint",
+        "facts",
+        "priority",
+        "contact_id",
+    ):
         assert model[field] == sql[field], field
 
 
@@ -468,16 +552,14 @@ def test_the_model_cannot_move_structured_fields():
 
 
 def test_gists_are_deterministic(tmp_path):
-    db = _thread(tmp_path, [sent("ok"), received("you around")],
-                 last_message_days_ago=5)
+    db = _thread(tmp_path, [sent("ok"), received("you around")], last_message_days_ago=5)
     a = build_gists(str(db), salt=SALT, as_of=AS_OF, now_epoch=_now())
     b = build_gists(str(db), salt=SALT, as_of=AS_OF, now_epoch=_now())
     assert a == b
 
 
 def test_write_gists_round_trips(tmp_path):
-    db = _thread(tmp_path, [sent("ok"), received("you around")],
-                 last_message_days_ago=5)
+    db = _thread(tmp_path, [sent("ok"), received("you around")], last_message_days_ago=5)
     gists = build_gists(str(db), salt=SALT, as_of=AS_OF, now_epoch=_now())
     written = write_gists(gists, str(tmp_path / "out"))
     assert len(written) == len(gists)
@@ -495,12 +577,15 @@ def test_group_chats_do_not_produce_gists(tmp_path):
     con = sqlite3.connect(db)
     con.executescript(SCHEMA)
     cur = con.cursor()
-    cur.execute("INSERT INTO handle (id, service, country) VALUES (?,?,?)",
-                ("+15550100777", "iMessage", "us"))
+    cur.execute(
+        "INSERT INTO handle (id, service, country) VALUES (?,?,?)",
+        ("+15550100777", "iMessage", "us"),
+    )
     hid = cur.lastrowid
     cur.execute(
         "INSERT INTO chat (guid, style, chat_identifier, service_name) VALUES (?,?,?,?)",
-        ("iMessage;+;chat777", 43, "chat777", "iMessage"))
+        ("iMessage;+;chat777", 43, "chat777", "iMessage"),
+    )
     cid = cur.lastrowid
     cur.execute("INSERT INTO chat_handle_join VALUES (?,?)", (cid, hid))
     for i in range(6):
@@ -508,9 +593,11 @@ def test_group_chats_do_not_produce_gists(tmp_path):
         cur.execute(
             """INSERT INTO message (guid, text, handle_id, service, date, is_from_me)
                VALUES (?,?,?,?,?,?)""",
-            (f"G-{i}", "you around", hid, "iMessage", to_apple_ns(when), 0))
-        cur.execute("INSERT INTO chat_message_join VALUES (?,?,?)",
-                    (cid, cur.lastrowid, to_apple_ns(when)))
+            (f"G-{i}", "you around", hid, "iMessage", to_apple_ns(when), 0),
+        )
+        cur.execute(
+            "INSERT INTO chat_message_join VALUES (?,?,?)", (cid, cur.lastrowid, to_apple_ns(when))
+        )
     con.commit()
     con.close()
 
@@ -520,22 +607,29 @@ def test_group_chats_do_not_produce_gists(tmp_path):
 def test_null_text_rows_still_count_for_timing(tmp_path):
     """~47% of a real corpus has NULL text. Ignoring those rows for timing reports a
     live thread as quiet — a confident wrong answer about somebody's friend."""
-    db = _thread(tmp_path, [
-        sent("ok that works"),
-        received("you around"),
-    ], last_message_days_ago=200)
+    db = _thread(
+        tmp_path,
+        [
+            sent("ok that works"),
+            received("you around"),
+        ],
+        last_message_days_ago=200,
+    )
 
     import sqlite3
 
     from conftest import to_apple_ns
+
     con = sqlite3.connect(db)
     con.execute(
         """INSERT INTO message (guid, text, handle_id, service, date, is_from_me)
            VALUES (?,?,?,?,?,?)""",
-        ("NULLROW", None, 1, "iMessage", to_apple_ns(_ago(2)), 0))
-    con.execute("INSERT INTO chat_message_join VALUES (?,?,?)",
-                (1, con.execute("SELECT MAX(ROWID) FROM message").fetchone()[0],
-                 to_apple_ns(_ago(2))))
+        ("NULLROW", None, 1, "iMessage", to_apple_ns(_ago(2)), 0),
+    )
+    con.execute(
+        "INSERT INTO chat_message_join VALUES (?,?,?)",
+        (1, con.execute("SELECT MAX(ROWID) FROM message").fetchone()[0], to_apple_ns(_ago(2))),
+    )
     con.commit()
     con.close()
 

@@ -17,6 +17,7 @@ requires all three, and none of them may be weakened to make a checklist green.
 Nothing in this module calls a model. Exemplar selection is stratified sampling, which
 is deterministic, free, and — unlike a model — reproducible by a Swift port.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -199,8 +200,7 @@ def _select_exemplars(candidates: list[_Exemplar]) -> list[_Exemplar]:
     return sorted(picked, key=lambda m: (m.ts_epoch, m.text))
 
 
-def _content_hash(contact_id: str | None, scope: str, register: dict,
-                  exemplars: list[str]) -> str:
+def _content_hash(contact_id: str | None, scope: str, register: dict, exemplars: list[str]) -> str:
     """Deterministic content hash, exactly as pinned by CONTRACTS.md section 6:
     `"vp_" + sha256(canonical_json)[:8]`.
 
@@ -214,15 +214,17 @@ def _content_hash(contact_id: str | None, scope: str, register: dict,
       equivalent, so escaping here would guarantee a mismatch with Track A's port.
     """
     payload = json.dumps(
-        {"contact_id": contact_id, "scope": scope, "register": register,
-         "exemplars": exemplars},
-        sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+        {"contact_id": contact_id, "scope": scope, "register": register, "exemplars": exemplars},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
     )
     return "vp_" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:8]
 
 
-def _serialize(messages: list[chatdb.SentMessage], contact_id: str | None,
-               scope: str, as_of: str) -> dict:
+def _serialize(
+    messages: list[chatdb.SentMessage], contact_id: str | None, scope: str, as_of: str
+) -> dict:
     """Guard two of three, then the pack.
 
     Every source row is re-checked here, over the rows the query actually returned.
@@ -250,9 +252,7 @@ def _serialize(messages: list[chatdb.SentMessage], contact_id: str | None,
     # Redaction applies to the exemplars alone, and the pipeline order matters:
     # redact -> truncate -> dedup -> sample. Dedup must see the final string, or
     # forty exemplars can be twenty-one unique ones (see `_select_exemplars`).
-    candidates = [
-        _Exemplar(text=_truncate(redact(m.text)), ts_epoch=m.ts_epoch) for m in messages
-    ]
+    candidates = [_Exemplar(text=_truncate(redact(m.text)), ts_epoch=m.ts_epoch) for m in messages]
     candidates = [c for c in candidates if c.text.strip()]
     exemplars = [c.text for c in _select_exemplars(candidates)]
 
@@ -260,9 +260,7 @@ def _serialize(messages: list[chatdb.SentMessage], contact_id: str | None,
         raise ValueError(f"{len(exemplars)} exemplars exceeds the cap of {MAX_EXEMPLARS}")
     for e in exemplars:
         if len(e) > MAX_EXEMPLAR_CHARS:
-            raise ValueError(
-                f"exemplar of {len(e)} chars exceeds the cap of {MAX_EXEMPLAR_CHARS}"
-            )
+            raise ValueError(f"exemplar of {len(e)} chars exceeds the cap of {MAX_EXEMPLAR_CHARS}")
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -276,8 +274,9 @@ def _serialize(messages: list[chatdb.SentMessage], contact_id: str | None,
     }
 
 
-def build_packs(db_path: str, salt: bytes | None = None,
-                as_of: str | None = None) -> dict[str, dict]:
+def build_packs(
+    db_path: str, salt: bytes | None = None, as_of: str | None = None
+) -> dict[str, dict]:
     """Every per-contact pack plus the global fallback, keyed by output filename.
 
     `salt` defaults to `$BOI_DEV_USER_SALT` (see `resolve_salt`), which Track A uses
@@ -373,15 +372,25 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--db", help="path to a Messages chat.db, opened read-only")
     ap.add_argument("--out", help="output directory for one pack per contact")
     ap.add_argument("--pack", help="a pack to compare against, used with a single --compare path")
-    ap.add_argument("--compare", nargs="+", metavar="PACK",
-                    help="diff two packs field by field. Give two paths, or one path "
-                         "together with --pack.")
-    ap.add_argument("--ignore", nargs="*", default=[], metavar="FIELD",
-                    help="top-level fields to skip when comparing, e.g. as_of")
-    ap.add_argument("--salt", default=None,
-                    help=f"user_salt for the contact_id HMAC; ${SALT_ENV_VAR} otherwise")
-    ap.add_argument("--as-of", dest="as_of", default=None,
-                    help="ISO 8601 UTC timestamp to stamp on every pack")
+    ap.add_argument(
+        "--compare",
+        nargs="+",
+        metavar="PACK",
+        help="diff two packs field by field. Give two paths, or one path together with --pack.",
+    )
+    ap.add_argument(
+        "--ignore",
+        nargs="*",
+        default=[],
+        metavar="FIELD",
+        help="top-level fields to skip when comparing, e.g. as_of",
+    )
+    ap.add_argument(
+        "--salt", default=None, help=f"user_salt for the contact_id HMAC; ${SALT_ENV_VAR} otherwise"
+    )
+    ap.add_argument(
+        "--as-of", dest="as_of", default=None, help="ISO 8601 UTC timestamp to stamp on every pack"
+    )
     a = ap.parse_args(argv)
 
     if a.compare:
@@ -398,8 +407,10 @@ def main(argv: list[str] | None = None) -> int:
     packs = build_packs(a.db, salt=resolve_salt(a.salt), as_of=a.as_of)
     for path in write_packs(packs, a.out):
         pack = packs[path.name]
-        print(f"{path}  {pack['voice_pack_version']}  "
-              f"{pack['scope']}  {pack['n_exemplars']} exemplars")
+        print(
+            f"{path}  {pack['voice_pack_version']}  "
+            f"{pack['scope']}  {pack['n_exemplars']} exemplars"
+        )
     return 0
 
 

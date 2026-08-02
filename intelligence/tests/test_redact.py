@@ -5,6 +5,7 @@ untouched, which is exactly the failure mode the section calls out: the target c
 is lowercase texting, so a pattern requiring `[A-Z]` is tested against samples that do
 not resemble the data.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -112,7 +113,7 @@ def test_names_that_are_also_common_words_do_not_false_positive(text):
 
 
 def test_a_given_name_followed_by_a_common_word_is_not_a_full_name():
-    """"sorry been mia this week" — `mia` is a given name, `this` is not a surname."""
+    """ "sorry been mia this week" — `mia` is a given name, `this` is not a surname."""
     assert redact("sorry been mia this week") == "sorry been mia this week"
 
 

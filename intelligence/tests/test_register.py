@@ -3,6 +3,7 @@
 CONTRACTS.md section 6 pins percentile rounding because Tracks A and B are diffed on
 identical input at integration. These tests are the Python half of that agreement.
 """
+
 from __future__ import annotations
 
 from boi_intel.redact import redact

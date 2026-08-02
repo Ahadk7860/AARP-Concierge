@@ -4,6 +4,7 @@ The schema is imported from `scripts/make_synthetic_chatdb.py` rather than resta
 here. A second copy would drift, and a test that passes against a stale schema proves
 nothing about the reader that runs against the real one.
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -54,8 +55,7 @@ def make_db(
     con = sqlite3.connect(path)
     con.executescript(SCHEMA)
     cur = con.cursor()
-    cur.execute("INSERT INTO handle (id, service, country) VALUES (?,?,?)",
-                (handle, service, "us"))
+    cur.execute("INSERT INTO handle (id, service, country) VALUES (?,?,?)", (handle, service, "us"))
     hid = cur.lastrowid
     cur.execute(
         "INSERT INTO chat (guid, style, chat_identifier, service_name) VALUES (?,?,?,?)",
@@ -69,11 +69,11 @@ def make_db(
         cur.execute(
             """INSERT INTO message (guid, text, handle_id, service, date, is_from_me)
                VALUES (?,?,?,?,?,?)""",
-            (f"T-{i:06d}", text, 0 if from_me else hid, service,
-             to_apple_ns(when), from_me),
+            (f"T-{i:06d}", text, 0 if from_me else hid, service, to_apple_ns(when), from_me),
         )
-        cur.execute("INSERT INTO chat_message_join VALUES (?,?,?)",
-                    (cid, cur.lastrowid, to_apple_ns(when)))
+        cur.execute(
+            "INSERT INTO chat_message_join VALUES (?,?,?)", (cid, cur.lastrowid, to_apple_ns(when))
+        )
 
     con.commit()
     con.close()

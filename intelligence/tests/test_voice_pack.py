@@ -4,6 +4,7 @@ The first test in this file is the one that matters. Everything else here is
 correctness; that one is the privacy claim. It is a frozen anchor — see CONTRACTS.md
 section 7 and prompt 01. Do not weaken, skip, or narrow its input to make a run green.
 """
+
 from __future__ import annotations
 
 import json
@@ -48,16 +49,19 @@ def test_inbound_messages_never_reach_a_pack(tmp_path):
     serializer raises; with both removed, this assertion fails. Both runs are in the
     prompt 01 report.
     """
-    db = make_db(tmp_path / "chat.db", [
-        sent("ok that works for me"),
-        received(INBOUND_CANARY),
-        sent("lmk when ur free"),
-        received(INBOUND_CANARY + " again"),
-        sent("im down whenever"),
-        sent("haha yeah exactly"),
-        sent("prob gonna be late"),
-        received("are you still coming on the 14th"),
-    ])
+    db = make_db(
+        tmp_path / "chat.db",
+        [
+            sent("ok that works for me"),
+            received(INBOUND_CANARY),
+            sent("lmk when ur free"),
+            received(INBOUND_CANARY + " again"),
+            sent("im down whenever"),
+            sent("haha yeah exactly"),
+            sent("prob gonna be late"),
+            received("are you still coming on the 14th"),
+        ],
+    )
 
     packs = build_packs(str(db), as_of="2026-08-01T00:00:00Z")
 
@@ -80,18 +84,30 @@ def test_serializer_rejects_a_row_the_user_did_not_write():
 
 
 def test_the_leak_checker_itself_passes_on_generated_packs(tmp_path):
-    db = make_db(tmp_path / "chat.db", [
-        sent("ok that works for me"), sent("lmk when ur free"),
-        sent("im down whenever"), sent("haha yeah exactly"),
-        sent("prob gonna be late"), received("call me when you get a sec"),
-    ])
-    written = write_packs(build_packs(str(db), as_of="2026-08-01T00:00:00Z"),
-                          str(tmp_path / "out"))
+    db = make_db(
+        tmp_path / "chat.db",
+        [
+            sent("ok that works for me"),
+            sent("lmk when ur free"),
+            sent("im down whenever"),
+            sent("haha yeah exactly"),
+            sent("prob gonna be late"),
+            received("call me when you get a sec"),
+        ],
+    )
+    written = write_packs(build_packs(str(db), as_of="2026-08-01T00:00:00Z"), str(tmp_path / "out"))
     for path in written:
         r = subprocess.run(
-            [sys.executable, str(ROOT / "scripts" / "check_voice_pack_leak.py"),
-             "--db", str(db), "--pack", str(path)],
-            capture_output=True, text=True,
+            [
+                sys.executable,
+                str(ROOT / "scripts" / "check_voice_pack_leak.py"),
+                "--db",
+                str(db),
+                "--pack",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
         )
         assert r.returncode == 0, r.stdout + r.stderr
 
@@ -100,14 +116,17 @@ def test_the_leak_checker_itself_passes_on_generated_packs(tmp_path):
 
 
 def test_exemplars_carry_no_phone_email_or_amount(tmp_path):
-    db = make_db(tmp_path / "chat.db", [
-        sent("call me at +1 (555) 010-0042 when you land"),
-        sent("my email is skyler.luk@example.com if thats easier"),
-        sent("it came out to $1,240.50 total which is wild"),
-        sent("i live at 1600 Amphitheatre Pkwy now"),
-        sent("Jordan Feldman said he'd cover the rest"),
-        sent("ok cool"),
-    ])
+    db = make_db(
+        tmp_path / "chat.db",
+        [
+            sent("call me at +1 (555) 010-0042 when you land"),
+            sent("my email is skyler.luk@example.com if thats easier"),
+            sent("it came out to $1,240.50 total which is wild"),
+            sent("i live at 1600 Amphitheatre Pkwy now"),
+            sent("Jordan Feldman said he'd cover the rest"),
+            sent("ok cool"),
+        ],
+    )
     packs = build_packs(str(db), as_of="2026-08-01T00:00:00Z")
 
     for name, pack in packs.items():
@@ -165,11 +184,16 @@ def test_sampling_spans_the_length_distribution(tmp_path):
 
 
 def test_building_twice_yields_the_same_version(tmp_path):
-    db = make_db(tmp_path / "chat.db", [
-        sent("ok that works for me"), sent("lmk when ur free"),
-        sent("im down whenever"), sent("haha yeah exactly"),
-        sent("prob gonna be late"),
-    ])
+    db = make_db(
+        tmp_path / "chat.db",
+        [
+            sent("ok that works for me"),
+            sent("lmk when ur free"),
+            sent("im down whenever"),
+            sent("haha yeah exactly"),
+            sent("prob gonna be late"),
+        ],
+    )
     first = build_packs(str(db), as_of="2026-08-01T00:00:00Z")
     second = build_packs(str(db), as_of="2026-09-14T11:22:33Z")
 
@@ -180,19 +204,21 @@ def test_building_twice_yields_the_same_version(tmp_path):
 
 def test_changing_one_exemplar_changes_the_version(tmp_path):
     base = [
-        sent("ok that works for me"), sent("lmk when ur free"),
-        sent("im down whenever"), sent("haha yeah exactly"),
+        sent("ok that works for me"),
+        sent("lmk when ur free"),
+        sent("im down whenever"),
+        sent("haha yeah exactly"),
         sent("prob gonna be late"),
     ]
-    a = build_packs(str(make_db(tmp_path / "a.db", base)),
-                    as_of="2026-08-01T00:00:00Z")
+    a = build_packs(str(make_db(tmp_path / "a.db", base)), as_of="2026-08-01T00:00:00Z")
     edited = list(base)
     edited[2] = sent("im down whenever honestly")
-    b = build_packs(str(make_db(tmp_path / "b.db", edited)),
-                    as_of="2026-08-01T00:00:00Z")
+    b = build_packs(str(make_db(tmp_path / "b.db", edited)), as_of="2026-08-01T00:00:00Z")
 
-    assert (a["global_fallback.json"]["voice_pack_version"]
-            != b["global_fallback.json"]["voice_pack_version"])
+    assert (
+        a["global_fallback.json"]["voice_pack_version"]
+        != b["global_fallback.json"]["voice_pack_version"]
+    )
 
 
 def test_version_matches_the_schema_pattern(tmp_path):
@@ -207,10 +233,17 @@ def test_version_matches_the_schema_pattern(tmp_path):
 
 
 def test_a_contact_under_five_sent_messages_gets_no_pack(tmp_path):
-    db = make_db(tmp_path / "chat.db", [
-        sent("hey"), sent("you around"), sent("ok np"), sent("later"),
-        received("sorry just seeing this"), received("all good"),
-    ])
+    db = make_db(
+        tmp_path / "chat.db",
+        [
+            sent("hey"),
+            sent("you around"),
+            sent("ok np"),
+            sent("later"),
+            received("sorry just seeing this"),
+            received("all good"),
+        ],
+    )
     assert MIN_SENT_FOR_CONTACT_PACK == 5
 
     packs = build_packs(str(db), as_of="2026-08-01T00:00:00Z")
@@ -221,10 +254,17 @@ def test_a_contact_under_five_sent_messages_gets_no_pack(tmp_path):
 
 
 def test_five_sent_messages_is_enough(tmp_path):
-    db = make_db(tmp_path / "chat.db", [
-        sent("hey"), sent("you around"), sent("ok np"), sent("later"),
-        sent("one more"), received("all good"),
-    ])
+    db = make_db(
+        tmp_path / "chat.db",
+        [
+            sent("hey"),
+            sent("you around"),
+            sent("ok np"),
+            sent("later"),
+            sent("one more"),
+            received("all good"),
+        ],
+    )
     packs = build_packs(str(db), as_of="2026-08-01T00:00:00Z")
     contact_packs = [p for p in packs.values() if p["scope"] == "contact"]
     assert len(contact_packs) == 1
@@ -269,8 +309,7 @@ def test_compare_ignore_skips_only_the_named_field(tmp_path):
     edited["as_of"] = "2030-01-01T00:00:00Z"
     edited["scope"] = "contact"
 
-    assert [d for d in diff_packs(pack, edited, ignore=("as_of",))
-            if d.startswith("as_of")] == []
+    assert [d for d in diff_packs(pack, edited, ignore=("as_of",)) if d.startswith("as_of")] == []
     assert any(d.startswith("scope:") for d in diff_packs(pack, edited, ignore=("as_of",)))
 
 
@@ -306,21 +345,32 @@ def test_cli_compare_exit_codes(tmp_path):
 
 
 def test_every_generated_pack_validates_against_the_frozen_schema(tmp_path):
-    db = make_db(tmp_path / "chat.db", [
-        sent("sorry been mia this week 😭"), sent("omg yes im so down"),
-        sent("lmk when ur free and ill come thru"), sent("Ok. That works for me."),
-        sent("prob gonna be late but ill be there"), sent("can i let u know tmrw?"),
-        received("are you still coming on the 14th"),
-    ])
+    db = make_db(
+        tmp_path / "chat.db",
+        [
+            sent("sorry been mia this week 😭"),
+            sent("omg yes im so down"),
+            sent("lmk when ur free and ill come thru"),
+            sent("Ok. That works for me."),
+            sent("prob gonna be late but ill be there"),
+            sent("can i let u know tmrw?"),
+            received("are you still coming on the 14th"),
+        ],
+    )
     out = tmp_path / "out"
     written = write_packs(build_packs(str(db), as_of="2026-08-01T00:00:00Z"), str(out))
     assert written
 
     for path in written:
         r = subprocess.run(
-            [sys.executable, str(ROOT / "scripts" / "validate_fixtures.py"),
-             "voice_pack.v1", str(path)],
-            capture_output=True, text=True,
+            [
+                sys.executable,
+                str(ROOT / "scripts" / "validate_fixtures.py"),
+                "voice_pack.v1",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
         )
         assert r.returncode == 0, r.stdout + r.stderr
 
@@ -346,8 +396,10 @@ def test_group_chats_do_not_produce_a_contact_pack(tmp_path):
     con = sqlite3.connect(db)
     con.executescript(SCHEMA)
     cur = con.cursor()
-    cur.execute("INSERT INTO handle (id, service, country) VALUES (?,?,?)",
-                ("+15550100777", "iMessage", "us"))
+    cur.execute(
+        "INSERT INTO handle (id, service, country) VALUES (?,?,?)",
+        ("+15550100777", "iMessage", "us"),
+    )
     hid = cur.lastrowid
     cur.execute(
         "INSERT INTO chat (guid, style, chat_identifier, service_name) VALUES (?,?,?,?)",
@@ -363,8 +415,9 @@ def test_group_chats_do_not_produce_a_contact_pack(tmp_path):
                VALUES (?,?,?,?,?,?)""",
             (f"G-{i}", f"group line {i}", 0, "iMessage", to_apple_ns(when), 1),
         )
-        cur.execute("INSERT INTO chat_message_join VALUES (?,?,?)",
-                    (cid, cur.lastrowid, to_apple_ns(when)))
+        cur.execute(
+            "INSERT INTO chat_message_join VALUES (?,?,?)", (cid, cur.lastrowid, to_apple_ns(when))
+        )
     con.commit()
     con.close()
 
@@ -385,8 +438,10 @@ def test_tapbacks_are_excluded_from_the_corpus(tmp_path):
     con = sqlite3.connect(db)
     con.executescript(SCHEMA)
     cur = con.cursor()
-    cur.execute("INSERT INTO handle (id, service, country) VALUES (?,?,?)",
-                ("+15550100888", "iMessage", "us"))
+    cur.execute(
+        "INSERT INTO handle (id, service, country) VALUES (?,?,?)",
+        ("+15550100888", "iMessage", "us"),
+    )
     hid = cur.lastrowid
     cur.execute(
         "INSERT INTO chat (guid, style, chat_identifier, service_name) VALUES (?,?,?,?)",
@@ -400,20 +455,30 @@ def test_tapbacks_are_excluded_from_the_corpus(tmp_path):
         cur.execute(
             """INSERT INTO message (guid, text, handle_id, service, date, is_from_me)
                VALUES (?,?,?,?,?,?)""",
-            (f"M-{i}", f"a real sent message number {i}", 0, "iMessage",
-             to_apple_ns(when), 1),
+            (f"M-{i}", f"a real sent message number {i}", 0, "iMessage", to_apple_ns(when), 1),
         )
-        cur.execute("INSERT INTO chat_message_join VALUES (?,?,?)",
-                    (cid, cur.lastrowid, to_apple_ns(when)))
+        cur.execute(
+            "INSERT INTO chat_message_join VALUES (?,?,?)", (cid, cur.lastrowid, to_apple_ns(when))
+        )
     cur.execute(
         """INSERT INTO message (guid, text, handle_id, service, date, is_from_me,
                                 associated_message_guid, associated_message_type)
            VALUES (?,?,?,?,?,?,?,?)""",
-        ("TAP-1", "Loved “a real sent message number 0”", 0, "iMessage",
-         to_apple_ns(start + timedelta(hours=7)), 1, "p:0/M-0", 2000),
+        (
+            "TAP-1",
+            "Loved “a real sent message number 0”",
+            0,
+            "iMessage",
+            to_apple_ns(start + timedelta(hours=7)),
+            1,
+            "p:0/M-0",
+            2000,
+        ),
     )
-    cur.execute("INSERT INTO chat_message_join VALUES (?,?,?)",
-                (cid, cur.lastrowid, to_apple_ns(start + timedelta(hours=7))))
+    cur.execute(
+        "INSERT INTO chat_message_join VALUES (?,?,?)",
+        (cid, cur.lastrowid, to_apple_ns(start + timedelta(hours=7))),
+    )
     con.commit()
     con.close()
 
@@ -457,14 +522,17 @@ def test_register_reflects_a_sentence_case_writer_who_opens_with_a_name(tmp_path
 
 
 def test_lowercase_third_party_names_do_not_reach_exemplars(tmp_path):
-    db = make_db(tmp_path / "chat.db", [
-        sent("ill ask john smith about it"),
-        sent("talked to maria garcia yesterday"),
-        sent("ok that works for me"),
-        sent("lmk when ur free"),
-        sent("im down whenever"),
-        sent("haha yeah exactly"),
-    ])
+    db = make_db(
+        tmp_path / "chat.db",
+        [
+            sent("ill ask john smith about it"),
+            sent("talked to maria garcia yesterday"),
+            sent("ok that works for me"),
+            sent("lmk when ur free"),
+            sent("im down whenever"),
+            sent("haha yeah exactly"),
+        ],
+    )
     packs = build_packs(str(db), as_of="2026-08-01T00:00:00Z")
 
     for name, pack in packs.items():
@@ -513,14 +581,26 @@ def test_hash_payload_leaves_non_ascii_unescaped():
     got = voice._content_hash("h_0123456789abcdef", "contact", register, ["ok 😭"])
 
     payload_unescaped = json.dumps(
-        {"contact_id": "h_0123456789abcdef", "scope": "contact",
-         "register": register, "exemplars": ["ok 😭"]},
-        sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+        {
+            "contact_id": "h_0123456789abcdef",
+            "scope": "contact",
+            "register": register,
+            "exemplars": ["ok 😭"],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
     )
     payload_escaped = json.dumps(
-        {"contact_id": "h_0123456789abcdef", "scope": "contact",
-         "register": register, "exemplars": ["ok 😭"]},
-        sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+        {
+            "contact_id": "h_0123456789abcdef",
+            "scope": "contact",
+            "register": register,
+            "exemplars": ["ok 😭"],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
     )
 
     expected = "vp_" + hashlib.sha256(payload_unescaped.encode()).hexdigest()[:8]
