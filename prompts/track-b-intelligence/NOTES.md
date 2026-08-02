@@ -20,6 +20,24 @@ Format: `[prompt NN] <OPEN | RESOLVED> — <what and what you tried>`
   the worktree, flagged here because the other three tracks share the machine and one
   of them may assume a different interpreter.
 
+- `[prompt 02] OPEN — the local gist model is not runnable in this environment.`
+  Required by the prompt's evidence list, so stated plainly: **no local model was run
+  and no model output exists.** `mlx_lm`, `mlx`, `llama_cpp` and `huggingface_hub` are
+  all absent from this worktree's venv (the `local` extra is not installed), and no
+  weights are on disk. The machine is `arm64`/Darwin, so MLX is the right backend when
+  someone does install it.
+  What ships regardless: `LocalModelGistProducer` implements the full interface —
+  backend detection (MLX first, llama.cpp CPU fallback), `model_path()`, `download()`
+  via `huggingface_hub.snapshot_download` into `/tmp/boi-b/models`, prompt
+  construction, and output validation. `select_producer()` reports
+  `"weights not downloaded to /tmp/boi-b/models/<id>"` and returns the SQL producer.
+  **Nothing fabricates model output.** The three tests that exercise the model branch
+  inject a stub backend and assert *plumbing only* — that a copied sentence is
+  discarded, that an overlong answer is discarded, and that the model cannot move
+  `state`, `facts`, `priority` or any other structured field. They deliberately make no
+  claim about gist quality from a real model. Prompt 05's eval harness is where that
+  question belongs.
+
 ## Contract gaps
 
 Anything `prompts/CONTRACTS.md` does not specify, specifies wrongly, or specifies in a
@@ -177,6 +195,43 @@ test fail (runs are in the report):
 5. **The hash was `[:12]`.** Now `[:8]`, as § 6 pins. `ensure_ascii=False` was already
    correct and is now covered by a test that fails if it ever flips.
 
+### Prompt 02 — gists
+
+- `[prompt 02]` **`display` is deliberately omitted from every gist.** `gist.v1` allows
+  it and the fixtures carry `"Maya"`, but the only name Track B can see is the raw
+  handle out of `chat.db`, and CONTRACTS.md § 3 says the server must never receive a raw
+  handle for anyone but the account holder. Putting `+15550100001` in `display` would
+  push a raw handle into a cloud-bound document through a field meant for a friendly
+  name. Real display names live in Contacts.app, which is Track A's to read — see
+  `## Requests to other tracks`. A test asserts no raw handle appears anywhere in a gist.
+- `[prompt 02]` **`classify()` returns `None` for a healthy thread and that thread gets
+  no gist at all.** The prompt implies one gist per thread; emitting one for everybody
+  would force a state onto people who are perfectly fine, and "fading" about someone you
+  texted yesterday is exactly the confident wrong answer § 6 forbids. Consequence worth
+  knowing: `--top 5` can legitimately write fewer than five files. On the fixture
+  database it writes four of six.
+- `[prompt 02]` **`birthday` is never produced.** It needs a birth date, which lives in
+  Contacts.app. Inferring one from message text would be fabrication. A test pins this
+  across the whole parameter space so nobody "fixes" it later by guessing.
+- `[prompt 02]` **Facts are extracted from the *pending* inbound run** — the messages
+  since the user last wrote — not from all inbound history. That run is literally "what
+  you owe", so it is the right scope for an allowlist. Reading the whole history swept
+  up a date from a year earlier and presented it as live.
+- `[prompt 02]` **`has_deadline` is gated on recency** (`DEADLINE_MAX_DAYS_SILENT = 30`)
+  even though the date stays in `facts`. The drafter may still mention it; the brief
+  must not sort or phrase on a deadline from 300 days ago.
+- `[prompt 02]` **NULL-text rows count for timing and volume, and are invisible to text
+  analysis.** They are ~47% of a real corpus (§ 10). Excluding them from timing would
+  report a live thread as quiet.
+- `[prompt 02]` **The local model rewrites the 140-character sentence and nothing
+  else.** State, `days_silent`, `facts` and `priority` stay arithmetic, so a confused
+  model cannot invent a deadline or move somebody up the brief. Model output is
+  discarded if it is empty, over-length, or quotes six consecutive words from an inbound
+  message — and a discarded answer reverts `producer` to `"sql"` rather than claiming to
+  be a model gist.
+- `[prompt 02]` **Reciprocity is absent from `priority` by construction**, per § 6.
+  Scoring uses waiting/unanswered/recency/volume/momentum only.
+
 ## Decisions made
 
 Choices the prompt left open that you had to resolve: a library, a data structure, an
@@ -207,11 +262,47 @@ track may have chosen differently.
   Silently dropping the row would leave the broken query in place and the next build
   would leak.
 
+- `[prompt 02] → Track A:` **display names.** Gists ship without `display` because
+  Track B can only see raw handles. Track A reads Contacts.app, so the mapping
+  `contact_id -> display` belongs there. Track D embeds gists in `brief.v1`, so
+  whichever of you fills the field, please fill it from Contacts and not from the
+  handle.
+- `[prompt 02] → Track A:` **thread triage is shared logic.** `threads.py` computes
+  `days_silent`, `last_from_me`, `unanswered_question`, reply latency, max gap and
+  90-day momentum from `chat.db`, and `digest.v1` needs the same numbers. Worth diffing
+  our two implementations before merge — the tapback exclusion
+  (`associated_message_type = 0`) and the NULL-text handling are both easy to get
+  silently wrong, and they move every statistic.
+
 ## Observations
 
 Anything you noticed that the plan did not anticipate, including work that should exist
 but is not in any track's scope. This is often the most useful section at review time.
 
+- **`[prompt 02]` The worst bug in this prompt was over-population, not
+  under-population.** `re.IGNORECASE` was being applied to the capitalised-name and
+  place patterns, which turns `[A-Z][a-z]{1,20}` into "any word" — so `facts.names`
+  filled up with things like `"you ever hear back about"` and `facts.places` with
+  `"all\nlmk what you"`, a splice of two different messages. That is inbound prose
+  travelling to the cloud inside the very object designed to prevent it, and the schema
+  validated it happily because the strings were under 60 characters. Two structural
+  fixes now stop the whole class: patterns are scanned **per message** (never a joined
+  blob, and `[^\S\n]` instead of `\s`), and `_is_a_token` rejects anything over
+  `MAX_FACT_WORDS`. Worth knowing at review time: **`facts` is the object most likely to
+  leak, and a schema check will not catch it.**
+- **`[prompt 02]` `facts` under-populates on the fixture database**, and that is the
+  fixture's fault rather than the extractor's. `THEIR_LINES` in
+  `make_synthetic_chatdb.py` has one date-bearing sentence, so most pending runs contain
+  no specifics and the honest answer is five empty lists. Extraction is exercised
+  properly by purpose-built inputs in `test_facts.py`. Nobody should read the fixture
+  gists as evidence that facts extraction works — read the tests.
+- **`[prompt 02]` `topic` and the name list are closed vocabularies and will need real
+  data.** `infer_topic` recognises six categories by keyword; anything else is `None`.
+  That is the safe direction (a missing label beats a wrong one) but it is a
+  recall/precision dial nobody has tuned against a real corpus yet.
+- **`[prompt 02]` Nothing here re-checks that `facts` covers what a draft wants to
+  say.** The gate is only as good as the allowlist, so if prompt 03's drafts come back
+  vague, suspect this file before suspecting the model.
 - **`[prompt 01, correction]` The name allowlist is now a correctness surface.**
   Lowercase name redaction fires on a closed list of ~700 given names. A name outside
   the list leaks; a surname that happens to be a common English word is kept. This is
