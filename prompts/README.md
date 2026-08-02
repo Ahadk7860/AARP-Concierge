@@ -120,18 +120,23 @@ session opens in, and the exact message to paste into each one.
 
 ## How a track gets reviewed
 
-The order is: **final prompt committed → fresh-context review → your review → you merge.**
+**Three passes, three different readers, then you merge.** A single reviewer cannot do
+this job: one question needs a machine that can execute the suite, one needs maximum
+ignorance, one needs maximum context. Give any two to the same reader and you lose one.
+Canonical procedure: `TRACK-REVIEW.md`.
 
-1. The working agent commits its final prompt, reports, and stops. It does **not** review
-   its own work.
-2. A **fresh agent** — new session, same worktree, no memory of the work — runs the
-   procedure in `TRACK-REVIEW.md` and tries to fail the track. `LAUNCH.md` Step 5 has the
-   block to paste.
-3. You read the findings, then `cd` into the worktree, read `git log --oneline`, check
-   each Definition of Done against the evidence, and read `NOTES.md` for deviations,
-   blockers, shared-file appends, and improvised runtime resources.
-4. Decide: approve, request changes, or re-scope.
-5. You merge, in an order you choose.
+| Pass | Who | Why them |
+|---|---|---|
+| 1 — Evidence | you, in the worktree, via `scripts/review-capture.sh` | only the Mac can run Swift, Xcode and Postgres |
+| 2 — Diff audit | a fresh agent with no memory of the plan | only it can see a bent anchor, or a criterion that was satisfied while the thing stayed broken |
+| 3 — Alignment | the planning session | only it can see across all four tracks and back to the brief |
+
+The working agent reviews nothing. **No pass fixes, commits, or merges** — they report,
+and you decide.
+
+Pass 3 may make surgical edits to `prompts/` and `contracts/` through the amendment
+procedure in `WORKTREE-PROTOCOL.md`. If it does, forward-merge `main` into every affected
+worktree before anyone resumes.
 
 ## Status
 
