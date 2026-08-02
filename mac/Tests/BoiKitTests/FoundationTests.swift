@@ -7,9 +7,9 @@ final class FoundationTests: XCTestCase {
 
     func testDigestRoundTripsThroughTheCommittedFixture() throws {
         let url = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()   // .../mac/Tests/BoiKitTests
-            .deletingLastPathComponent()   // .../mac/Tests
-            .deletingLastPathComponent()   // .../mac
+            .deletingLastPathComponent()   // BoiKitTests
+            .deletingLastPathComponent()   // Tests
+            .deletingLastPathComponent()   // mac
             .deletingLastPathComponent()   // repo root
             .appendingPathComponent("contracts/fixtures/digest/healthy.json")
 
