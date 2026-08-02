@@ -4,7 +4,7 @@
   "scheduled_for": "2026-08-02T12:00:00Z",
   "staleness": {
     "digest_as_of": "2026-07-28T09:14:00Z",
-    "hours_stale": 98.8,
+    "hours_stale": 122.8,
     "warn": true,
     "message": "Haven't seen your Mac since Tuesday, so this is as of then."
   },
