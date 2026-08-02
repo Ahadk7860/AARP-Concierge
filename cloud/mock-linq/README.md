@@ -10,9 +10,15 @@ it is to run one real send, diff the response against `contracts/transcripts/lin
 amend the contract through the procedure in `prompts/WORKTREE-PROTOCOL.md`.
 
 So the mock implements the spec **exactly, including where we suspect the real API
-differs**. Every such suspicion is written down in `prompts/track-c-transport/NOTES.md`
-rather than silently corrected here. A mock that quietly improves on the spec hides the
-discrepancy it exists to surface.
+differs**, and it is never *stricter* than the spec either — refusing a request the real
+API would accept is the same class of lie as accepting one it would refuse. Every such
+suspicion is written down in `prompts/track-c-transport/NOTES.md` rather than silently
+corrected here.
+
+**Nothing in this directory reads `contracts/transcripts/linq/` at runtime.** The
+transcripts are expected values in the tests. A server that served a transcript which the
+test then asserted against would be comparing a file to itself through fastify, and could
+not fail.
 
 ## Run
 
@@ -25,8 +31,11 @@ logs to stdout.
 
 ## Endpoints
 
-Served under **both** `/api/partner/v3` (the path recorded in the transcripts) and the
-bare root (the `http://localhost:3031` server entry in the OpenAPI document). See NOTES.
+Served under `/api/partner/v3` and **only** that prefix. `CONTRACTS.md` § 11 item 1b is
+resolved: `LINQ_BASE_URL` includes the prefix, so adapters concatenate `/chats` onto it and
+nothing else, and production is a one-value swap. A bare `/chats` request 404s here exactly
+as it would against production — serving both readings would let an adapter built against
+the wrong base pass every test and 404 on the first live send.
 
 | Method | Path | Notes |
 |---|---|---|
@@ -53,19 +62,27 @@ no token.
 |---|---|
 | `up` | `200`, `protocol: "imessage"` |
 | `degraded` | `200`, `protocol: "sms"` |
-| `banned` | `503 {"error":"line_banned","line_id":"..."}`, verbatim from the transcript |
+| `banned` | `503 {"error":"line_banned","line_id":"..."}` |
 | `ratelimited` | `429` with `Retry-After` |
 
 `banned` is the failure mode that actually hurts: platform uptime can read 100% while one
 tenant's line is dead for every user assigned to it.
 
-## Transcript replay
+## Message ids
 
-The mock loads `contracts/transcripts/linq/*.json` at startup. A request body that
-deep-equals a recorded request is answered with that transcript's recorded response,
-verbatim. Anything else gets a deterministic synthesized response of the same shape. This
-makes transcript conformance an assertion against the transcript itself rather than
-against a paraphrase of it.
+**Every send gets a unique id.** This is load-bearing for prompt 02: a mock that handed out
+one immutable `lmsg_01J8ZK` would let an idempotency test pass against a server that cannot
+tell two sends apart. Ids are a per-process counter (`lmsg_mock_000001`), and `trace_id` is
+a W3C traceparent derived from the id, so a run is deterministic without being constant.
+
+## How conformance is actually asserted
+
+`server.test.ts` reads `contracts/openapi/linq-v3-subset.yaml` and checks each response
+against the schema the spec declares: every required key present, **no key the spec does
+not define**, and every enum-constrained value inside its enum. The transcripts supply the
+*requests* and the recorded `503` body; the spec judges the *replies*. There is a negative
+test asserting the schema checker itself rejects a bad body, so a broken checker cannot
+make the conformance tests vacuously green.
 
 ## Webhook signing
 
@@ -93,16 +110,20 @@ to be rewritten when the call happens.
 | `LINQ_FROM_HANDLE` | `+15550100123` | |
 | `LINQ_WEBHOOK_SECRET` | `dev-secret-change-me` | |
 | `MOCK_LINQ_WEBHOOK_URL` | unset | where webhooks are delivered |
-| `MOCK_LINQ_EXPECTED_TOKEN` | unset | unset accepts any non-empty bearer |
+| `MOCK_LINQ_EXPECTED_TOKEN` | `LINQ_API_TOKEN`, else `linq-dev-token` | required **exactly**; set to `""` to accept any non-empty bearer |
 | `MOCK_LINQ_RETRY_AFTER` | `30` | § 11 item 3 — real limits unknown |
-| `MOCK_LINQ_PATH_PREFIXES` | `/api/partner/v3,` | comma-separated |
-| `MOCK_LINQ_TRANSCRIPT_DIR` | `contracts/transcripts/linq/` | |
+| `MOCK_LINQ_PATH_PREFIX` | `/api/partner/v3` | one prefix, canonical |
 | `MOCK_LINQ_LOG_LEVEL` | `info` | |
 
-Only `MOCK_LINQ_PORT`, `MOCK_LINQ_MODE`, `LINQ_FROM_HANDLE` and `LINQ_WEBHOOK_SECRET` are
-in `.env.example`. The rest have working defaults and were not added, because `.env.example`
-is a foundation-owned shared file and an append there is a merge conflict for three other
-tracks.
+The token is required **exactly**, and defaults to `linq-dev-token` rather than to
+"accept anything". That default is deliberate: a mock that takes any non-empty bearer lets
+an adapter ship without ever reading `LINQ_API_TOKEN` and stay green right up to the first
+live send. Set `LINQ_API_TOKEN=linq-dev-token` in your `.env` to talk to the mock.
+
+Only `MOCK_LINQ_PORT`, `MOCK_LINQ_MODE`, `LINQ_FROM_HANDLE`, `LINQ_API_TOKEN` and
+`LINQ_WEBHOOK_SECRET` are in `.env.example`. The rest have working defaults and were not
+added, because `.env.example` is a foundation-owned shared file and an append there is a
+merge conflict for three other tracks.
 
 ## Tests
 

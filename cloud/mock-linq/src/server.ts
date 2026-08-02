@@ -2,9 +2,12 @@
 //
 // This is NOT a convenience fixture. It is a written-down hypothesis about a wire
 // format that has never responded to us, and its job is to be DIFFABLE. It implements
-// contracts/openapi/linq-v3-subset.yaml and replays contracts/transcripts/linq/*.json
-// literally, including the places we suspect the real API differs. A mock that quietly
-// "improves" on the spec hides the discrepancy it exists to surface.
+// contracts/openapi/linq-v3-subset.yaml literally, including the places we suspect the
+// real API differs. A mock that quietly "improves" on the spec -- or is stricter than it
+// -- hides the discrepancy it exists to surface. The transcripts under
+// contracts/transcripts/linq/ are the EXPECTED VALUES IN THE TESTS, never inputs to this
+// file: a server that served a transcript the test then asserted against would be
+// comparing a file to itself.
 //
 // Every answer to CONTRACTS.md section 11 items 4-7 (SLA coverage, line stickiness,
 // rotation notice, tenants per line) lands in `MockLinqConfig`, never in a branch.
@@ -16,9 +19,6 @@
 // imports. Everything the server needs lives in this file.
 
 import { createHmac, timingSafeEqual, createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { resolve as resolvePath } from "node:path";
-import { pathToFileURL, fileURLToPath } from "node:url";
 import { request as undiciRequest } from "undici";
 import Fastify from "fastify";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
@@ -44,20 +44,24 @@ export type MockLinqConfig = {
   webhookSecret: string;
   /** Where outbound webhooks are delivered. Null means "nowhere configured yet". */
   webhookUrl: string | null;
-  /** Null accepts any non-empty bearer token, which is the only thing we can do
-   *  before a rep provisions one. Set it to require an exact match. */
-  expectedToken: string | null;
+  /** The bearer token the mock requires, exactly. Defaults to `DEV_TOKEN` rather than
+   *  to "accept anything": a mock that takes any non-empty bearer lets an adapter ship
+   *  without ever reading `LINQ_API_TOKEN` and stay green right up to the first live
+   *  send. Set it to the empty string to deliberately accept any non-empty token. */
+  expectedToken: string;
   /** CONTRACTS.md section 11 item 3 — real limits unknown; this is the 429 hint. */
   retryAfterSeconds: number;
-  /** The OpenAPI document lists the mock server as `http://localhost:3031` with paths
-   *  like `/chats`, while contracts/transcripts/linq/*.json record the path as
-   *  `/api/partner/v3/chats`. Both readings are served; see NOTES.md. */
-  pathPrefixes: string[];
-  transcriptDir: string;
+  /** CONTRACTS.md section 11 item 1b, RESOLVED 2 Aug: `LINQ_BASE_URL` includes the
+   *  prefix, and the mock serves that path and ONLY that path. Serving the bare `/chats`
+   *  reading as well would let an adapter built against the wrong base pass every test
+   *  here and 404 on the first live send — the exact discrepancy the mock exists to
+   *  surface. */
+  pathPrefix: string;
   logLevel: string;
 };
 
-const REPO_ROOT = new URL("../../../", import.meta.url);
+/** The dev-only token. Real tokens are rep-provisioned; none exists yet. */
+export const DEV_TOKEN = "linq-dev-token";
 
 function parseMode(raw: string | undefined): MockMode {
   if (raw === undefined || raw === "") return "up";
@@ -85,11 +89,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): MockLinqConfig
     fromHandle: env.LINQ_FROM_HANDLE ?? "+15550100123",
     webhookSecret: env.LINQ_WEBHOOK_SECRET ?? "dev-secret-change-me",
     webhookUrl: env.MOCK_LINQ_WEBHOOK_URL ?? null,
-    expectedToken: env.MOCK_LINQ_EXPECTED_TOKEN ?? null,
+    // `.env.example` ships `LINQ_API_TOKEN=` empty, so an empty value means "unset" and
+    // falls through to the dev token. Only an explicit MOCK_LINQ_EXPECTED_TOKEN="" opts
+    // into accepting any non-empty bearer.
+    expectedToken:
+      env.MOCK_LINQ_EXPECTED_TOKEN ??
+      (env.LINQ_API_TOKEN === undefined || env.LINQ_API_TOKEN === "" ? DEV_TOKEN : env.LINQ_API_TOKEN),
     retryAfterSeconds: parseInteger(env.MOCK_LINQ_RETRY_AFTER, 30, "MOCK_LINQ_RETRY_AFTER"),
-    pathPrefixes: (env.MOCK_LINQ_PATH_PREFIXES ?? "/api/partner/v3,").split(","),
-    transcriptDir:
-      env.MOCK_LINQ_TRANSCRIPT_DIR ?? fileURLToPath(new URL("contracts/transcripts/linq/", REPO_ROOT)),
+    pathPrefix: (env.MOCK_LINQ_PATH_PREFIX ?? "/api/partner/v3").replace(/\/$/, ""),
     logLevel: env.MOCK_LINQ_LOG_LEVEL ?? "info",
   };
 }
@@ -158,61 +165,6 @@ export class RequestRecorder {
 }
 
 // ---------------------------------------------------------------------------
-// Transcripts — the mock IS the transcript, so the diff on day one is honest
-// ---------------------------------------------------------------------------
-
-type Transcript = {
-  request?: { method?: string; path?: string; body?: unknown };
-  response?: { status?: number; body?: unknown };
-};
-
-export type LoadedTranscripts = {
-  /** Recorded request body -> recorded response, replayed verbatim on an exact match. */
-  sends: { requestBody: unknown; status: number; body: unknown }[];
-  /** The recorded 503 body, used verbatim by `banned` mode. */
-  lineBanned: { status: number; body: unknown };
-};
-
-function readTranscript(dir: string, name: string): Transcript {
-  const url = new URL(name, pathToFileURL(`${resolvePath(dir)}/`));
-  return JSON.parse(readFileSync(url, "utf8")) as Transcript;
-}
-
-export function loadTranscripts(dir: string): LoadedTranscripts {
-  const sendText = readTranscript(dir, "send_text_200.json");
-  const banned = readTranscript(dir, "send_line_banned_503.json");
-  return {
-    sends: [
-      {
-        requestBody: sendText.request?.body,
-        status: sendText.response?.status ?? 200,
-        body: sendText.response?.body,
-      },
-    ],
-    lineBanned: {
-      status: banned.response?.status ?? 503,
-      body: banned.response?.body,
-    },
-  };
-}
-
-function deepEqual(a: unknown, b: unknown): boolean {
-  if (a === b) return true;
-  if (typeof a !== typeof b || a === null || b === null) return false;
-  if (Array.isArray(a) || Array.isArray(b)) {
-    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
-    return a.every((item, i) => deepEqual(item, b[i]));
-  }
-  if (typeof a !== "object") return false;
-  const ao = a as Record<string, unknown>;
-  const bo = b as Record<string, unknown>;
-  const ak = Object.keys(ao);
-  const bk = Object.keys(bo);
-  if (ak.length !== bk.length) return false;
-  return ak.every((k) => Object.prototype.hasOwnProperty.call(bo, k) && deepEqual(ao[k], bo[k]));
-}
-
-// ---------------------------------------------------------------------------
 // Wire types from contracts/openapi/linq-v3-subset.yaml
 // ---------------------------------------------------------------------------
 
@@ -259,9 +211,11 @@ function validateSendBody(body: unknown): string | null {
       return `unknown part type: ${String(p.type)}`;
     }
   }
-  // Group chats exist in the API and are deliberately out of MVP scope on consent
-  // grounds, so the mock does not pretend to support fan-out.
-  if (Array.isArray(b.to) && b.to.length > 1) return "group send is out of scope";
+  // No maximum on `to`: the spec says `minItems: 1` and stops there. Group chats are out
+  // of MVP scope on consent grounds, but that is a product constraint enforced by the
+  // composer, not a property of this wire format. A mock stricter than the spec fails
+  // requests the real API would accept, which is the same class of lie as a mock that is
+  // laxer than the spec.
   return null;
 }
 
@@ -298,13 +252,13 @@ function authorized(req: FastifyRequest, config: MockLinqConfig): boolean {
   if (!header.startsWith("Bearer ")) return false;
   const token = header.slice("Bearer ".length).trim();
   if (token === "") return false;
-  if (config.expectedToken !== null) return token === config.expectedToken;
-  return true;
+  // An empty expectedToken is the explicit opt-in to accepting any non-empty bearer.
+  if (config.expectedToken === "") return true;
+  return token === config.expectedToken;
 }
 
 export function buildServer(config: MockLinqConfig = loadConfig()): MockLinqServer {
   const recorder = new RequestRecorder();
-  const transcripts = loadTranscripts(config.transcriptDir);
   const sends = new Map<string, SendRecord>();
   let counter = 0;
 
@@ -342,7 +296,11 @@ export function buildServer(config: MockLinqConfig = loadConfig()): MockLinqServ
     if (!authorized(req, config)) return reply.code(401).send({ error: "unauthorized" });
 
     if (config.mode === "banned") {
-      return reply.code(transcripts.lineBanned.status).send(transcripts.lineBanned.body);
+      // Written out here rather than read from the transcript. If the server loaded the
+      // transcript and the test asserted against the same file, the assertion would be
+      // file === file through fastify and could not fail. The transcript is the expected
+      // value in the TEST; this is the implementation being tested.
+      return reply.code(503).send({ error: "line_banned", line_id: config.lineId });
     }
     if (config.mode === "ratelimited") {
       return reply
@@ -356,21 +314,9 @@ export function buildServer(config: MockLinqConfig = loadConfig()): MockLinqServ
 
     const protocol: LinqProtocol = config.mode === "degraded" ? "sms" : "imessage";
 
-    // Replay a recorded transcript verbatim when the request matches one, so a test
-    // asserting transcript conformance is asserting against the transcript itself.
-    const match = transcripts.sends.find((t) => deepEqual(t.requestBody, req.body));
-    if (match !== undefined) {
-      const body: Record<string, unknown> = { ...(match.body as Record<string, unknown>), protocol };
-      const record: SendRecord = {
-        id: String(body.id),
-        status: body.status as SendRecord["status"],
-        protocol,
-        trace_id: String(body.trace_id),
-      };
-      sends.set(record.id, record);
-      return reply.code(match.status).send(body);
-    }
-
+    // Every send gets a UNIQUE id. A mock that replayed a transcript's recorded id would
+    // hand out one immutable `lmsg_01J8ZK` forever, and prompt 02's idempotency test
+    // would pass against a server that cannot tell two sends apart.
     counter += 1;
     const id = `lmsg_mock_${String(counter).padStart(6, "0")}`;
     const record: SendRecord = { id, status: "queued", protocol, trace_id: traceparentFor(id) };
@@ -397,12 +343,12 @@ export function buildServer(config: MockLinqConfig = loadConfig()): MockLinqServ
     });
   }
 
-  for (const rawPrefix of config.pathPrefixes) {
-    const prefix = rawPrefix.trim().replace(/\/$/, "");
-    app.post(`${prefix}/chats`, postChats);
-    app.get(`${prefix}/chats/:id`, getChat);
-    app.get(`${prefix}/lines`, getLines);
-  }
+  // One prefix, and only one. CONTRACTS.md section 11 item 1b is resolved: LINQ_BASE_URL
+  // includes /api/partner/v3, so a bare `/chats` request is a 404 here exactly as it
+  // would be against production.
+  app.post(`${config.pathPrefix}/chats`, postChats);
+  app.get(`${config.pathPrefix}/chats/:id`, getChat);
+  app.get(`${config.pathPrefix}/lines`, getLines);
 
   async function deliverWebhook(
     rawBody: string | Buffer,
@@ -439,7 +385,7 @@ export function buildServer(config: MockLinqConfig = loadConfig()): MockLinqServ
       line_id: config.lineId,
       from_handle: config.fromHandle,
       retry_after_seconds: config.retryAfterSeconds,
-      path_prefixes: config.pathPrefixes,
+      path_prefix: config.pathPrefix,
       webhook_url: config.webhookUrl,
     }),
   );

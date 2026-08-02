@@ -13,7 +13,11 @@ happened, what you tried, and whether it is still open.
 
 Format: `[prompt NN] <OPEN | RESOLVED> — <what and what you tried>`
 
-`[prompt 01] OPEN — npm run lint cannot pass, and the fix is out of Track C's bounds.`
+`[prompt 01] RESOLVED by foundation commit 548d125 — npm run lint could not pass; eslint.config.js did not exist.`
+
+Resolved 2 Aug: the foundation added `eslint.config.js`, changed the script to `eslint .`
+(dropping the removed `--ext` flag), and Track C merged it forward. `npm run lint` now exits
+0. The original report is kept below because the history is what gets reviewed.
 
 One Definition of Done item for prompt 01 is red because of this.
 
@@ -51,11 +55,8 @@ of Done cannot be satisfied as written") I did neither and am reporting instead.
 `npm run lint`, got exit 0 with zero findings, and deleted the file in the same shell
 command. Nothing was committed; the working tree was left as found.
 
-**What the user needs to decide:** who owns `eslint.config.js`. It is a foundation-owned
-shared file that does not exist yet. Suggested resolution: the user adds it to `main` and
-appends it to the `SHARED` regex in `scripts/check-ownership.sh`, then instructs each track
-to `git merge main`. Separately, `--ext .ts` is itself a removed ESLint 9 flag — currently
-ignored, but it will start erroring.
+**Outcome:** the user added `eslint.config.js` to `main` and fixed the script. Nothing is
+outstanding.
 
 ## Contract gaps
 
@@ -72,11 +73,16 @@ document lists the mock server as `http://localhost:3031` with a path of `/chats
 transcript reading alone, prompt 02's adapter would hit `localhost:3031/chats` and 404, and
 "swapping `LINQ_BASE_URL` is the only diff when a token arrives" would be false.
 
-Resolved locally without touching anything frozen: the mock serves **both** prefixes
-(`MOCK_LINQ_PATH_PREFIXES`, default `/api/partner/v3,`). No request or response shape
-changes, so nothing diffable is hidden. The user should still decide which is canonical
-before prompt 02 encodes an assumption — the consistent value is
-`LINQ_BASE_URL=http://localhost:3031/api/partner/v3`.
+**RESOLVED 2 Aug** as `CONTRACTS.md` § 11 item 1b: `LINQ_BASE_URL` includes the prefix.
+`.env.example` now ships `http://localhost:3031/api/partner/v3`.
+
+My interim fix — serving both prefixes — was **wrong, and is corrected**. Answering both
+readings is precisely the discrepancy the mock exists to surface: an adapter built against
+the wrong base would have passed every test here and 404'd on the first live send. The mock
+now serves `/api/partner/v3` and only that prefix (`MOCK_LINQ_PATH_PREFIX`), and a test
+asserts that `/chats`, `/v3/chats` and `/partner/v3/chats` all 404. The lesson generalizes:
+when the contract is ambiguous, the mock must pick one reading and record it, never satisfy
+both.
 
 No other gap. Every contract prompt 01 needed was present and sufficient.
 
@@ -87,13 +93,25 @@ Every append to a foundation-owned shared file: dependency manifests, lint confi
 
 Format: `[prompt NN] <file> — added <what> because <why>`
 
-**None.** No shared or foundation-owned file was modified. Prompt 01 needed no new
-dependency: fastify and undici were already in `package.json`.
+`[prompt 01 corrections] package.json — added devDependency "yaml": "^2.9.0" because the
+rewritten conformance test parses contracts/openapi/linq-v3-subset.yaml and asserts each
+response against the schema the spec declares.` Node ships no YAML parser, and `js-yaml` is
+present only transitively via eslint — too fragile to hang a contract assertion on.
 
-One thing to know: `npm install` rewrites `package-lock.json` — it adds `"peer": true` to
-eight entries, incidental npm-version churn with no dependency change. That is a mutation,
-not an append, so I restored it with `git checkout -- package-lock.json`. Expect the same
-churn in any worktree that runs `npm install`.
+`[prompt 01 corrections] package-lock.json — regenerated with npm install --package-lock-only.`
+
+Both appends are strictly additive: one line added to the end of `devDependencies`, 26
+lines added to the lockfile, nothing reordered. Note that `npm install --save-dev` **cannot**
+be used here — it alphabetically re-sorts every dependency block and un-escapes the
+`description`, which is a restructure, not an append. I reverted that and hand-added the
+single line instead, then regenerated the lockfile with npm as the rule requires.
+
+Otherwise none. The server itself needed no new dependency: fastify and undici were already
+in `package.json`, and `yaml` is test-only.
+
+One thing to know: `npm install` also rewrites `package-lock.json` with incidental
+npm-version churn (`"peer": true` on eight entries, no dependency change). Expect that in
+any worktree that runs `npm install`.
 
 ## Runtime resources
 
@@ -120,12 +138,17 @@ visible and reversible.
 
 Format: `[prompt NN] → Track <X>: <what you need and why>`
 
-`[prompt 01] → foundation/user: create eslint.config.js.` See `## Blockers`. Track C
-cannot, and no track can — it is outside every track's owned set.
+`[prompt 01] → foundation/user: create eslint.config.js.` **DONE** in 548d125.
 
-`[prompt 01] → foundation/user: decide the canonical LINQ_BASE_URL.` See
-`## Contract gaps`. Workaround is visible and reversible: the mock serves both prefixes,
-and removing one is a one-line config default.
+`[prompt 01] → foundation/user: decide the canonical LINQ_BASE_URL.` **DONE** — resolved as
+§ 11 item 1b, and the mock now serves that one prefix only.
+
+`[prompt 01 corrections] → foundation/user: consider adding LINQ_API_TOKEN=linq-dev-token to
+.env.example.` The mock now requires the token exactly and defaults to `linq-dev-token`, so
+a fresh `.env` copied from the example has an empty token and gets 401s until it is set. I
+did not append it myself — `.env.example` ships `LINQ_API_TOKEN=` deliberately empty with a
+comment explaining it is not provisioned, and overwriting that value is an edit rather than
+an append. Documented in `cloud/mock-linq/README.md` instead.
 
 Nothing is needed from Track A, B, or D. Prompt 01 reached a green checklist using only
 the foundation stubs and Track C's own code, as `CONTRACTS.md` § 10 requires.
@@ -139,9 +162,12 @@ Nothing was weakened, skipped, loosened, or lowered. No existing test, assertion
 rule, threshold, or type was modified, and no test is skipped or pending. The items below
 are additions a working server required but the prompt did not specify.
 
-1. **Two path prefixes served.** See `## Contract gaps`.
+1. ~~**Two path prefixes served.**~~ **Corrected 2 Aug — reverted to one.** See
+   `## Contract gaps`.
 
-2. **The mock replays the transcripts rather than paraphrasing them.** It loads
+2. ~~**The mock replays the transcripts rather than paraphrasing them.**~~ **Corrected
+   2 Aug — replay removed entirely.** Original text kept below; what replaced it is in
+   `## Corrections to prompt 01`. It loads
    `contracts/transcripts/linq/*.json` at startup; a request body that deep-equals a
    recorded request is answered with that transcript's recorded response verbatim, and
    `banned` mode returns the recorded `503` body verbatim. Anything unrecorded gets a
@@ -150,9 +176,10 @@ are additions a working server required but the prompt did not specify.
    recorded `id` (`lmsg_01J8ZK`) and `trace_id` cannot be reproduced by a generator, so any
    other approach would have meant weakening the criterion to a shape check.
 
-3. **Multi-recipient sends are rejected with `400`.** Group chats exist in the Linq API and
-   are deliberately out of MVP scope on consent grounds (prompt 01). The mock refuses them
-   rather than pretending to fan out, so a group send cannot pass silently in a test.
+3. ~~**Multi-recipient sends are rejected with `400`.**~~ **Corrected 2 Aug — removed.**
+   The spec's `to` is `minItems: 1` with no maximum, so the refusal made the mock stricter
+   than the contract. Group chats being out of MVP scope is a product constraint the
+   composer enforces, not a property of this wire format.
 
 4. **`server.ts` is a single self-contained file.** Node's type stripping does not resolve
    `./x.js` to `x.ts`, and there is no build step, so an entry module that must start with
@@ -160,6 +187,74 @@ are additions a working server required but the prompt did not specify.
    signing, and the recorder into modules would satisfy taste and break the DoD's run
    command. Tests import it normally; vitest resolves `./server.js` to the `.ts` source,
    which is the same pattern the foundation's own `contracts.test.ts` uses.
+
+## Corrections to prompt 01
+
+Four defects the user caught on review of the first prompt-01 commit. All four were real;
+all four are fixed in the corrections commit. Recording them because the pattern matters
+more than the individual fixes: **three of the four were places the mock lied in the
+direction of making my own tests pass.**
+
+### 1. Two path prefixes → one
+
+Serving both `/api/partner/v3/chats` and bare `/chats` meant an adapter built against the
+wrong base URL would pass every test here and 404 on the first live send — the exact
+discrepancy the mock exists to surface. My NOTES had identified the ambiguity correctly and
+then drawn the wrong conclusion: the fix for an ambiguous contract is to pick one reading
+and record it, not to answer both. Now `/api/partner/v3` only, with a test asserting
+`/chats`, `/v3/chats` and `/partner/v3/chats` all 404.
+
+### 2. The transcript-conformance test was circular
+
+The server loaded `send_text_200.json` and replayed its recorded response; the test asserted
+equality against the same file. That is `file === file` through fastify — it could not fail,
+whatever the server did.
+
+Fixed by removing transcript loading from the server entirely. `cloud/mock-linq/` now reads
+nothing from `contracts/` at runtime. The test parses
+`contracts/openapi/linq-v3-subset.yaml` and asserts each response against the schema the
+spec declares: required keys present, **no key the spec does not define**, enum-constrained
+values inside their enums. The transcript supplies the *request* and the recorded `503`
+body; the spec judges the *replies*.
+
+Two guards against the new test being vacuous in its own way:
+
+- A negative test asserts the schema checker rejects an extra key, a missing required key,
+  and an out-of-enum value. A broken checker would otherwise make every conformance
+  assertion silently green.
+- I mutation-tested the suite. Injecting an undefined response key, an out-of-enum
+  `status`, a fixed id, and a second bare-`/chats` route each produce failures (2, 4, 1 and
+  1 test respectively). Evidence is in the report.
+
+### 3. Message ids were not unique
+
+Transcript replay returned `lmsg_01J8ZK` for every matching send, so prompt 02's idempotency
+test would have passed against a mock that could not tell two sends apart. Ids are now a
+per-process counter and `trace_id` derives from the id; a test sends five times and asserts
+five distinct ids and trace ids, and that none equals the transcript's recorded id.
+
+### 4. `expectedToken` defaulted to accepting anything
+
+Any non-empty bearer was accepted, so prompt 02 could have shipped never reading
+`LINQ_API_TOKEN` and stayed green. The default is now the exact string `linq-dev-token`
+(`DEV_TOKEN`), overridable by `LINQ_API_TOKEN` or `MOCK_LINQ_EXPECTED_TOKEN`. An empty
+`LINQ_API_TOKEN` — which is what `.env.example` ships — means *unset* and falls through to
+the dev token; only an explicit `MOCK_LINQ_EXPECTED_TOKEN=""` opts into accepting any
+bearer. Tests assert a wrong non-empty bearer is a 401.
+
+### 5. The multi-recipient `400` was stricter than the spec
+
+`to` is `minItems: 1` with no maximum. My refusal imported a product constraint into the
+wire format. **Being stricter than the spec is the same class of lie as being laxer** — both
+make the mock disagree with the thing it models, and the strict direction is harder to
+notice because it looks like diligence. Removed; the test now asserts a two-recipient send
+returns 200.
+
+### What I take from this
+
+Every one of these made a test greener. The mock's job is to be the thing you diff a real
+response against, and each defect quietly reduced the surface where a diff could show up.
+When I next reach for "make the mock accommodate this," that is the signal to stop.
 
 ## Decisions made
 
@@ -177,8 +272,9 @@ cheap to change because none is load-bearing for the adapter's happy path.
 | malformed request body | `400 {"error":"validation","detail":"..."}` | not documented at all |
 | `429` body | `{"error":"rate_limited"}` | only `Retry-After` is documented |
 | `GET /chats/{id}`, unknown id | `404 {"error":"not_found"}` | not documented |
-| token validation | any non-empty bearer, unless `MOCK_LINQ_EXPECTED_TOKEN` is set | no token exists to validate against |
+| token validation | the exact string `linq-dev-token`, overridable by `LINQ_API_TOKEN` | corrected — see `## Corrections to prompt 01` item 4 |
 | which endpoints faults apply to | `POST /chats` only; `/lines` reports the injected mode as line status | a fault mode models a *line*, not the platform |
+| response ids | per-process counter, `lmsg_mock_000001` | unique per send, so idempotency is testable |
 
 A real rate-limited platform would plausibly rate-limit reads too. If it does, that is a
 config change, not a rewrite.
