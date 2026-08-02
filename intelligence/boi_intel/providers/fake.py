@@ -7,6 +7,7 @@ harness with no API key and no rate limit. Live providers implement the same
 Track B owns `providers/gemini.py` and `providers/kimi.py`; it does not modify this
 file.
 """
+
 from __future__ import annotations
 
 import json
@@ -44,6 +45,4 @@ class FakeProvider:
             rec = json.loads(path.read_text())
             if rec["match"]["gist_id_contains"] in suffix:
                 return rec["response"]
-        raise LookupError(
-            f"no recorded response matches this prompt; add one under {self.dir}"
-        )
+        raise LookupError(f"no recorded response matches this prompt; add one under {self.dir}")
