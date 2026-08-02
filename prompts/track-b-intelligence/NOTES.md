@@ -180,6 +180,14 @@ Every entry names the prompt where it surfaced.
   to Track B that does not. Windowed statistics — `days_silent`, momentum, the 90-day
   comparison — are unaffected, and `gist.v1` has no `first_contact_at`, so nothing Track
   B *emits* is currently wrong. This is a missed signal, not a false claim.
+  **Not reproducible on the synthetic fixture, and stated as reasoning rather than as a
+  measurement.** Checked with the new `--retention-cap-days 365` flag: `max_gap_days`
+  per thread is `[11, 0, 0, 0, 0, 1]` uncapped and `[11, 0, 0, 0, 0, 0]` capped, because
+  `make_synthetic_chatdb.py` spreads each thread's messages evenly over its range and so
+  never produces a gap anywhere near the 90-day `revived` trigger. Neither variant can
+  reach the state, so the fixture cannot show the difference either way. The claim rests
+  on Track A's real-corpus finding (every `first_contact_at` floored at an exact 365-day
+  boundary) plus the arithmetic of `classify()`, not on anything demonstrated here.
 
 - `[prompt 05] OPEN — the fabrication gate refuses a real human message, and the eval
   harness is what found it.` The `oracle` row replays the user's own reply through the
