@@ -225,18 +225,23 @@ public final class MirrorDatabase {
         public var isGroup: Bool { chatStyle == 43 }
     }
 
-    /// Streams every mirrored message in send order.
+    /// Streams mirrored messages in send order, optionally filtered.
     ///
     /// Ordered by `(sent_at, guid)` rather than by `sent_at` alone: two messages sharing
     /// a second are common, and reply latency and conversation-opener detection both
     /// read consecutive pairs. An unstable order there would make the same mirror
     /// produce different numbers on different runs.
-    public func forEachMessage(_ consume: (StoredMessage) -> Void) throws {
+    ///
+    /// `predicate` is private and takes only the two compile-time constants its callers
+    /// pass; it is never built from input.
+    private func forEachMessage(where predicate: String?,
+                                _ consume: (StoredMessage) -> Void) throws {
         try query("""
             SELECT guid, text, handle, service, sent_at, is_from_me,
                    associated_message_type, chat_identifier, chat_style,
                    was_delivered_quietly
             FROM message
+            WHERE \(predicate ?? "1 = 1")
             ORDER BY sent_at, guid
             """) { row in
             consume(StoredMessage(
@@ -252,6 +257,27 @@ public final class MirrorDatabase {
                 wasDeliveredQuietly: row.bool(9)
             ))
         }
+    }
+
+    /// Streams only the messages the **user wrote**, in send order.
+    ///
+    /// GUARD ONE, AND SINCE THE 2 AUG CORRECTION TO CONTRACTS.md § 7 IT IS THE ONLY
+    /// GUARD THAT CAN SEE PROVENANCE. The upload boundary is a redaction scan — it
+    /// cannot tell a message the user wrote from one they received, and a redacted
+    /// inbound message passes it. The leak checker is a verbatim string match, so
+    /// anything redaction rewrote no longer matches. Neither is a second opinion on this
+    /// `WHERE` clause.
+    ///
+    /// It is a separate query rather than a filter applied by the caller precisely so
+    /// that it cannot be refactored away by someone who does not know what it is for.
+    /// Deleting it is a privacy incident that produces no error and no wrong number.
+    public func forEachSentMessage(_ consume: (StoredMessage) -> Void) throws {
+        try forEachMessage(where: "is_from_me = 1", consume)
+    }
+
+    /// Streams every mirrored message in send order.
+    public func forEachMessage(_ consume: (StoredMessage) -> Void) throws {
+        try forEachMessage(where: nil, consume)
     }
 
     // MARK: - Ingest

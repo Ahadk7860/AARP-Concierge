@@ -176,11 +176,34 @@ public struct DigestBuilder {
     /// Sorted because the same mirror should produce the same bytes: a digest that
     /// reorders its keys between runs cannot be diffed against the previous one, and
     /// diffing it is how anybody notices a metric quietly changing.
+    /// Keys that must appear as an explicit `null` rather than be omitted.
+    ///
+    /// `first_contact_at` is the one that matters: CONTRACTS.md § 10 says to **emit**
+    /// null when the corpus is retention-capped, and the schema makes the key optional —
+    /// so omitting it validates while saying something different to Track D. A missing
+    /// key reads as "this build did not compute it"; an explicit null reads as
+    /// "computed, and the truthful answer is that we cannot know". The rule exists to
+    /// say the second thing out loud.
+    public static let relationshipExplicitNulls = ["first_contact_at", "last_contact_at",
+                                                   "muted_by_them", "archetype"]
+    public static let corpusExplicitNulls = ["first_message_at", "last_message_at",
+                                             "messages_in_icloud", "retention_boundary"]
+
     @discardableResult
     public static func write(_ digest: Digest, to path: String) throws -> Int {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
-        let data = try encoder.encode(digest)
+        let data = try ExplicitNullJSON.data(encoding: digest) { object in
+            if var corpus = object["corpus"] as? [String: Any] {
+                ExplicitNullJSON.fillNull(&corpus, corpusExplicitNulls)
+                object["corpus"] = corpus
+            }
+            if let relationships = object["relationships"] as? [[String: Any]] {
+                object["relationships"] = relationships.map { relationship in
+                    var patched = relationship
+                    ExplicitNullJSON.fillNull(&patched, relationshipExplicitNulls)
+                    return patched
+                }
+            }
+        }
         let url = URL(fileURLWithPath: path)
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
                                                 withIntermediateDirectories: true)

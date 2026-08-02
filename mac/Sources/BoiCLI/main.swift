@@ -30,6 +30,7 @@ usage: boi-cli scan --db <path> [options]
        boi-cli digest --mirror <path> --out <path>
                     [--contacts <abcddb>] [--calls <storedata>]
                     [--top <n>]
+       boi-cli voice-pack --mirror <path> --out <dir> [--contacts <abcddb>]
 
   --db <path>                 chat.db to read. Opened file:<path>?mode=ro, always.
   --snapshot                  copy the db and both sidecars first, then read the copy
@@ -275,6 +276,61 @@ case "digest":
         }
     } catch {
         StructuredLog.emit("digest.failed", level: .error, fields: ["detail": "\(error)"])
+        exit(1)
+    }
+
+case "voice-pack":
+    guard let mirrorPath = value("mirror"), let outDirectory = value("out") else { fail(usage) }
+    guard let salt = ContactResolver.developmentSalt() else {
+        fail("\(ContactResolver.developmentSaltVariable) is not set. Copy .env.example to "
+             + ".env in this worktree.")
+    }
+    do {
+        let mirror = try MirrorDatabase(path: mirrorPath)
+        let contacts = value("contacts").flatMap(AddressBookDirectory.read(path:))
+            ?? AddressBookDirectory.discover()
+        let resolver = ContactResolver(salt: salt, directory: contacts ?? .empty)
+        let now = Date()
+
+        // The same identities the digest ranks, so a person merged across two handles
+        // gets one pack rather than two thin ones that both fall below the threshold.
+        let metrics = try MetricLibrary(resolver: resolver, options: .init(now: now))
+            .compute(mirror: mirror)
+        let builder = VoicePackBuilder(options: .init(
+            now: now, redactor: Redactor(directory: contacts ?? .empty)))
+        let packs = try builder.build(mirror: mirror,
+                                      identities: metrics.relationships.map(\.identity))
+
+        for pack in packs {
+            let path = try VoicePackBuilder.write(pack, toDirectory: outDirectory)
+            // Counts and hashes only. An exemplar is the user's own sentence and it does
+            // not go in a log line, which lands in an observability vendor.
+            StructuredLog.emit("voice_pack.written", at: now, fields: [
+                "path": path,
+                "scope": pack.scope,
+                "contact_id": pack.contact_id ?? "null",
+                "voice_pack_version": pack.voice_pack_version,
+                "n_exemplars": pack.n_exemplars,
+                "median_len_chars": pack.register.median_len_chars,
+                "p90_len_chars": pack.register.p90_len_chars ?? -1,
+                "avg_msgs_per_burst": pack.register.avg_msgs_per_burst,
+                "punctuation": pack.register.punctuation.rawValue,
+                "emoji_rate": pack.register.emoji_rate,
+                "question_rate": pack.register.question_rate ?? -1,
+                "greeting_rate": pack.register.greeting_rate ?? -1,
+            ])
+        }
+        StructuredLog.emit("voice_pack.complete", at: now, fields: [
+            "packs": packs.count,
+            "out": outDirectory,
+            "address_book_records": contacts?.recordCount ?? -1,
+            "contacts_below_threshold":
+                metrics.relationships.count - (packs.count - 1),
+            "minimum_sent_messages":
+                VoicePackBuilder.minimumSentMessagesForContactPack,
+        ])
+    } catch {
+        StructuredLog.emit("voice_pack.failed", level: .error, fields: ["detail": "\(error)"])
         exit(1)
     }
 

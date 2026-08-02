@@ -194,6 +194,11 @@ public struct AddressBookDirectory: Sendable {
     public var recordCount: Int { namesByRecord.count }
     public var handleCount: Int { recordsByHandle.count }
 
+    /// Exposed for name redaction only — CONTRACTS.md § 7 needs the user's own contact
+    /// names to strip third-party names from a lowercase corpus, where no capitalization
+    /// pattern can find them.
+    var namesByRecordForRedaction: [Int64: String] { namesByRecord }
+
     public func recordID(forNormalizedHandle handle: String) -> Int64? {
         recordsByHandle[handle]
     }

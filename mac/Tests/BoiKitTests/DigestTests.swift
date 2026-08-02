@@ -651,10 +651,22 @@ final class DigestTests: XCTestCase {
         XCTAssertEqual(decoded.schema_version, "digest.v1")
         XCTAssertEqual(decoded.relationships.count, digest.relationships.count)
 
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
-        XCTAssertEqual(try encoder.encode(decoded), original,
-                       "a field the struct drops would show up here as a shorter document")
+        // Written through the same path, because the writer adds explicit nulls that
+        // `JSONEncoder` alone would drop — see `DigestBuilder.relationshipExplicitNulls`.
+        // Re-writing what we just read must be a fixed point: any field the struct
+        // silently discards shows up here as a shorter document.
+        let again = "/tmp/boi-a/tests/roundtrip-again-\(UUID().uuidString).json"
+        try DigestBuilder.write(decoded, to: again)
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: again)), original)
+
+        // And the null is really there, not merely absent-and-tolerated.
+        let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: original)
+            as? [String: Any])
+        let rows = try XCTUnwrap(object["relationships"] as? [[String: Any]])
+        let nulled = rows.filter { $0["first_contact_at"] is NSNull }
+        XCTAssertEqual(nulled.count, 3,
+                       "CONTRACTS section 10 says EMIT null, not omit the key")
+        XCTAssertTrue(rows.allSatisfy { $0.keys.contains("first_contact_at") })
     }
 
     /// THE CROSS-LANGUAGE BAR. Swift's own opinion of its output is worth nothing here;
