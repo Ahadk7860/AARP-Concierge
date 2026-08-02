@@ -9,12 +9,13 @@
   },
   "scripts": {
     "test": "vitest run",
-    "lint": "eslint . --ext .ts",
+    "lint": "eslint .",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "fixtures": "python3 scripts/validate_fixtures.py",
     "chatdb": "python3 scripts/make_synthetic_chatdb.py",
     "test:c": "vitest run cloud/channel cloud/mock-linq",
-    "test:d": "vitest run cloud/api cloud/brief cloud/card cloud/db"
+    "test:d": "vitest run cloud/api cloud/brief cloud/card cloud/db",
+    "lint:py": "ruff check intelligence && ruff format --check intelligence"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

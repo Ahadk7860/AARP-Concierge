@@ -208,6 +208,24 @@ framework default; another track may pick the same one.
 - **Tests** live beside the code (`*.test.ts`, `intelligence/tests/`,
   `mac/Tests/`).
 
+### Cross-language determinism — Tracks A and B must agree exactly
+
+Track A ships the Swift voice-pack extractor and Track B ships the Python reference.
+They are diffed on identical input at integration, so every step that could round
+differently has to be pinned. Three are:
+
+- **Percentiles: nearest-rank, half-up.** On the ascending sorted list of length `n`,
+  the p-th percentile is the element at 0-based index `ceil(p/100 * n) - 1`, clamped to
+  `[0, n-1]`. Do **not** use a language's default rounding — Python's `round()` is
+  banker's rounding and Swift's `rounded()` is half-away-from-zero, so `n = 20` gives
+  index 18 in one and 19 in the other. Different `p90_len_chars`, different
+  `voice_pack_version`, and a `--compare` diff nobody can explain.
+- **`voice_pack_version` = `"vp_" + sha256(canonical_json)[:8]`**, where the payload is
+  `{contact_id, scope, register, exemplars}` — `as_of` excluded — serialized with sorted
+  keys, no whitespace, and **non-ASCII characters left unescaped** (`ensure_ascii=false`).
+  Emoji in `top_emoji` make this matter.
+- **Redaction runs on exemplars only, never before the register is computed.** See § 7.
+
 ### Product conventions that are not style preferences
 
 - **Invitation, never verdict.** `"you've reached out to Sarah 12 times this month"`,
@@ -252,6 +270,34 @@ not weaken any of the three to make a checklist green.**
 Redaction, applied on the Mac before an exemplar is ever serialized: phone numbers,
 email addresses, street addresses, dollar amounts, and third-party full names. A
 redacted exemplar is just as good a style sample and carries none of the risk.
+
+**Redact the exemplars, not the corpus.** Compute the register from the raw sent
+messages first, then redact only the strings that go into `exemplars`. Redacting first
+corrupts the very statistics the pack exists to carry: `"Hey Sarah how are you"` becomes
+`"[name] how are you"`, which stops counting as a greeting and flips the first character
+to lowercase — so a sentence-case writer who opens with a name gets reported as
+`lowercase_no_period` with a third of their true `greeting_rate`. Every register test
+still passes and the register is wrong.
+
+**Name redaction must not assume capitalization.** The target corpus is lowercase
+texting — the fixture register is literally `lowercase_no_period`. A pattern requiring
+`[A-Z]` passes every test written against capitalized samples and leaks
+`"ill ask john smith about it"` untouched.
+
+### What guard three does and does not do
+
+`scripts/check_voice_pack_leak.py` compares exemplars against inbound messages
+**verbatim**. Anything redaction rewrote no longer matches and is reported as
+`redacted beyond verbatim match`, which passes. So the third guard weakens exactly as
+redaction gets more aggressive, and it is not independent of the first two in the way
+"three guards" suggests: guards one and two live in the same process, and guard three is
+a verbatim string check.
+
+Stated plainly so nobody trusts it further than it goes: **guard three catches a whole
+class of failure — an `is_from_me` filter deleted outright — and misses a redacted
+inbound message.** It is a regression alarm, not a proof. The real protection is that
+guards one and two are independent of each other and both demonstrably bite: a track
+must show its canary test failing with the filter removed and passing with it restored.
 
 ---
 
@@ -400,6 +446,7 @@ unresolved contract code against the placeholder and flag the dependency in `NOT
 | # | Item | Placeholder | Owned by | Resolve by |
 |---|---|---|---|---|
 | 1 | Linq `POST /chats` exact response shape | `contracts/openapi/linq-v3-subset.yaml` | user (sales call) | before Track C merges |
+| 1b | ~~Does `LINQ_BASE_URL` include `/api/partner/v3`?~~ | **RESOLVED 2 Aug: yes, it includes the prefix.** The mock serves that path and only that path. Serving both readings hides the discrepancy the mock exists to surface. | — | done |
 | 2 | Linq webhook signature scheme | `HMAC-SHA256(raw_body, LINQ_WEBHOOK_SECRET)`, hex, `sha256=` prefix | user | first live send |
 | 3 | Real rate limits and what trips a flag | limiter is configurable, defaults conservative | user | first live send |
 | 4 | Does the 99.95% SLA cover a **line-level Apple ID ban**, or only platform uptime? | assume it does **not** | user | before signing |

@@ -3,10 +3,11 @@
 No track modifies this file. A mismatch between these dataclasses and the JSON Schema
 is a contract gap: record it in NOTES.md and report. Do not "fix" it locally.
 """
+
 from __future__ import annotations
 
-from dataclasses import dataclass, field, asdict
-from typing import Literal, Optional
+from dataclasses import asdict, dataclass, field
+from typing import Literal
 
 Stance = Literal["answer", "defer"]
 Producer = Literal["sql", "local_model"]
@@ -18,7 +19,7 @@ class Register:
     emoji_rate: float
     punctuation: str
     avg_msgs_per_burst: float
-    p90_len_chars: Optional[int] = None
+    p90_len_chars: int | None = None
     top_emoji: list[str] = field(default_factory=list)
     greeting_rate: float = 0.0
     signoff_rate: float = 0.0
@@ -36,9 +37,10 @@ class VoicePack:
     false, and nobody would notice for months. This is asserted three times: at the
     SQL query, at this boundary, and in a test that fails the build.
     """
+
     schema_version: Literal["voice_pack.v1"]
     voice_pack_version: str
-    contact_id: Optional[str]
+    contact_id: str | None
     scope: Literal["contact", "global"]
     register: Register
     exemplars: list[str]
@@ -54,6 +56,7 @@ class GistFacts:
     appears in one of these lists. Anything else is an invented commitment sent in the
     user's own name, which is worse than shipping no draft at all.
     """
+
     dates: list[str] = field(default_factory=list)
     times: list[str] = field(default_factory=list)
     places: list[str] = field(default_factory=list)
@@ -77,11 +80,11 @@ class Gist:
     priority: float
     producer: Producer
     as_of: str
-    display: Optional[str] = None
-    topic: Optional[str] = None
+    display: str | None = None
+    topic: str | None = None
     has_deadline: bool = False
-    deadline_hint: Optional[str] = None
-    model_id: Optional[str] = None
+    deadline_hint: str | None = None
+    model_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -101,6 +104,7 @@ class ValidatorResult:
 @dataclass(frozen=True)
 class DraftBundle:
     """Exactly two candidates, or exactly zero. Never one, never three."""
+
     schema_version: Literal["draft_bundle.v1"]
     contact_id: str
     gist_id: str
@@ -110,7 +114,7 @@ class DraftBundle:
     voice_pack_version: str
     validator: ValidatorResult
     as_of: str
-    latency_ms: Optional[int] = None
+    latency_ms: int | None = None
 
     def __post_init__(self) -> None:
         if len(self.candidates) not in (0, 2):
@@ -118,9 +122,7 @@ class DraftBundle:
                 f"draft bundles carry exactly 2 candidates or 0, got {len(self.candidates)}"
             )
         if len(self.candidates) == 2 and self.candidates[0].stance == self.candidates[1].stance:
-            raise ValueError(
-                "the two candidates must differ in stance, not merely in phrasing"
-            )
+            raise ValueError("the two candidates must differ in stance, not merely in phrasing")
 
     def to_dict(self) -> dict:
         return asdict(self)
