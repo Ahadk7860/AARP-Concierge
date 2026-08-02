@@ -366,6 +366,32 @@ texting — the fixture register is literally `lowercase_no_period`. A pattern r
 `[A-Z]` passes every test written against capitalized samples and leaks
 `"ill ask john smith about it"` untouched.
 
+### Correction, 2 Aug: only guard one can see `is_from_me`
+
+Calling all three "the `is_from_me` guards" was an overclaim, and it is the kind that
+ends up in a privacy policy. **Nothing at the upload boundary can observe provenance.**
+The server has no corpus; four regexes over free text cannot distinguish a message the
+user wrote from one they received, and a redacted inbound message passes with `202`.
+
+Stated accurately:
+
+| | What it is | What it can actually see |
+|---|---|---|
+| **One — the Mac's SQL** | `is_from_me = 1` in the query | **provenance.** The only guard that can. |
+| **Two — `POST /v1/voice-pack`** | a **redaction scan** over every free-text field | PII patterns. Not provenance. |
+| **Three — `check_voice_pack_leak.py`** | a **verbatim string check** against the corpus | an `is_from_me` filter deleted outright. Not a redacted leak. |
+
+So the real protection is **guard one, singular**, and guards two and three are a
+redaction net and a regression alarm behind it. That is still a defensible posture — it
+is defence in depth over a filter that must not silently disappear — but it is not three
+independent checks on the same property, and nobody should describe it that way
+externally.
+
+**What this changes:** guard one is now the single point of failure, so it carries the
+canary requirement alone. Any track shipping it must demonstrate the test failing with
+the filter removed and passing with it restored. Do not weaken that on the theory that
+two more guards are behind it.
+
 ### What guard three does and does not do
 
 `scripts/check_voice_pack_leak.py` compares exemplars against inbound messages
