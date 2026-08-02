@@ -172,7 +172,8 @@ final class TextCoverageTests: XCTestCase {
         ChatMessage(rowID: 1, guid: "g", text: source == .unrecoverable ? nil : "t",
                     textSource: source, hasAttributedBody: hasBlob, handleRowID: 1,
                     handle: nil, service: nil, date: date, isFromMe: false,
-                    associatedMessageType: 0, chatRowID: 1, chatIdentifier: nil, chatStyle: 45)
+                    associatedMessageType: 0, chatRowID: 1, chatIdentifier: nil, chatStyle: 45,
+                    wasDeliveredQuietly: false)
     }
 
     func testSharesAndTheBar() {

@@ -27,6 +27,9 @@ usage: boi-cli scan --db <path> [options]
        boi-cli text-coverage --db <path>
        boi-cli sync --db <path> --mirror <path> [--search <text>]
                     [--trailing-window-days <n>]
+       boi-cli digest --mirror <path> --out <path>
+                    [--contacts <abcddb>] [--calls <storedata>]
+                    [--top <n>]
 
   --db <path>                 chat.db to read. Opened file:<path>?mode=ro, always.
   --snapshot                  copy the db and both sidecars first, then read the copy
@@ -41,6 +44,12 @@ usage: boi-cli scan --db <path> [options]
                               (default 3600)
   --include-tapbacks          keep associated_message_type 2000-3999
   --include-group-chats       keep chat.style = 43
+
+  --mirror <path>             the local mirror (digest reads this and only this)
+  --out <path>                where the digest.v1 document is written
+  --contacts <path>           AddressBook-v22.abcddb; auto-discovered when omitted
+  --calls <path>              CallHistory.storedata; auto-discovered when omitted
+  --top <n>                   also print n relationship summaries, names redacted
 """
 
 guard let command = arguments.first, !command.hasPrefix("--") else {
@@ -192,6 +201,80 @@ case "sync":
         }
     } catch {
         StructuredLog.emit("sync.failed", level: .error, fields: ["detail": "\(error)"])
+        exit(1)
+    }
+
+case "digest":
+    guard let mirrorPath = value("mirror"), let outPath = value("out") else { fail(usage) }
+    guard let salt = ContactResolver.developmentSalt() else {
+        fail("\(ContactResolver.developmentSaltVariable) is not set. contact_id is an HMAC "
+             + "keyed on the user salt; without it this would emit ids that no other "
+             + "implementation can reproduce. Copy .env.example to .env in this worktree.")
+    }
+    do {
+        let mirror = try MirrorDatabase(path: mirrorPath)
+
+        // Both of these degrade to nil, loudly. Contacts missing means no merging, which
+        // costs accuracy at the top of the ranking; calls missing means the `calls`
+        // object is absent rather than zero. Either way the run says which it got, so
+        // "no calls" is never mistaken for "no call history readable".
+        let contacts = value("contacts").flatMap(AddressBookDirectory.read(path:))
+            ?? AddressBookDirectory.discover()
+        let calls = value("calls").flatMap(CallHistory.read(path:)) ?? CallHistory.discover()
+
+        let resolver = ContactResolver(salt: salt, directory: contacts ?? .empty)
+        let generatedAt = Date()
+        let library = MetricLibrary(resolver: resolver,
+                                    options: .init(now: generatedAt, callHistory: calls))
+        let result = try library.compute(mirror: mirror)
+        let digest = DigestBuilder(resolver: resolver,
+                                   options: .init(generatedAt: generatedAt)).build(from: result)
+        let bytes = try DigestBuilder.write(digest, to: outPath)
+
+        StructuredLog.emit("digest.complete", at: generatedAt, fields: [
+            "mirror": mirrorPath,
+            "out": outPath,
+            "bytes": bytes,
+            "elapsed_s": (result.elapsed * 1000).rounded() / 1000,
+            "relationships": digest.relationships.count,
+            "corpus_message_count": digest.corpus.message_count,
+            "thread_count": digest.corpus.thread_count,
+            "span_days": digest.corpus.span_days,
+            "retention_boundary": digest.corpus.retention_boundary ?? "none",
+            "threads_on_boundary": result.corpus.threadsOnBoundary,
+            "first_contact_at_nulled": digest.relationships.filter { $0.first_contact_at == nil }.count,
+            "health": digest.corpus.health.rawValue,
+            "address_book_records": contacts?.recordCount ?? -1,
+            "call_records": calls?.callCount ?? -1,
+        ])
+
+        // Display names are the one field in the digest that is a person's actual name,
+        // so the console summary replaces them positionally. The file on disk is the
+        // artefact; this is just a look at it.
+        if let top = value("top").flatMap(Int.init) {
+            let byID = Dictionary(uniqueKeysWithValues:
+                result.relationships.map { ($0.identity.contact_id, $0) })
+            for (offset, relationship) in digest.relationships.prefix(top).enumerated() {
+                let metrics = byID[relationship.contact_id]
+                StructuredLog.emit("digest.relationship", at: generatedAt, fields: [
+                    "rank": offset + 1,
+                    "display": "Person \(offset + 1)",
+                    "contact_id": relationship.contact_id,
+                    "message_count": relationship.message_count,
+                    "momentum_90d": relationship.momentum_90d,
+                    "initiation_ratio": relationship.initiation_ratio,
+                    // Printed beside the ratio because the ratio is meaningless without
+                    // it: one opener always gives exactly 0.0 or 1.0.
+                    "conversations_opened": metrics?.conversationsOpened ?? -1,
+                    "days_since_last_contact": relationship.days_since_last_contact,
+                    "archetype": relationship.archetype?.rawValue ?? "none",
+                    "first_contact_at": relationship.first_contact_at ?? "null",
+                    "muted_by_them": relationship.muted_by_them.map(String.init) ?? "unknown",
+                ])
+            }
+        }
+    } catch {
+        StructuredLog.emit("digest.failed", level: .error, fields: ["detail": "\(error)"])
         exit(1)
     }
 

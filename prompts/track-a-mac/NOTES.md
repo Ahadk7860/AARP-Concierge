@@ -62,6 +62,55 @@ Anything `prompts/CONTRACTS.md` does not specify, specifies wrongly, or specifie
 way that does not work in practice. You may not edit it — record it here and report.
 Every entry names the prompt where it surfaced.
 
+`[prompt 04] § 10's first_contact_at rule reproduces exactly on the retention-capped
+fixture. No gap in the rule itself.` Regenerated with `--retention-cap-days 365`, three
+of six threads floor on the boundary and three do not, with clean separation — the
+nearest non-boundary thread starts 3.0 days after the floor, well outside the rule's
+one-day window:
+
+```
++15550100002   365.00 days ago   ON BOUNDARY -> first_contact_at null
++15550100004   364.98 days ago   ON BOUNDARY -> null
++15550100006   364.96 days ago   ON BOUNDARY -> null
++15550100001   361.98 days ago   real date kept
++15550100005   356.99 days ago   real date kept
++15550100003   351.97 days ago   real date kept
+```
+
+Canary-verified rather than asserted: replacing the rule's body with `return false`
+turns 0 failures into **5** in `DigestTests`. Restored immediately; never committed.
+
+`[prompt 04] CONTRACT GAP — contact_id is specified as "HMAC(user_salt,
+normalized_handle), hex, prefixed h_" and that is not enough for Track A and Track B to
+agree.` Four things are unspecified and each one produces a different string:
+
+1. **Which hash.** I used HMAC-**SHA256**.
+2. **Truncation length.** The schema pattern is `^h_[0-9a-f]{8,32}$`, so the full 64-hex
+   digest does not even fit. I used the **first 16 hex characters**. The committed
+   fixture uses 8; at 8 a birthday collision arrives at a few thousand contacts and
+   would silently fuse two people into one row, which is precisely the failure the
+   merge-on-record-id rule exists to prevent, so I did not copy it.
+3. **Handle normalization.** I lowercase emails, and reduce phone numbers to digits with
+   a `+`, defaulting a bare 10-digit number to `+1`. If Track B does not do the same,
+   `5550100001` and `+15550100001` produce two ids for one person.
+4. **Which handle anchors a merged person.** When two handles resolve to one AddressBook
+   record there are two candidate inputs. I use the **lexicographically smallest
+   normalized handle**, so the id does not depend on which handle was seen first.
+
+All four are documented at the definition site in `ContactResolver.swift`. This is a
+`§ 6 cross-language determinism` item exactly like the percentile and
+`voice_pack_version` rules already pinned there, and it should be pinned the same way
+before the two implementations are diffed.
+
+`[prompt 04] CONTRACT GAP — `digest.v1` has no field for three metrics prompt 04 puts in
+scope.` `additionalProperties: false` means unanswered-question count, who sent the last
+message before a thread died, and streak/longest-gap have nowhere to go. I did not add
+fields to the frozen schema. They are computed, they stay on the Mac in
+`MetricLibrary.RelationshipMetrics`, and two of them feed archetype classification
+(`the_one_you_keep_waiting` reads the unanswered count and the last-word flag), which is
+how they reach the digest at all. If they are meant to cross the boundary, the schema
+needs them; if they are not, prompt 04's scope list is wider than the contract.
+
 `[prompt 01]` None. § 10's stated WAL property reproduces exactly on this track's
 fixture: `mode=ro` → 9637 rows, frozen-open → 9636.
 
@@ -91,6 +140,12 @@ Every append to a foundation-owned shared file: dependency manifests, lint confi
 `.env.example`. One line each, so the user can anticipate merge conflicts.
 
 Format: `[prompt NN] <file> — added <what> because <why>`
+
+`[prompt 04]` None. No shared file was touched: every path in
+`git diff --name-only main...HEAD` for this prompt is under `mac/`, plus this `NOTES.md`
+and the `Status` column of `TRACK.md`. No dependency was added — HMAC comes from
+CryptoKit in the macOS SDK, and `.env` is parsed by a 40-line reader in `BoiKit` rather
+than a package.
 
 `[prompt 01] scripts/wal_control_counts.py` — **REVERTED.** Deleted in the corrections
 pass. `scripts/` is not this track's to write — prompt `01`'s Constraints say
@@ -149,6 +204,68 @@ Format: `[prompt NN] → Track <X>: <what you need and why>`
 
 Anywhere the implementation departs from what the prompt described, and why. A
 deviation is not a failure — an unrecorded one is.
+
+`[prompt 04] THE `grep -rin 'reciproc' mac/` CRITERION CANNOT PASS, AND NOT BECAUSE OF
+ANYTHING THIS TRACK WROTE.` It returns two matches, both already on `main` before this
+worktree existed, both in files I am forbidden to edit:
+
+```
+mac/Sources/BoiKit/Contracts.swift:60      /// the signal is. Reciprocity (sd 0.034) is not.
+mac/Tests/BoiKitTests/FoundationTests.swift:26  // Momentum discriminates ... Reciprocity does not.
+```
+
+`Contracts.swift` is on `scripts/check-ownership.sh`'s **frozen** list. `FoundationTests.swift`
+is the foundation harness labelled "Track A extends this suite; it never weakens this
+file." Both mention the metric only to say it carries no signal — they are the contract
+*stating the prohibition*, which is the opposite of violating it.
+
+Per the frozen-anchors block I stopped rather than deleting two lines to turn a grep
+green. What the criterion is actually checking — that this track does not compute or
+ship the metric — **does** hold, and is now enforced from inside the suite by
+`testNoSourceFileMentionsTheBannedBalanceMetric`, which walks every `.swift` file under
+`mac/` and fails on any match. It exempts those two files **by name**, with the reason,
+and separately asserts they still exist, so a third file appearing fails the test rather
+than widening the hole. Nothing this track wrote mentions the metric in any form.
+
+Suggested criterion, if it is worth amending: `grep -rin 'reciproc' mac/Sources/BoiKit/
+mac/Sources/BoiCLI/ | grep -v Contracts.swift`.
+
+`[prompt 04] Mirror schema v1 -> v2, additively.` The warmth metric needs
+`was_delivered_quietly` and the mirror did not carry it, so the digest would have
+reported every relationship as unmuted — absent-reads-as-false, which is the exact shape
+of silent loss the rest of this track refuses. Three changes, all additive:
+
+- `MirrorDatabase.schemaVersion` is 2, and `migrate()` is now stepwise
+  (`if found < 1 … if found < 2 …`). A v1 mirror gains the column and keeps every row;
+  nothing is dropped or rewritten, which matters because the mirror holds history
+  `chat.db` may no longer have.
+- `ChatSchema.required` now demands `was_delivered_quietly` on `message`, so a macOS
+  release that drops it fails loudly at open time instead of quietly reporting nobody
+  has the user muted.
+- The upsert compares it, so a row ingested before the column existed is corrected on
+  the next sync rather than staying at the default forever.
+
+Two test files gained the column in their inline `CREATE TABLE message` (MirrorTests'
+`ChatDBBuilder`, and the two-chat database inside `MessageReaderTests`). Additions only;
+no assertion, threshold or test was changed, removed, skipped or marked pending.
+
+`[prompt 04] `corpus.health` is provisional and prompt 06 replaces it.` `digest.v1`
+requires the field, so something had to be written. `DigestBuilder.provisionalHealth`
+uses only what the mirror can prove — corpus size, span, retention boundary, staleness —
+and errs toward `fixable`, the state that has a remedy attached. It is marked as
+provisional at the definition site. Defaulting to `healthy` would have been a confident
+claim made by code that checks nothing, which is the failure this whole track is
+organised around.
+
+`[prompt 04] Relationships are 1:1 only; group threads count in whole-life and are not
+ranked.` `digest.v1` has `is_group`, and prompt 01's notes flagged that the prompt text
+does not say which metrics see groups. Decided: a group thread has no single
+counterparty, so `contact_id` would be meaningless and momentum would describe a room
+rather than a person. The fixture's 60 group messages are in `whole_life.total_messages`
+and `corpus.thread_count` and out of the ranking, asserted by
+`testTheGroupThreadIsCountedInWholeLifeButNotRanked`. Every emitted relationship has
+`is_group: false`. If groups are meant to be ranked, that is a product decision and a
+prompt correction, not something to infer here.
 
 `[prompt 03] RESOLVED by contract amendment (CONTRACTS.md § 10, 2 Aug). The bar is now
 decoder failures only, under 0.5%. Measured: 0.0300%. GREEN.`
@@ -389,6 +506,45 @@ Choices the prompt left open that you had to resolve: a library, a data structur
 error-handling approach. The user needs to see these before merge, because another
 track may have chosen differently.
 
+`[prompt 04] Contacts and calls are read through their own real schemas, and both
+degrade to nil rather than throwing.` `AddressBookDirectory` reads Core Data's
+`ZABCDRECORD` / `ZABCDPHONENUMBER` / `ZABCDEMAILADDRESS`, merging on `ZOWNER` — the
+AddressBook **record id**, which is the whole point. `CallHistory` reads `ZCALLRECORD`.
+Neither exists to this process while Full Disk Access is revoked, and both return `nil`
+there. The digest is still produced: unmerged relationships are less accurate but not
+wrong, and `calls` is **absent from the row** rather than reported as zero, because
+`{"count": 0}` is a claim and absence is not. The run logs
+`address_book_records: -1` / `call_records: -1` so "no calls" is never mistaken for "no
+call history readable".
+
+`[prompt 04] A handle the AddressBook has never heard of stays on its own.` Merging is
+only ever done from a record id, never from string similarity. Failing to merge
+understates one relationship; merging two strangers puts one person's messages in
+another person's row, and only one of those is recoverable.
+
+`[prompt 04] Momentum with an empty prior quarter counts from one, not from infinity,
+and is capped at 13.9x.` A first conversation would otherwise be an infinite multiple and
+would top "rising fastest" every single time. 13.9 is the top of the observed real range;
+above it the number is arithmetic rather than a relationship, and the card would be
+quoting something the user cannot check.
+
+`[prompt 04] Reply latency ignores any gap longer than 24 hours, and initiation counts
+conversation openers after a 6-hour lull rather than message volume.` Both are stated as
+constants on `MetricLibrary` rather than as literals in a branch. Counting an overnight
+gap as latency reports somebody's sleep as rudeness, and counting volume as initiation
+makes a person who answers at length indistinguishable from one who starts everything.
+
+`[prompt 04] The digest is written with sorted keys, and `as_of` is taken once and
+stamped everywhere.` One `Date()` per run, not several: a document whose parts disagree
+by two milliseconds cannot be reasoned about downstream, and a document that reorders its
+keys between runs cannot be diffed against the previous one — which is how anybody
+notices a metric quietly changing.
+
+`[prompt 04] `usr_`/`dev_` ids are derived from the salt, not generated per run.` They
+are placeholders with the right shape until `POST /v1/pair` issues the real ones, which
+this track does not call in this round. Deriving them keeps a regenerated digest
+byte-identical; a random id per run would not.
+
 `[prompt 02] The mirror ingests everything, not the 1:1 subset.` Tapbacks, group
 threads, and rows joined to no chat all land in the mirror. Filtering is a query concern
 for prompt `04`; a row dropped at ingest is gone the moment `chat.db` prunes it, and the
@@ -443,6 +599,69 @@ re-scan and dedup by `guid`.
 
 Anything you noticed that the plan did not anticipate, including work that should exist
 but is not in any track's scope. This is often the most useful section at review time.
+
+`[prompt 04] THE SYNTHETIC FIXTURE CANNOT EXERCISE INITIATION AT ALL, AND THE NUMBER IT
+PRODUCES IS JUNK IN A WAY THAT LOOKS PLAUSIBLE.` The generator spaces each thread's
+messages **uniformly** — `start + (end - start) * i/n` plus at most an hour of jitter —
+so every thread has one constant inter-message gap. Compared against the 6-hour
+conversation-opener threshold that gives exactly two outcomes and nothing in between:
+
+```
+thread          msgs/day   gap      conversations_opened   initiation_ratio
++15550100003        8.9    2.7h                        1               0.00
++15550100002        7.6    3.1h                        1               1.00
++15550100004       10.2    2.4h                        1               1.00
++15550100001        3.3    7.2h                     1204               0.479
++15550100005        1.8   13.1h                      640               0.461
++15550100006        2.9    8.3h                      188               0.456
+```
+
+Either the whole thread is one conversation (ratio is 0 or 1, decided by who sent the
+very first message) or **every message opens one** (ratio collapses to the share of
+messages the user sent, 0.46, which is the generator's `is_from_me` coin). Real texting
+is bursty and produces neither.
+
+I did **not** tune the threshold until the fixture's numbers looked reasonable — that
+would be fitting the metric to an artefact of the generator. The definition is unchanged
+and it is tested against purpose-built bursty databases instead
+(`testInitiationCountsConversationOpenersRatherThanVolume`). `conversations_opened` is
+now printed beside every ratio by `boi-cli digest --top`, because the ratio is
+meaningless without it: one opener always gives exactly 0.0 or 1.0.
+
+**This is worth a fixture change, not a code change.** If the generator drew
+inter-message gaps from a heavy-tailed distribution — most within minutes, occasional
+multi-day silences — initiation, reply latency and streaks would all become testable on
+the shared fixture instead of only on hand-built ones. Track B builds voice packs off
+the same generator and will hit this too.
+
+`[prompt 04] The capped fixture is a SECOND database, at /tmp/boi-a/chat-retention-365.db.`
+The prompt's regeneration command overwrites `/tmp/boi-a/chat.db` with a capped corpus,
+but prompts 01–03 measured against the **uncapped** one (span ≈ 653 days, because Sam's
+thread ends 303 days ago and starts 350 days before that). Regenerating the shared
+fixture in place would silently change the corpus every earlier test reads. So
+`DigestTests` generates and reads its own capped copy and leaves `chat.db` alone. A
+reviewer whose `/tmp` has been cleared gets both rebuilt automatically.
+
+`[prompt 04] Fixture-based tests take their clock from the corpus, not from `Date()` and
+not from a fixed instant.` The generator lays messages out relative to the wall clock at
+generation time, so a hard-coded "now" puts every window in the wrong place, and `Date()`
+drifts by however many days the file has sat in `/tmp` — a suite that passes today and
+fails next week for no reason anyone can see. `MetricsFixture.newestMessage(in:)` reads
+"now" off the newest message, which is stable regardless of when the fixture was built.
+Purpose-built databases still use a fixed instant, because they construct their dates
+relative to it.
+
+`[prompt 04] Full Disk Access is revoked, so the AddressBook and CallHistory readers have
+never run against a real macOS database.` They are verified against synthetic files built
+to Apple's own table and column names (`ZABCDRECORD.Z_PK`, `ZOWNER`, `ZFULLNUMBER`,
+`ZADDRESS`, `ZCALLRECORD.ZDURATION/ZORIGINATED/ZANSWERED`), which proves the merge logic
+and the aggregation but **not** the schema names. If Apple spells one of them
+differently, the reader returns nil and the digest silently loses contact merging — the
+same class of failure `ChatSchema` exists to prevent for `chat.db`, and these two readers
+have no equivalent guard yet. Worth 15 minutes against the real files when FDA comes back
+in prompt 06. `ZADDRESS` on `ZCALLRECORD` is declared BLOB on some releases and TEXT on
+others; I read it through the text accessor, which handles both, and let a row that makes
+no sense fall out rather than guessing.
 
 `[prompt 03 → 07] Hand-executing the FDA grant surfaced four things prompt 07 has to
 engineer around.` I performed the onboarding step 07 must automate, and it did not

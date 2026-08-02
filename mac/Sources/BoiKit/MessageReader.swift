@@ -24,6 +24,11 @@ public struct ChatMessage: Sendable, Equatable {
     public let chatRowID: Int64
     public let chatIdentifier: String?
     public let chatStyle: Int
+    /// Apple sets this on a message **we sent** when the recipient's device suppressed
+    /// its notification — which is what "they have you muted" looks like from this side
+    /// of the conversation. It is the only warmth signal that comes from their device
+    /// rather than from ours, and it is absent on every inbound row.
+    public let wasDeliveredQuietly: Bool
 
     /// Where a message's text came from.
     public enum TextSource: String, Sendable, Codable {
@@ -251,7 +256,8 @@ public struct MessageReader {
                coalesce(c.style, 0),
                coalesce(m.cache_has_attachments, 0)
                  OR EXISTS (SELECT 1 FROM message_attachment_join maj
-                            WHERE maj.message_id = m.ROWID)
+                            WHERE maj.message_id = m.ROWID),
+               coalesce(m.was_delivered_quietly, 0)
         FROM message m
         """
 
@@ -360,7 +366,8 @@ public struct MessageReader {
             associatedMessageType: row.int(9),
             chatRowID: row.int64(10),
             chatIdentifier: row.string(11),
-            chatStyle: row.int(12)
+            chatStyle: row.int(12),
+            wasDeliveredQuietly: row.bool(14)
         )
     }
 

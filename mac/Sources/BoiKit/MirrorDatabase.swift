@@ -39,7 +39,10 @@ public final class MirrorDatabase {
     }
 
     /// Bump only alongside a migration. SQLite's `user_version` is the authority.
-    public static let schemaVersion = 1
+    ///
+    /// v2 adds `was_delivered_quietly`, which prompt 04's warmth metric reads. Migrating
+    /// forward only adds the column; a mirror written by v1 keeps every row it had.
+    public static let schemaVersion = 2
 
     private var handle: OpaquePointer?
     public let path: String
@@ -73,6 +76,15 @@ public final class MirrorDatabase {
         }
         guard found < Self.schemaVersion else { return }
 
+        // Stepwise, and each step is additive. A mirror is durable storage holding
+        // history that chat.db itself may no longer have, so a migration that drops or
+        // rewrites a row is data loss with no source left to re-read it from.
+        if found < 1 { try migrateToV1() }
+        if found < 2 { try migrateToV2() }
+        try perform("PRAGMA user_version = \(Self.schemaVersion)")
+    }
+
+    private func migrateToV1() throws {
         try perform("""
             CREATE TABLE IF NOT EXISTS message (
               guid                    TEXT PRIMARY KEY,
@@ -106,7 +118,22 @@ public final class MirrorDatabase {
               key TEXT PRIMARY KEY, value TEXT NOT NULL
             )
             """)
-        try perform("PRAGMA user_version = \(Self.schemaVersion)")
+    }
+
+    /// Adds the one signal that comes from the other person's device.
+    ///
+    /// Defaulting to 0 is safe here and only here: the column means "their device
+    /// suppressed the notification", and a row ingested before this column existed will
+    /// be rewritten with the real value on the next sync, because the upsert compares
+    /// it. Until then `muted_by_them` reports the conservative answer rather than a
+    /// fabricated one.
+    private func migrateToV2() throws {
+        var columns: Set<String> = []
+        try query("PRAGMA table_info(message)") { row in
+            if let name = row.string(1) { columns.insert(name) }
+        }
+        guard !columns.contains("was_delivered_quietly") else { return }
+        try perform("ALTER TABLE message ADD COLUMN was_delivered_quietly INTEGER NOT NULL DEFAULT 0")
     }
 
     // MARK: - Metadata
@@ -176,6 +203,57 @@ public final class MirrorDatabase {
         return guids
     }
 
+    /// One mirrored message, as the metric library reads it.
+    ///
+    /// The mirror is the only input to the digest. Nothing downstream of here reopens
+    /// `chat.db`, so a column missing from this struct is a metric that cannot exist.
+    public struct StoredMessage: Sendable {
+        public let guid: String
+        public let text: String?
+        public let handle: String?
+        public let service: String?
+        public let sentAt: Date?
+        public let isFromMe: Bool
+        public let associatedMessageType: Int
+        public let chatIdentifier: String?
+        public let chatStyle: Int
+        public let wasDeliveredQuietly: Bool
+
+        /// `associated_message_type` 2000-3999 is a reaction, not a message.
+        public var isTapback: Bool { (2000...3999).contains(associatedMessageType) }
+        /// `chat.style = 43`.
+        public var isGroup: Bool { chatStyle == 43 }
+    }
+
+    /// Streams every mirrored message in send order.
+    ///
+    /// Ordered by `(sent_at, guid)` rather than by `sent_at` alone: two messages sharing
+    /// a second are common, and reply latency and conversation-opener detection both
+    /// read consecutive pairs. An unstable order there would make the same mirror
+    /// produce different numbers on different runs.
+    public func forEachMessage(_ consume: (StoredMessage) -> Void) throws {
+        try query("""
+            SELECT guid, text, handle, service, sent_at, is_from_me,
+                   associated_message_type, chat_identifier, chat_style,
+                   was_delivered_quietly
+            FROM message
+            ORDER BY sent_at, guid
+            """) { row in
+            consume(StoredMessage(
+                guid: row.string(0) ?? "",
+                text: row.string(1),
+                handle: row.string(2),
+                service: row.string(3),
+                sentAt: row.string(4).flatMap(StructuredLog.date(from:)),
+                isFromMe: row.bool(5),
+                associatedMessageType: row.int(6),
+                chatIdentifier: row.string(7),
+                chatStyle: row.int(8),
+                wasDeliveredQuietly: row.bool(9)
+            ))
+        }
+    }
+
     // MARK: - Ingest
 
     public enum UpsertOutcome: Sendable { case inserted, updated, unchanged }
@@ -191,15 +269,17 @@ public final class MirrorDatabase {
 
         var existing: [String?]?
         try query("""
-            SELECT text, handle, service, sent_at, chat_identifier, is_from_me
+            SELECT text, handle, service, sent_at, chat_identifier, is_from_me,
+                   was_delivered_quietly
             FROM message WHERE guid = ?
             """, bind: [.text(message.guid)]) { row in
             existing = [row.string(0), row.string(1), row.string(2), row.string(3),
-                        row.string(4), String(row.int64(5))]
+                        row.string(4), String(row.int64(5)), String(row.int64(6))]
         }
 
         let incoming: [String?] = [message.text, message.handle, message.service, sentAt,
-                                   message.chatIdentifier, String(message.isFromMe ? 1 : 0)]
+                                   message.chatIdentifier, String(message.isFromMe ? 1 : 0),
+                                   String(message.wasDeliveredQuietly ? 1 : 0)]
 
         if let existing {
             // Deliberately compares content, not source_rowid: a restore reassigns
@@ -210,7 +290,7 @@ public final class MirrorDatabase {
                 UPDATE message SET text = ?, has_attributed_body = ?, handle = ?,
                   handle_rowid = ?, service = ?, sent_at = ?, is_from_me = ?,
                   associated_message_type = ?, chat_rowid = ?, chat_identifier = ?,
-                  chat_style = ?, source_rowid = ?
+                  chat_style = ?, source_rowid = ?, was_delivered_quietly = ?
                 WHERE guid = ?
                 """, bind: bindings(for: message, sentAt: sentAt) + [.text(message.guid)])
             try reindex(message)
@@ -221,8 +301,8 @@ public final class MirrorDatabase {
             INSERT INTO message
               (text, has_attributed_body, handle, handle_rowid, service, sent_at,
                is_from_me, associated_message_type, chat_rowid, chat_identifier,
-               chat_style, source_rowid, guid, first_seen_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+               chat_style, source_rowid, was_delivered_quietly, guid, first_seen_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, bind: bindings(for: message, sentAt: sentAt)
                  + [.text(message.guid), .text(StructuredLog.timestamp(seenAt))])
         try reindex(message)
@@ -241,7 +321,8 @@ public final class MirrorDatabase {
          .int(message.chatRowID),
          .optionalText(message.chatIdentifier),
          .int(Int64(message.chatStyle)),
-         .int(message.rowID)]
+         .int(message.rowID),
+         .int(message.wasDeliveredQuietly ? 1 : 0)]
     }
 
     private func reindex(_ message: ChatMessage) throws {

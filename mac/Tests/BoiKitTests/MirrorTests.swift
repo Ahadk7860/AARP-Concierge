@@ -16,7 +16,8 @@ enum ChatDBBuilder {
         CREATE TABLE message (ROWID INTEGER PRIMARY KEY, guid TEXT, text TEXT,
                               handle_id INTEGER, service TEXT, date INTEGER,
                               is_from_me INTEGER, associated_message_type INTEGER,
-                              attributedBody BLOB, cache_has_attachments INTEGER);
+                              attributedBody BLOB, cache_has_attachments INTEGER,
+                              was_delivered_quietly INTEGER DEFAULT 0);
         CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER,
                                         message_date INTEGER);
         CREATE TABLE message_attachment_join (message_id INTEGER, attachment_id INTEGER);

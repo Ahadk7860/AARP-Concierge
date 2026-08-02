@@ -17,9 +17,14 @@ public enum ChatSchema {
         // attachment-only rows must be classified from Apple's own attachment evidence,
         // never from the decoder's output. A decoder that grades its own failures as
         // "that one was just a photo" exonerates itself.
+        //
+        // was_delivered_quietly is required for the same reason: it is the only signal
+        // that someone has the user muted, and a database without it would report every
+        // relationship as unmuted rather than as unknown. Absent-reads-as-false is the
+        // shape of silent loss this file exists to refuse.
         "message": ["ROWID", "guid", "text", "handle_id", "service", "date",
                     "is_from_me", "associated_message_type", "attributedBody",
-                    "cache_has_attachments"],
+                    "cache_has_attachments", "was_delivered_quietly"],
         "chat": ["ROWID", "guid", "style", "chat_identifier"],
         "chat_message_join": ["chat_id", "message_id"],
         "message_attachment_join": ["message_id", "attachment_id"],
