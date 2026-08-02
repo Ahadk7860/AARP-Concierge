@@ -216,6 +216,54 @@ Every entry names the prompt where it surfaced.
   model can score above 95% on `pass` while the gate behaves this way, so the oracle row
   is the ceiling, not 100%.
 
+- `[track review] OPEN — `scripts/review-capture.sh` always reports `EXIT: 0`, whether
+  the command passed, failed, or never ran. Affects all four tracks.`
+
+  The script sets `set -uo pipefail` (line 17) and then, for both the Tests and Lint
+  blocks, does:
+
+  ```bash
+  eval "$TEST" 2>&1 | tail -120 || true
+  echo "EXIT: ${PIPESTATUS[0]}"
+  ```
+
+  Under `pipefail` a failing command makes the whole *pipeline* fail, so `|| true`
+  fires — and `true` **resets `PIPESTATUS`**. `${PIPESTATUS[0]}` is then `true`'s own
+  status, which is 0. Verified A/B:
+
+  | shell options | command | reported `EXIT:` |
+  |---|---|---|
+  | `-uo pipefail` (as in the script) | `sh -c 'exit 3'` | **0** |
+  | `-u` (no pipefail) | `sh -c 'exit 3'` | 3 |
+  | `-uo pipefail` | `sh -c 'exit 0'` | 0 |
+
+  Without `pipefail` the pipeline's status is `tail`'s, which is 0, so `|| true` never
+  fires and `PIPESTATUS[0]` survives correctly. The two features together invert it.
+
+  **Why this matters more than a cosmetic bug:** the capture is Pass 1 of the track
+  review and the whole point of it is that "every command below was re-run from this
+  worktree; none of it is the working agent's claim." A reviewer reading
+  `## Tests … EXIT: 0` concludes the suite passed. It would say exactly that with the
+  suite entirely red. This is the same class of failure `gate.sh`'s own header warns
+  about — a suite that cannot run reporting zero failures — in the script written to
+  catch it. `gate.sh` gets it right (`rc=${PIPESTATUS[0]}` captured immediately, no
+  `|| true`); `review-capture.sh` does not.
+
+  I hit it for real: the first capture on this track recorded
+  `python: command not found` / `EXIT: 0` and `ruff: command not found` / `EXIT: 0`,
+  because the script calls bare `python`/`ruff` and this worktree's interpreter lives in
+  `.venv/`. **Two defects, one visible and one not.** The committed
+  `review-capture-b.md` was regenerated with `PATH="$PWD/.venv/bin:$PATH"` so its Tests
+  and Lint sections show real output (307 passed, lint clean) — the pytest summary line
+  in the body is trustworthy even though the `EXIT:` line is not.
+
+  Not fixed here: `scripts/**` is foundation-owned, and a correctness change to the
+  script that produces review evidence for all four tracks is the user's call. Suggested
+  fix is one line each — drop `|| true` and capture the status directly, as `gate.sh`
+  does. Worth also making the script fail loudly when `$TEST`'s interpreter is not on
+  `PATH`, since Tracks A, C and D have the same shape of problem (`swift`, `npx`).
+  **Any capture already taken for another track should be re-read for this.**
+
 ## Shared file changes
 
 Every append to a foundation-owned shared file: dependency manifests, lint config,
