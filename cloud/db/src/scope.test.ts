@@ -336,6 +336,33 @@ describe("device tokens", () => {
     expect(userIdFromDeviceToken("h_8f21a4c0.secret")).toBeNull();
   });
 
+  it("refuses a prefix outside the frozen alphabet, rather than passing it on", () => {
+    // The last survivor of the base64url defect. This parser accepted
+    // `[A-Za-z0-9_-]{4,}`, so these returned a "user id" that `unsafeScopeFromUserId`
+    // then threw on — a 500 for a garbage bearer token, where the answer is 401.
+    for (const bad of [
+      "usr_has-dash_here.secret",
+      "usr_short.secret",
+      `usr_${"x".repeat(33)}.secret`,
+      "usr_.secret",
+    ]) {
+      expect(userIdFromDeviceToken(bad), bad).toBeNull();
+      // And the two functions agree: whatever the parser accepts, the scope opens.
+      expect(() => unsafeScopeFromUserId(bad.split(".")[0]!)).toThrow(UnscopedQueryError);
+    }
+  });
+
+  it("agrees with unsafeScopeFromUserId on 1000 real tokens", () => {
+    // The parser and the scope constructor must accept exactly the same set. They did
+    // not, and nothing compared them.
+    for (let i = 0; i < 1000; i += 1) {
+      const userId = newUserId();
+      const parsed = userIdFromDeviceToken(newDeviceToken(userId).token);
+      expect(parsed).toBe(userId);
+      expect(unsafeScopeFromUserId(parsed!).user_id).toBe(userId);
+    }
+  });
+
   it("compare by hash, and a tampered secret does not match", () => {
     const userId = newUserId();
     const { token, hash } = newDeviceToken(userId);

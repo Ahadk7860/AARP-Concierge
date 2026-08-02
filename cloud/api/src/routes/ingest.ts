@@ -118,7 +118,11 @@ export function registerIngestRoutes(app: FastifyInstance, log: Logger): void {
 
     // THE SECOND is_from_me GUARD. Nothing below this point runs if it fires, and in
     // particular `upsertVoicePack` is never reached: a rejected pack is stored NOWHERE.
-    const violations = findRedactionViolations(pack.exemplars);
+    //
+    // The whole pack, not `pack.exemplars`. The repository persists
+    // `JSON.stringify(pack)`, so every free-text field in it is stored, and
+    // `register.apology_openers` holds verbatim message prefixes. CONTRACTS.md § 7.
+    const violations = findRedactionViolations(pack);
     if (violations.length > 0) {
       const detail = describeViolations(violations);
       logEvent(log, {

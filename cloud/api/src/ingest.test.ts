@@ -30,6 +30,7 @@ import {
 import { buildServer } from "./server.js";
 import { makeLogger } from "./logging.js";
 import { checkResponse, spec } from "./openapi.js";
+import { MINIMAL_DIGEST } from "./differential.test.js";
 
 const FIXTURES = join(process.cwd(), "contracts", "fixtures");
 const pool = getPool();
@@ -194,6 +195,29 @@ describe("POST /v1/digest", () => {
     await deleteUser(theirs.scope);
   });
 
+  it("accepts a MINIMAL digest — only the frozen schema's required fields", async () => {
+    // The document Track A is entitled to send. Every committed fixture is fully
+    // populated, so a mirror that marks an optional field required passes every other
+    // test in this file and 400s a conforming upload. That is what happened.
+    const account = await newAccount();
+    const digest = JSON.parse(JSON.stringify(MINIMAL_DIGEST)) as Digest;
+    digest.user_id = account.scope.user_id;
+    digest.device_id = account.deviceId;
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/v1/digest",
+      headers: auth(account.token),
+      payload: digest,
+    });
+    expect(res.statusCode, res.body).toBe(202);
+
+    // And it round-trips: the relationship stored from a minimal digest reads back.
+    const residue = await residueByTable(account.scope.user_id, pool);
+    expect(residue["relationships"]).toBe(1);
+    await deleteUser(account.scope);
+  });
+
   it("refuses a device_id the caller does not own", async () => {
     const account = await newAccount();
     const digest = await digestFor(account);
@@ -277,6 +301,44 @@ describe("POST /v1/voice-pack", () => {
       expect(await voicePackFor(account.scope, pack.contact_id)).toBeNull();
       expect((await residueByTable(account.scope.user_id, pool))["voice_packs"]).toBe(0);
 
+      await deleteUser(account.scope);
+    });
+  }
+
+  // THE FIELD THE GUARD USED TO MISS. Spotless exemplars, the leak in
+  // register.apology_openers — which holds verbatim message prefixes and is persisted
+  // with the rest of the document. This returned 202 before the fix, with all three
+  // per-pattern tests green. CONTRACTS.md § 7.
+  const leakyFields: Array<[string, (p: VoicePack, leak: string) => void]> = [
+    ["exemplars", (p, leak) => { p.exemplars = [leak]; }],
+    ["register.apology_openers", (p, leak) => { p.register.apology_openers = [leak]; }],
+    ["register.abbreviations", (p, leak) => { p.register.abbreviations = [leak]; }],
+    ["register.top_emoji", (p, leak) => { p.register.top_emoji = [leak]; }],
+  ];
+
+  for (const [field, mutate] of leakyFields) {
+    it(`rejects a leak in ${field} with 422 and stores nothing`, async () => {
+      const account = await newAccount();
+      const pack = await fixture<VoicePack>("voice_pack", "maya.json");
+      pack.exemplars = ["ok that works for me"]; // spotless
+      mutate(pack, "sorry i still owe you $40, call me on 415-555-0142");
+
+      const res = await app.inject({
+        method: "POST",
+        url: "/v1/voice-pack",
+        headers: auth(account.token),
+        payload: pack,
+      });
+
+      expect(res.statusCode, `${field} was not scanned`).toBe(422);
+      const body = res.json() as { error: string; detail: string };
+      expect(body.error).toBe("redaction_failed");
+      expect(body.detail).not.toContain("415-555-0142");
+
+      // Nothing persisted — the whole document is what gets stored, so a 422 that
+      // wrote the row would have leaked through a field nobody was looking at.
+      expect(await voicePackFor(account.scope, pack.contact_id)).toBeNull();
+      expect((await residueByTable(account.scope.user_id, pool))["voice_packs"]).toBe(0);
       await deleteUser(account.scope);
     });
   }
@@ -556,6 +618,27 @@ describe("authentication, asserted per route", () => {
       expect(res.json()).toEqual({ error: "unauthorized" });
     });
   }
+
+  it("returns 401, not 500, for a token whose prefix is outside the frozen alphabet", async () => {
+    // `usr_has-dash` parsed as a well-formed user id under the old loose regex, and
+    // `unsafeScopeFromUserId` then threw — a 500 for a garbage credential. None of the
+    // existing 401 tests caught it because none of their tokens contained a dot.
+    for (const token of [
+      "usr_has-dash_here.secret",
+      "usr_short.secret",
+      "usr_.secret",
+      `usr_${"x".repeat(40)}.secret`,
+    ]) {
+      const res = await app.inject({
+        method: "POST",
+        url: "/v1/heartbeat",
+        headers: auth(token),
+        payload: {},
+      });
+      expect(res.statusCode, token).toBe(401);
+      expect(res.json()).toEqual({ error: "unauthorized" });
+    }
+  });
 
   it("rejects a revoked token — the account it names is gone", async () => {
     const account = await newAccount();

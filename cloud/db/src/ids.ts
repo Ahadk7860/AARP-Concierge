@@ -123,12 +123,24 @@ export function hashDeviceToken(cleartext: string): Buffer {
   return createHash("sha256").update(cleartext, "utf8").digest();
 }
 
-/** Returns null when the token is not in `<user_id>.<secret>` form. */
+/**
+ * Returns null when the token is not in `<user_id>.<secret>` form.
+ *
+ * The pattern is the frozen one, `^usr_[0-9a-zA-Z]{8,32}$`, and it has to be. This was
+ * the last survivor of the base64url defect: it accepted `[A-Za-z0-9_-]{4,}`, so
+ * `usr_has-dash.secret` parsed as a well-formed user id, and `unsafeScopeFromUserId`
+ * then THREW on it — turning a garbage bearer token into a 500 instead of a 401.
+ * A parser accepting more than the minter can produce is not leniency, it is a
+ * different validator disagreeing with the contract, which is how the original bug
+ * survived three separate checks.
+ */
+const FROZEN_USER_ID = /^usr_[0-9a-zA-Z]{8,32}$/;
+
 export function userIdFromDeviceToken(cleartext: string): string | null {
   const dot = cleartext.indexOf(".");
   if (dot <= 0) return null;
   const candidate = cleartext.slice(0, dot);
-  return /^usr_[A-Za-z0-9_-]{4,}$/.test(candidate) ? candidate : null;
+  return FROZEN_USER_ID.test(candidate) ? candidate : null;
 }
 
 /** Constant-time compare for stored token hashes. */

@@ -11,7 +11,13 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { digestSchema, heartbeatSchema, isoUtc, voicePackSchema } from "./schemas.js";
 import { ID_PATTERNS, VOICE_PACK_LIMITS } from "./contract-limits.js";
-import { findRedactionViolations, describeViolations } from "./redaction.js";
+import {
+  findRedactionViolations,
+  findViolationsInStrings,
+  freeTextFields,
+  describeViolations,
+} from "./redaction.js";
+import type { VoicePack } from "@boi/shared";
 
 const ROOT = process.cwd();
 const SCHEMA_DIR = join(ROOT, "contracts", "schema");
@@ -155,10 +161,101 @@ describe("the heartbeat body matches the OpenAPI document", () => {
 });
 
 describe("the redaction guard", () => {
+  function packWith(over: Record<string, unknown>): VoicePack {
+    const base = JSON.parse(
+      readFileSync(join(FIXTURE_DIR, "voice_pack", "maya.json"), "utf8"),
+    ) as VoicePack;
+    return { ...base, ...over } as VoicePack;
+  }
+
   it("passes every committed voice-pack fixture", () => {
     for (const { name, doc } of fixtures("voice_pack")) {
-      const pack = doc as { exemplars: string[] };
-      expect(findRedactionViolations(pack.exemplars), name).toEqual([]);
+      expect(findRedactionViolations(doc as VoicePack), name).toEqual([]);
+    }
+  });
+
+  // ONE TEST PER FREE-TEXT FIELD. The original guard scanned `exemplars` only, and
+  // three per-PATTERN tests all passed while `register.apology_openers` carried a phone
+  // number into storage. Per-pattern coverage cannot see a missed field; per-field can.
+  const FIELD_CASES: Array<{ field: string; build: (leak: string) => VoicePack }> = [
+    { field: "exemplars", build: (leak) => packWith({ exemplars: [leak] }) },
+    {
+      field: "register.apology_openers",
+      build: (leak) =>
+        packWith({
+          register: {
+            ...(JSON.parse(
+              readFileSync(join(FIXTURE_DIR, "voice_pack", "maya.json"), "utf8"),
+            ) as VoicePack).register,
+            apology_openers: [leak],
+          },
+        }),
+    },
+    {
+      field: "register.abbreviations",
+      build: (leak) =>
+        packWith({
+          register: {
+            ...(JSON.parse(
+              readFileSync(join(FIXTURE_DIR, "voice_pack", "maya.json"), "utf8"),
+            ) as VoicePack).register,
+            abbreviations: [leak],
+          },
+        }),
+    },
+    {
+      field: "register.top_emoji",
+      build: (leak) =>
+        packWith({
+          register: {
+            ...(JSON.parse(
+              readFileSync(join(FIXTURE_DIR, "voice_pack", "maya.json"), "utf8"),
+            ) as VoicePack).register,
+            top_emoji: [leak],
+          },
+        }),
+    },
+  ];
+
+  for (const { field, build } of FIELD_CASES) {
+    it(`scans ${field}`, () => {
+      // The exact payload from the review: spotless exemplars, a leak in one other
+      // free-text array. Before the fix this returned [] for three of the four.
+      const violations = findRedactionViolations(
+        build("sorry i still owe you $40, call me on 415-555-0142"),
+      );
+      expect(violations.length, `${field} was not scanned`).toBeGreaterThan(0);
+      const patterns = violations.map((v) => v.pattern);
+      expect(patterns).toContain("phone");
+      expect(patterns).toContain("amount");
+    });
+  }
+
+  it("enumerates exactly the free-text arrays voice_pack.v1 defines", () => {
+    // If a future contract adds a free-text field, this fails until it is scanned.
+    const vp = schema("voice_pack.v1.json");
+    const props = vp["properties"] as Record<string, Record<string, unknown>>;
+    const register = props["register"]!["properties"] as Record<string, Record<string, unknown>>;
+
+    const stringArrays = new Set<string>();
+    if ((props["exemplars"]!["items"] as Record<string, unknown>)["type"] === "string") {
+      stringArrays.add("exemplars");
+    }
+    for (const [name, def] of Object.entries(register)) {
+      const items = def["items"] as Record<string, unknown> | undefined;
+      if (def["type"] === "array" && items?.["type"] === "string") stringArrays.add(name);
+    }
+
+    const scanned = new Set(
+      freeTextFields(
+        JSON.parse(
+          readFileSync(join(FIXTURE_DIR, "voice_pack", "maya.json"), "utf8"),
+        ) as VoicePack,
+      ).map((f) => f.field as string),
+    );
+    for (const name of stringArrays) {
+      expect(scanned, `voice_pack.v1 defines free-text ${name} and the guard skips it`)
+        .toContain(name);
     }
   });
 
@@ -169,23 +266,31 @@ describe("the redaction guard", () => {
       "+1 415 555 0142 works",
       "ring 4155550142",
     ]) {
-      expect(findRedactionViolations([s]).map((v) => v.pattern), s).toContain("phone");
+      expect(findViolationsInStrings([s]), s).toContain("phone");
     }
   });
 
   it("catches email addresses", () => {
-    expect(findRedactionViolations(["send it to maya.chen+tag@example.co.uk"])).toHaveLength(1);
+    expect(findViolationsInStrings(["send it to maya.chen+tag@example.co.uk"])).toContain(
+      "email",
+    );
   });
 
   it("catches amounts in several currencies and spellings", () => {
     for (const s of ["i owe u $40", "that was $1,200.50", "40 dollars", "£25 each", "30 usd"]) {
-      expect(findRedactionViolations([s]).map((v) => v.pattern), s).toContain("amount");
+      expect(findViolationsInStrings([s]), s).toContain("amount");
     }
   });
 
-  it("catches street addresses", () => {
-    for (const s of ["742 Evergreen Terrace", "meet at 10 Downing St", "1600 Pennsylvania Ave"]) {
-      expect(findRedactionViolations([s]).map((v) => v.pattern), s).toContain("street_address");
+  it("catches street addresses without relying on capitalisation", () => {
+    // § 7: the target corpus is lowercase texting. A pattern requiring [A-Z] passes
+    // every test written against capitalised samples and leaks the real thing.
+    for (const s of [
+      "742 Evergreen Terrace",
+      "meet at 10 downing st",
+      "1600 pennsylvania ave",
+    ]) {
+      expect(findViolationsInStrings([s]), s).toContain("street_address");
     }
   });
 
@@ -198,24 +303,34 @@ describe("the redaction guard", () => {
       "lmk when ur free and ill come thru",
       "prob gonna be late but ill be there",
     ]) {
-      expect(findRedactionViolations([s]), s).toEqual([]);
+      expect(findViolationsInStrings([s]), s).toEqual([]);
     }
   });
 
-  it("reports every violation, not just the first", () => {
-    const violations = findRedactionViolations([
-      "clean one",
-      "call 415-555-0142",
-      "email me at a@b.co",
-    ]);
-    expect(violations.map((v) => v.exemplar_index).sort()).toEqual([1, 2]);
+  it("reports every violation across every field, not just the first", () => {
+    const base = JSON.parse(
+      readFileSync(join(FIXTURE_DIR, "voice_pack", "maya.json"), "utf8"),
+    ) as VoicePack;
+    const violations = findRedactionViolations({
+      ...base,
+      exemplars: ["clean one", "call 415-555-0142"],
+      register: { ...base.register, apology_openers: ["sorry, i owe u $40"] },
+    } as VoicePack);
+    expect(new Set(violations.map((v) => v.field))).toEqual(
+      new Set(["exemplars", "apology_openers"]),
+    );
   });
 
   it("describes violations without repeating the offending text", () => {
-    const exemplar = "call me on 415-555-0142";
-    const detail = describeViolations(findRedactionViolations([exemplar]));
+    const base = JSON.parse(
+      readFileSync(join(FIXTURE_DIR, "voice_pack", "maya.json"), "utf8"),
+    ) as VoicePack;
+    const leak = "call me on 415-555-0142";
+    const detail = describeViolations(
+      findRedactionViolations({ ...base, exemplars: [leak] } as VoicePack),
+    );
     expect(detail).toContain("phone");
-    expect(detail).toContain("0");
+    expect(detail).toContain("exemplars");
     expect(detail).not.toContain("415-555-0142");
   });
 });

@@ -322,6 +322,90 @@ Choices the prompt left open that you had to resolve: a library, a data structur
 error-handling approach. The user needs to see these before merge, because another
 track may have chosen differently.
 
+### Corrections to prompt 02, applied 2 Aug after review
+
+`[prompt 02] FIXED — severe.` **The 422 guard scanned one of four free-text fields.**
+`findRedactionViolations` took `pack.exemplars`; `upsertVoicePack` stores
+`JSON.stringify(pack)` — the whole document. `register.apology_openers` holds verbatim
+message prefixes (the fixture's are `"sorry been mia"` and `"omg sorry"`), so this was
+accepted with a 202 and persisted:
+
+```json
+"exemplars": ["ok that works for me"],
+"register": { "apology_openers": ["sorry i still owe you $40, call me on 415-555-0142"] }
+```
+
+All three of my phone/email/amount tests stayed green, because **per-pattern coverage
+cannot see a missed field.** The tests are now per-FIELD as well: `exemplars`,
+`register.apology_openers`, `register.abbreviations`, `register.top_emoji`, each with
+the payload above, at both the unit and the endpoint level, each asserting zero rows
+after the rejection. Plus a test that derives the list of free-text arrays from
+`voice_pack.v1.json` itself, so a new free-text field in the contract fails until it is
+scanned. Live check after the fix: `422`, `voice_packs` row count `0`.
+
+`[prompt 02] FIXED — severe.` **The zod mirror disagreed with the frozen schema in both
+directions.** Too strict: `archetype`, `first_contact_at`, `last_contact_at` and the two
+`corpus` timestamps were `.nullable()` but not `.optional()`, and none is in the frozen
+`required` list — Track A would have received a `400` for a document
+`validate_fixtures.py` calls valid. `days_since_last_contact` and `span_days` were
+`z.number()` where the schema says `integer`; `health_reasons` was `z.array(z.string())`
+where it is an enum; `display` had no length bounds. Too loose: `whole_life` used
+`.passthrough()` under a comment claiming the frozen schema allows extra keys — it sets
+`additionalProperties: false`.
+
+Neither direction was visible against the fixtures, because every committed fixture is
+fully populated and none carries a junk key.
+
+Fixed field by field, and then made mechanically un-driftable:
+`cloud/api/src/differential.test.ts` runs the zod mirror and **ajv over the frozen JSON
+Schema** against ~50 boundary documents — every fixture, a minimal digest, each optional
+field individually removed, a junk key at each nesting level, and type probes — and
+fails on any disagreement in either direction. CONTRACTS.md § 1 makes the JSON Schema
+the arbiter, so ajv is the reference and zod is the thing under test.
+
+I verified it bites rather than assuming it does. Reintroducing the archetype defect:
+`digest relationship without archetype: frozen schema says VALID, zod says invalid`.
+Reintroducing the passthrough defect:
+`digest junk key in whole_life: frozen schema says invalid, zod says VALID`. There is
+also a permanent test asserting the differential itself is not vacuous.
+
+`POST /v1/digest` now has a minimal-digest round-trip — only the frozen schema's
+required fields, at every level — with a companion assertion that removing any remaining
+key makes it invalid, so "minimal" cannot quietly stop being minimal.
+
+`[prompt 02] FIXED.` **`userIdFromDeviceToken` was the last survivor of the base64url
+defect, and it turned a garbage token into a 500.** It matched
+`^usr_[A-Za-z0-9_-]{4,}$` — the loose alphabet — so `usr_has-dash_here.secret` parsed as
+a well-formed user id and `unsafeScopeFromUserId` then *threw* on it. The route returned
+500 where the answer is 401. None of the existing per-route 401 tests caught it because
+none of their tokens contained a dot.
+
+Now the frozen `^usr_[0-9a-zA-Z]{8,32}$`, with a test asserting the parser and the scope
+constructor accept exactly the same set over 1,000 real tokens, and an endpoint test for
+four malformed prefixes. Live: all return 401.
+
+**On the 1,000-id test:** it was already there from the previous round, at
+`scope.test.ts` "generated ids satisfy the frozen JSON Schemas", reading the patterns out
+of `contracts/schema/*.json` and generating 1,000 each of `usr_`, `dev_` and `h_`. The
+review pointed at `scope.test.ts:134`, which is a `returning()` test helper. But the
+pointer was in the right neighbourhood — `ids.ts` genuinely still held a loose regex, and
+that is the fix above.
+
+`[prompt 02] ALREADY DONE — the two "note rather than fix" items.` Both landed in
+`27849f0`, the previous correction commit, so no change was needed:
+
+- `scope.ts`'s header no longer says "syntactically unavailable". It has said
+  `3. SQL TEXT CHECK — WEAK. A regex, and it is defeatable by construction. It exists to
+  catch typos and copy-paste, not attackers` since that commit, and it names all three
+  bypasses. `grep -rn "syntactically" cloud/` returns nothing. NOTES already says the
+  SQL guard is a lint rather than a boundary, under `## Deviations`.
+- `residueByTable` already walks foreign keys — `deletionReachableTables` recurses over
+  `pg_constraint` from `users`, and the comment at `ingest.ts` is accurate. The
+  `attname = 'user_id'` matches remaining in `catalog.ts` are the `has_user_id` probe
+  that *raises* `UncountableTableError` for a `brief_items`-shaped table, plus
+  `userScopedTables`, which is kept only as a cross-check that the two enumerations
+  agree. The decision was recorded under `## Decisions made` in the same commit.
+
 `[prompt 02]` — **Third-party full names are NOT asserted by the upload guard.**
 CONTRACTS.md § 7 lists five things the Mac redacts: phone numbers, email addresses,
 street addresses, dollar amounts, and third-party full names. The server guard asserts
@@ -335,6 +419,14 @@ looks like the safe side and is not: a user whose packs are always rejected gets
 drafts at all, and the whole pack is the unit of rejection. Names need a name list to
 detect, the Mac has one (it has the address book), and guards one and three both cover
 this. Guard two cannot, without a heuristic that is wrong in both directions.
+
+**§ 7's 2 Aug amendment strengthens this rather than settling it.** "Name redaction must
+not assume capitalization — the target corpus is lowercase texting" means the
+capitalised-pair heuristic would *also* miss `"ill ask john smith about it"`, which is
+the case that actually matters. So it over-rejects real exemplars and under-detects real
+names simultaneously. I have kept the guard at the four mechanical patterns and made all
+four case-insensitive where case could matter (the street pattern now fires on
+`"10 downing st"`). Still open for you to overrule.
 
 The four it does assert are mechanical and near-zero false positive, and it errs toward
 rejecting within each: the phone pattern is looser than E.164, the amount pattern covers

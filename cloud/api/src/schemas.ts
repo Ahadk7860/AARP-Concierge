@@ -18,35 +18,52 @@ export const isoUtc = z
 
 const nullableIso = isoUtc.nullable();
 
+const nullableInt = z.number().int().nullable();
+
+// OPTIONAL vs NULLABLE is the distinction this mirror got wrong the first time.
+// `digest.v1.json`'s `$defs/relationship.required` is exactly:
+//   contact_id, display, is_group, message_count, sent_count, received_count,
+//   days_since_last_contact, momentum_90d, initiation_ratio, as_of
+// Everything else — including `archetype`, `first_contact_at` and `last_contact_at` —
+// may be ABSENT. Marking them `.nullable()` without `.optional()` made this validator
+// reject documents the frozen schema calls valid, and no test caught it because every
+// committed fixture is fully populated. Track A would have got a 400 for a conforming
+// digest. `schemas.test.ts` now differentials this against ajv over the frozen schema.
 const relationship = z
   .object({
     contact_id: z.string().regex(ID_PATTERNS.contact),
-    display: z.string(),
+    display: z.string().min(1).max(64),
     is_group: z.boolean(),
     message_count: z.number().int().min(0),
     sent_count: z.number().int().min(0),
     received_count: z.number().int().min(0),
-    first_contact_at: nullableIso,
-    last_contact_at: nullableIso,
-    days_since_last_contact: z.number().min(0),
+    first_contact_at: nullableIso.optional(),
+    last_contact_at: nullableIso.optional(),
+    days_since_last_contact: z.number().int().min(0),
     momentum_90d: z.number().min(0),
     initiation_ratio: z.number().min(0).max(1),
     median_reply_latency_s: z
-      .object({ user: z.number().nullable(), them: z.number().nullable() })
+      .object({ user: nullableInt.optional(), them: nullableInt.optional() })
+      .strict()
       .optional(),
     p90_reply_latency_s: z
-      .object({ user: z.number().nullable(), them: z.number().nullable() })
+      .object({ user: nullableInt.optional(), them: nullableInt.optional() })
+      .strict()
       .optional(),
-    tapbacks: z.object({ given: z.number(), received: z.number() }).optional(),
+    tapbacks: z
+      .object({ given: z.number().int().optional(), received: z.number().int().optional() })
+      .strict()
+      .optional(),
     muted_by_them: z.boolean().nullable().optional(),
     green_share: z.number().min(0).max(1).optional(),
     calls: z
       .object({
-        count: z.number(),
-        total_seconds: z.number(),
-        initiated_by_user: z.number(),
-        missed: z.number(),
+        count: z.number().int().optional(),
+        total_seconds: z.number().int().optional(),
+        initiated_by_user: z.number().int().optional(),
+        missed: z.number().int().optional(),
       })
+      .strict()
       .optional(),
     archetype: z
       .enum([
@@ -56,7 +73,8 @@ const relationship = z
         "the_one_you_keep_waiting",
         "rising_fastest",
       ])
-      .nullable(),
+      .nullable()
+      .optional(),
     as_of: isoUtc,
   })
   .strict();
@@ -67,30 +85,60 @@ export const digestSchema = z
     user_id: z.string().regex(ID_PATTERNS.user),
     device_id: z.string().regex(ID_PATTERNS.device),
     generated_at: isoUtc,
+    // `corpus.required` is only: message_count, thread_count, span_days, health, as_of.
     corpus: z
       .object({
         message_count: z.number().int().min(0),
         thread_count: z.number().int().min(0),
-        first_message_at: nullableIso,
-        last_message_at: nullableIso,
-        span_days: z.number().min(0),
+        first_message_at: nullableIso.optional(),
+        last_message_at: nullableIso.optional(),
+        span_days: z.number().int().min(0),
         green_share: z.number().min(0).max(1).optional(),
         messages_in_icloud: z.boolean().nullable().optional(),
         retention_boundary: z
           .enum(["30d", "365d", "1y_exact", "30d_exact"])
           .nullable()
           .optional(),
-        days_since_newest: z.number().min(0).optional(),
+        days_since_newest: z.number().int().min(0).optional(),
         health: z.enum(["healthy", "fixable", "thin"]),
-        health_reasons: z.array(z.string()).optional(),
+        // An enum in the frozen schema, not a free string.
+        health_reasons: z
+          .array(
+            z.enum([
+              "icloud_off",
+              "keep_messages_30d",
+              "keep_messages_1y",
+              "new_mac",
+              "low_green_share",
+              "stale_sync",
+              "low_power_mode",
+              "none",
+            ]),
+          )
+          .optional(),
         as_of: isoUtc,
       })
       .strict(),
     relationships: z.array(relationship),
-    // `whole_life` is deliberately open: digest.v1.json lets Track A add facts to it
-    // without a contract change. `as_of` is the one thing that must be there — § 6:
-    // as_of on every fact, end to end, structurally impossible to lose.
-    whole_life: z.object({ as_of: isoUtc }).passthrough(),
+    // NOT open. The previous comment here claimed digest.v1.json lets Track A add keys
+    // to `whole_life` without a contract change; it does not — `additionalProperties`
+    // is false and the property list is closed. `.passthrough()` made this validator
+    // ACCEPT documents the frozen schema rejects, the opposite drift to the one above,
+    // and equally invisible against fully-populated fixtures.
+    whole_life: z
+      .object({
+        total_messages: z.number().int().optional(),
+        unique_people: z.number().int().optional(),
+        global_median_reply_s: z.number().int().optional(),
+        concentration_top1: z.number().optional(),
+        concentration_top5: z.number().optional(),
+        concentration_top10: z.number().optional(),
+        relationships_gone_quiet: z.number().int().optional(),
+        relationships_ranked: z.number().int().optional(),
+        late_night_share: z.number().optional(),
+        as_of: isoUtc,
+      })
+      .strict(),
   })
   .strict();
 
