@@ -8,6 +8,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { createHmac } from "node:crypto";
 import { PassThrough } from "node:stream";
 import type { FastifyInstance } from "fastify";
+import { StubChannel } from "../../shared/src/index.js";
 import type {
   Capabilities,
   Channel,
@@ -40,14 +41,14 @@ function nextPhone(): string {
 }
 
 /**
- * A stand-in for Track C's adapter, behaving the way Track C says the real one does:
- * verify a signature over the RAW BYTES, then parse.
+ * A stand-in for Track C's adapter: verify an HMAC over the RAW BYTES, then parse.
  *
- * The foundation's `StubChannel.normalizeInbound` treats its first argument as an
- * already-parsed object, so it cannot exercise this path at all — recorded as a
- * contract gap in NOTES.md. This double is what the criterion actually needs, and it is
- * deliberately strict: hand it anything but a string and it throws, exactly like
- * `RawBodyRequiredError`.
+ * `StubChannel` now enforces the same rule — `normalizeInbound` was retyped from
+ * `unknown` to `Buffer | string` on 2 Aug and throws `raw_body_required` on a parsed
+ * object — and the bottom of this file drives the route through it. This double is
+ * still worth having because the stub accepts any body with a fixed signature string,
+ * so it cannot show that the bytes reached the verifier UNCHANGED. Only a real HMAC
+ * over awkward whitespace and key order can do that.
  */
 class RawBodyRequiredError extends Error {
   constructor() {
@@ -78,15 +79,20 @@ function verifyingChannel(): Channel & { sent: OutboundMessage[] } {
     async health(): Promise<ChannelHealth> {
       return { status: "up", line_id: "line_a1", checked_at: new Date().toISOString() };
     },
-    normalizeInbound(rawBody: unknown, signature: string): InboundMessage {
+    normalizeInbound(rawBody: Buffer | string, signature: string): InboundMessage {
       // THE ASSERTION THAT MATTERS. A parsed object cannot be verified: re-serialising
       // it moves key order and whitespace, so the digest never matches what was signed.
-      if (typeof rawBody !== "string") throw new RawBodyRequiredError();
+      // Now a compile-time error too, but kept at run time — a cast would slip past the
+      // type and this is the check that would still catch it.
+      if (typeof rawBody !== "string" && !Buffer.isBuffer(rawBody)) {
+        throw new RawBodyRequiredError();
+      }
+      const text = Buffer.isBuffer(rawBody) ? rawBody.toString("utf8") : rawBody;
 
-      const expected = `sha256=${createHmac("sha256", SECRET).update(rawBody, "utf8").digest("hex")}`;
+      const expected = `sha256=${createHmac("sha256", SECRET).update(text, "utf8").digest("hex")}`;
       if (signature !== expected) throw new Error("bad_signature");
 
-      const body = JSON.parse(rawBody) as Record<string, unknown>;
+      const body = JSON.parse(text) as Record<string, unknown>;
       return {
         schema_version: "inbound.v1",
         provider: "mock",
@@ -158,8 +164,11 @@ describe("the raw body reaches normalizeInbound", () => {
   it("would fail if the parsed object were passed instead — the double proves it", () => {
     const c = verifyingChannel();
     const raw = '{"text":"2"}';
-    // The shape the route must NOT use.
-    expect(() => c.normalizeInbound(JSON.parse(raw), sign(raw))).toThrow(RawBodyRequiredError);
+    // The shape the route must NOT use. A cast, because the retyped interface now
+    // rejects it at compile time — which is the point.
+    expect(() =>
+      c.normalizeInbound(JSON.parse(raw) as unknown as string, sign(raw)),
+    ).toThrow(RawBodyRequiredError);
     // And the shape it does use.
     expect(() => c.normalizeInbound(raw, sign(raw))).not.toThrow();
   });
@@ -282,5 +291,117 @@ describe("the rest of the API still parses JSON normally", () => {
     const { findUserIdByPhone } = await import("../../db/src/index.js");
     const scope = await findUserIdByPhone(phone);
     if (scope !== null) cleanup.push(scope);
+  }, 60_000);
+});
+
+// ---------------------------------------------------------------------------
+
+/**
+ * The foundation's stub, driven end to end.
+ *
+ * `Channel.normalizeInbound` was retyped from `unknown` to `Buffer | string` on 2 Aug,
+ * and `StubChannel` now enforces it — it throws `raw_body_required` on a parsed object
+ * and parses real bytes otherwise. That closes the gap this track reported: before, the
+ * stub and Track C's adapter disagreed about what the first argument MEANT, so a route
+ * developed against the stub broke on the first live webhook.
+ *
+ * These tests exist because the local double above proves my route is correct against
+ * my own idea of the contract. Only the stub proves it against the foundation's.
+ */
+describe("the raw-body path against StubChannel", () => {
+  const raw = JSON.stringify({ id: "mmsg_stub_7", from: "+15551234567", text: "2" });
+
+  it("parses an actual Buffer", () => {
+    const stub = new StubChannel();
+    const inbound = stub.normalizeInbound(Buffer.from(raw, "utf8"), "stub-signature");
+    expect(inbound.schema_version).toBe("inbound.v1");
+    expect(inbound.provider_message_id).toBe("mmsg_stub_7");
+    expect(inbound.text).toBe("2");
+    expect(inbound.from_handle).toBe("+15551234567");
+  });
+
+  it("parses a raw string identically to the same bytes as a Buffer", () => {
+    const stub = new StubChannel();
+    const fromString = stub.normalizeInbound(raw, "stub-signature");
+    const fromBuffer = stub.normalizeInbound(Buffer.from(raw, "utf8"), "stub-signature");
+    // `received_at` is generated per call, so compare everything else.
+    const strip = (m: InboundMessage): Omit<InboundMessage, "received_at"> => {
+      const { received_at: _ignored, ...rest } = m;
+      return rest;
+    };
+    expect(strip(fromBuffer)).toEqual(strip(fromString));
+  });
+
+  it("throws raw_body_required on a parsed object — the gap, now closed", () => {
+    const stub = new StubChannel();
+    // The exact mistake the old `unknown` signature allowed. It is now a type error at
+    // compile time AND a throw at run time, so neither a new route nor a cast can
+    // reintroduce it quietly.
+    expect(() =>
+      stub.normalizeInbound(JSON.parse(raw) as unknown as string, "stub-signature"),
+    ).toThrow(/raw_body_required/);
+  });
+
+  it("rejects a bad signature before it looks at the body at all", () => {
+    const stub = new StubChannel();
+    // Garbage bytes with a wrong signature must fail on the signature, not on the JSON —
+    // verify-then-parse, so a malformed body from an unauthenticated caller never
+    // reaches a parser.
+    expect(() => stub.normalizeInbound(Buffer.from("{not json", "utf8"), "wrong")).toThrow(
+      /bad_signature/,
+    );
+  });
+
+  it("drives the real route with StubChannel and a real Buffer body", async () => {
+    const { scope } = await createUser({ phone_e164: nextPhone() });
+    cleanup.push(scope);
+
+    const stubApp = buildServer({
+      channel: new StubChannel(),
+      logger: makeLogger(new PassThrough()),
+    });
+    await stubApp.ready();
+    try {
+      const res = await stubApp.inject({
+        method: "POST",
+        url: "/v1/webhooks/mock",
+        headers: { "content-type": "application/json", "x-boi-signature": "stub-signature" },
+        payload: Buffer.from(raw, "utf8"),
+      });
+      // 204 means the raw bytes reached `normalizeInbound` intact. If the route had
+      // handed over a parsed object the stub would have thrown and this would be 401.
+      expect(res.statusCode, res.body).toBe(204);
+
+      // And a wrong signature is the documented 401 through the same path.
+      const bad = await stubApp.inject({
+        method: "POST",
+        url: "/v1/webhooks/mock",
+        headers: { "content-type": "application/json", "x-boi-signature": "nope" },
+        payload: Buffer.from(raw, "utf8"),
+      });
+      expect(bad.statusCode).toBe(401);
+      expect(bad.json()).toEqual({ error: "bad_signature" });
+    } finally {
+      await stubApp.close();
+    }
+  }, 60_000);
+
+  it("handles the stub's null user_id by resolving the sender's own handle", async () => {
+    // StubChannel always returns `user_id: null` and a fixed `from_handle`. That is the
+    // path a real transport takes when it does not know the account yet, so it is worth
+    // exercising: the resolver falls back to the account holder's own number.
+    const phone = "+15551234567"; // the stub's from_handle
+    const existing = await (await import("../../db/src/index.js")).findUserIdByPhone(phone);
+    if (existing !== null) await deleteUser(existing);
+
+    const { scope } = await createUser({ phone_e164: phone });
+    cleanup.push(scope);
+
+    const stub = new StubChannel();
+    const inbound = stub.normalizeInbound(Buffer.from(raw, "utf8"), "stub-signature");
+    expect(inbound.user_id).toBeNull();
+
+    const { resolveUser } = await import("../../brief/src/inbound.js");
+    expect((await resolveUser(inbound))?.user_id).toBe(scope.user_id);
   }, 60_000);
 });

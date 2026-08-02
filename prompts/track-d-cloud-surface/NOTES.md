@@ -98,7 +98,24 @@ Nothing here is blocked. Flagging because a contract amendment that lives on a t
 branch reaches no other track — WORKTREE-PROTOCOL's amendment sequence is
 amend -> commit to base -> each track merges base forward, and step two has not happened.
 
-`[prompt 06] OPEN` — **`StubChannel.normalizeInbound` cannot exercise the raw-body
+`[prompt 06] RESOLVED (2 Aug, by main `02a815e`)` — **`Channel.normalizeInbound` is now
+typed `Buffer | string` and `StubChannel` enforces it.** The foundation retyped the seam
+and made the stub throw `raw_body_required` on a parsed object, parse real bytes
+otherwise. The gap was real and it was at the interface, not in either implementation:
+`unknown` let two implementations of one frozen method disagree about what their first
+argument meant.
+
+Now wired against the stub, as asked — `webhook.test.ts` drives `normalizeInbound`
+through `StubChannel` with an actual `Buffer`, asserts a Buffer and the equivalent
+string produce identical messages, asserts the parsed-object case throws, and drives the
+whole route with a Buffer body end to end.
+
+I kept the local HMAC double alongside it. The stub accepts any body with a fixed
+signature string, so it cannot show the bytes reached the verifier UNCHANGED; only a
+real HMAC over deliberately awkward whitespace and key order does that. Verified both
+halves bite by regressing the route to pass `req.body`: two tests fail, one from each.
+
+`[prompt 06] SUPERSEDED` — **`StubChannel.normalizeInbound` cannot exercise the raw-body
 path.** Track C's adapter requires the raw request bytes and throws
 `RawBodyRequiredError` on a parsed object. The foundation's stub does the opposite: it
 does `rawBody as Record<string, unknown>` and reads `.id` off it, so handing it raw
@@ -372,10 +389,11 @@ would fail if the route re-serialised. And `signatureHeader` collapses
 `string | string[] | undefined` to `string | null`, treating a duplicated header as a
 refusal rather than taking `[0]` — two headers is an attack shape, not a mistake.
 
-`[prompt 06]` — **`/v1/webhooks/{provider}` is in `cloud/api/`, outside prompt 06's
-stated `cloud/brief/`.** Same documented deviation as migrations 005-007: the endpoint
-is in the frozen OpenAPI as Track D's surface, no prompt ever assigned it, and Track C's
-warning only makes sense if it is wired. `check-ownership.sh d` is clean.
+`[prompt 06] RATIFIED (2 Aug, CONTRACTS § 2)` — **`/v1/webhooks/{provider}` in
+`cloud/api/`.** Recorded as a deviation; § 2 now states it explicitly, on the grounds
+that it belongs with the other HTTP routes and the signature guard has to sit beside the
+auth middleware rather than in the composer. A documented deviation from prompt 06's
+paths, not an ownership violation. `check-ownership.sh d` is clean.
 
 `[prompt 06]` — **An unthreaded reply to a multi-item brief asks instead of guessing.**
 The checklist says a bare `2` attributes to the most recent brief, and it does. But a
