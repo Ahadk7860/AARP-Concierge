@@ -21,6 +21,17 @@ describe("foundation harness", () => {
   });
   it("bad signature is rejected", () => {
     const c = new StubChannel();
-    expect(() => c.normalizeInbound({}, "nope")).toThrow("bad_signature");
+    expect(() => c.normalizeInbound("{}", "nope")).toThrow("bad_signature");
+  });
+  it("raw bytes are required — a parsed object is refused", () => {
+    const c = new StubChannel();
+    // @ts-expect-error the frozen interface takes Buffer | string, not an object
+    expect(() => c.normalizeInbound({ id: "x" }, "stub-signature")).toThrow("raw_body_required");
+  });
+  it("accepts a Buffer, like a real webhook", () => {
+    const c = new StubChannel();
+    const m = c.normalizeInbound(Buffer.from('{"id":"m1","text":"2"}'), "stub-signature");
+    expect(m.text).toBe("2");
+    expect(m.provider_message_id).toBe("m1");
   });
 });
