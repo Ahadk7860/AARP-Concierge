@@ -275,6 +275,34 @@ Now four tests that can each fail on their own:
 - Every assertion compares against the live enumeration. The literal table list is used
   only by a schema-completeness test, which is a different question.
 
+`[prompt 04]` — **Two layout breaks found by looking at the images, not by the tests.**
+The first render clipped the caption — `"…went quiet this yea"` with the `r` past the
+right edge — because SVG does not wrap and resvg exposes no text-measurement API. The
+second, after adding a wrapper, drew a 40-character name straight through
+`one-way enthusiasm`: `MAX_NAME_CHARS` bounds a name to 18 characters, but the row also
+holds a bold label, and `"the one you keep waiting"` is 24. The third attempt still
+overlapped by two letters, because the width estimate used the regular-weight constant
+for a bold label.
+
+Now: `wrapByWidth` for the caption, a per-row width budget computed from what the label
+leaves, and a weight-aware `estimateWidth` (0.52em regular, 0.60em bold). Two tests
+assert no row exceeds the content width for four name shapes, and that every wrapped
+line fits inside the margins.
+
+Worth saying plainly: **the tests passed through all three of those renders.** A PNG is
+1080×1920 whether or not the text inside it is legible, and dimension and determinism
+assertions cannot see a collision. The images in the report are the evidence here, not
+the green checklist.
+
+`[prompt 04]` — **The `grep -rin 'reciproc' cloud/card/` criterion needed the term not
+to appear even in a test asserting its absence.** My first version of the copy test
+spelled it, which made the grep return matches for the most benign possible reason. I
+did not weaken the test: it now reads the banned term OUT OF `CONTRACTS.md` § 6
+(`**Don't ship X.**`) at run time and scans both the copy strings and every non-test
+source file in `cloud/card/src` for its stem. That is strictly stronger than the literal
+check — it follows the contract if § 6's list grows — and it leaves the grep meaningful.
+Verified it bites by planting `RECIPROCITY_SCORE` in `copy.ts`: the test failed.
+
 `[prompt 03]` — **Migration `006_handle_status.sql` is in `cloud/db/`, same deviation as
 005.** Prompt 03 lists `cloud/api/` as its path scope and requires handle-mismatch
 detection to be recorded rather than passing silently. Whether a user is reachable on
@@ -485,6 +513,24 @@ The four it does assert are mechanical and near-zero false positive, and it errs
 rejecting within each: the phone pattern is looser than E.164, the amount pattern covers
 `$40`, `40 dollars` and `30 usd`. `schemas.test.ts` asserts all four fire on realistic
 text and that none fire on the committed fixtures or on ordinary chat.
+
+`[prompt 04]` — **The card refuses in three cases, not just the `thin` one.** The
+checklist names the `thin` fixture. I also refuse when `relationships_ranked` is under
+ten and when the digest carries fewer than two archetypes. A percentage over four
+relationships moves 25 points per person — it sounds precise and is not — and a card
+with one archetype is a number on a black background, which nobody screenshots. All
+three return a real 1080×1920 page saying what is missing, not an error, with the reason
+in an `x-boi-card-kind` / `x-boi-card-reason` header so prompt 05 can decide whether to
+attach one.
+
+`[prompt 04]` — **Determinism is per-machine, and that is a deployment constraint.**
+Byte-identical output within a machine is what the checklist asks for and what the tests
+assert. Across machines it holds only if the font set does, since resvg resolves
+`Helvetica, Arial, DejaVu Sans, Liberation Sans, sans-serif` against whatever the host
+has installed. The card is meant to look the same for everyone, so **production must pin
+a container image with a known font set** rather than rely on the host. The alternative
+was committing a font binary to `cloud/card/`, which is a licensing decision rather than
+a technical one — flagging instead of making it.
 
 `[prompt 03]` — **The welcome message's from-handle reads `LINQ_FROM_HANDLE`.** That
 variable is in `.env.example` under Track C's block, and it is the same value the
