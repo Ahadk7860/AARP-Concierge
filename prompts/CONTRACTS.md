@@ -164,6 +164,33 @@ create table relationships (
 **Never join users to each other.** If two users both text the same person, those rows
 must not link. Crossing that line is what ended NGL.
 
+### Correction, 2 Aug: cascade is the delete mechanism, not partitioning
+
+The original wording of this section implied that hash partitioning by `user_id` is what
+makes delete one operation. **It isn't, and that was a bad criterion.** A hash partition
+holds many users, so there is no per-user partition to drop; `on delete cascade` from
+`users` is what actually does the work, and it would have done it with no partitioning at
+all.
+
+The criterion was not free, either. It forced `users` itself out of the pattern — you
+cannot keep `phone_e164 unique` on a table hash-partitioned by `user_id` — and it made a
+global unique constraint on active pairing codes impossible.
+
+So, corrected:
+
+- **Required:** every user-data table carries `user_id` and cascades from `users`, and a
+  single `DELETE FROM users WHERE user_id = $1` provably leaves zero rows anywhere.
+  Verify by enumerating tables **from the catalog**, never a hard-coded list.
+- **Optional, for scale:** hash partitioning on `user_id`. Keep it where it costs
+  nothing. Do not contort a constraint to preserve it, and `users` is exempt.
+- **The delete enumeration must not depend on a column being named `user_id`.** Prompts
+  04 and 05 add `brief_items`-shaped tables keyed on a parent id with no `user_id` column
+  of their own. A catalog query filtered on the column name cannot see those, which makes
+  it a naming-convention checker wearing a catalog's clothes. Either give every table a
+  `user_id`, or enumerate by walking foreign keys from `users`.
+- **Derived data outside Postgres counts.** A rendered card at `briefs.card_url` is
+  derived data; delete has to reach it too.
+
 ---
 
 ## 4. Events and jobs
