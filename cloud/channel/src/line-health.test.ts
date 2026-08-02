@@ -21,6 +21,7 @@ import {
   type LineRegistryConfig,
 } from "./line-registry.js";
 import { LineHealthMonitor, loadLineHealthConfig, type LineHealthChanged } from "./line-health.js";
+import { RawBodyRequiredError, SignatureError } from "./inbound.js";
 import { RoutedChannel, loadRoutedChannelConfig, DEFAULT_INTRODUCTION, type RoutedChannelConfig } from "./routed-channel.js";
 
 // CONTRACTS.md § 9: Track C's channel test server is 3032. The mock from prompt 01 backs
@@ -529,6 +530,51 @@ describe("idempotency holds at the layer the caller actually holds", () => {
     // retryable.
     await routed.send(message("usr_k", "key-3"));
     expect(mock.recorder.all()).toHaveLength(4);
+  });
+});
+
+describe("RoutedChannel guards the inbound boundary it exposes to Track D", () => {
+  // Injected primary that does NOT guard, so the assertion is about RoutedChannel's own
+  // boundary rather than about LinqChannel's. With LinqChannel as primary these tests
+  // pass whether or not RoutedChannel guards — the downstream path raises the same
+  // errors — which would make the guard look protected while being dead weight.
+  function unguardedPrimary(): Channel {
+    return {
+      send: async () => ({ message_id: "x", provider: "mock", protocol: "sms", line_id: "line_a1" }),
+      capabilities: async () => ({
+        tapbacks: true, images: true, groups: false, typing: false,
+        richlinks: true, contact_cards: true, threading: true,
+      }),
+      health: async () => ({ status: "up" as const, line_id: "line_a1", checked_at: "2026-08-02T12:00:00.000Z" }),
+      normalizeInbound: () => {
+        throw new Error("the primary was reached — RoutedChannel failed to guard");
+      },
+    };
+  }
+
+  const raw = '{"id":"lmsg_1","line_id":"line_a1","from":"+15551234567","type":"message","text":"2"}';
+
+  it("an absent or duplicated signature header is a SignatureError, not a crash", () => {
+    const { routed } = harness({ primary: unguardedPrimary() });
+    const headers: (string | string[] | undefined)[] = [undefined, ["sha256=a", "sha256=b"]];
+
+    for (const sig of headers) {
+      const err = (() => {
+        try {
+          routed.normalizeInbound(raw, sig);
+        } catch (e) {
+          return e;
+        }
+        return null;
+      })();
+      expect(err, String(sig)).toBeInstanceOf(SignatureError);
+      expect(err, "a TypeError here is a 500 in Track D's route handler").not.toBeInstanceOf(TypeError);
+    }
+  });
+
+  it("a parsed object is a RawBodyRequiredError at this layer too", () => {
+    const { routed } = harness({ primary: unguardedPrimary() });
+    expect(() => routed.normalizeInbound({ id: "lmsg_1" }, "sha256=x")).toThrow(RawBodyRequiredError);
   });
 });
 

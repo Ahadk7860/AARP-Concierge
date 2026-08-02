@@ -188,6 +188,11 @@ is a line running on somebody else's data.
 > webhook throws `RawBodyRequiredError`, and it looks like a signature problem.
 - **Swappable verifier.** The real scheme is unconfirmed (`CONTRACTS.md` § 11 item 2), so
   it is an injected strategy: `new LinqChannel(config, { verifier })`.
+- **A missing or duplicated header is a `SignatureError`, never a crash.** `signature` is
+  typed `string | string[] | undefined` — what `req.headers[...]` actually yields — so an
+  unsigned webhook becomes `401 bad_signature` per `CONTRACTS.md` § 2 rather than a 500. A
+  repeated header is rejected too: picking one of two values at a security boundary is
+  guessing.
 - **Unknown `type` is refused, never defaulted to `text`.** Defaulting would turn a read
   receipt into a message with null text, and Track D would treat provider noise as
   something a person said.

@@ -17,6 +17,7 @@
 
 import type { Capabilities, Channel, ChannelHealth, InboundMessage, OutboundMessage, SendResult } from "../../shared/src/contracts.js";
 import { ChannelError, type ChannelErrorCode } from "./errors.js";
+import { assertRawBody, assertSignature, type SignatureHeader } from "./inbound.js";
 import { LineHealthMonitor } from "./line-health.js";
 import type { LineId, LineRegistry, LineStatus } from "./line-registry.js";
 
@@ -229,7 +230,15 @@ export class RoutedChannel implements Channel {
     return this.primary.health();
   }
 
-  normalizeInbound(rawBody: unknown, signature: string): InboundMessage {
+  /**
+   * Accepts what a web framework actually produces — `unknown` bytes and a
+   * `string | string[] | undefined` header — and narrows before delegating. The frozen
+   * `Channel` declares the narrowed types; guarding here is what turns a missing header
+   * into `401 bad_signature` instead of a 500 in Track D's route handler.
+   */
+  normalizeInbound(rawBody: unknown, signature: SignatureHeader): InboundMessage {
+    assertRawBody(rawBody);
+    assertSignature(signature);
     return this.primary.normalizeInbound(rawBody, signature);
   }
 }

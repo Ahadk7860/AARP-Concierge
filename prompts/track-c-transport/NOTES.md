@@ -291,6 +291,14 @@ the `draft_choice_2.json` mismatch in `## Contract gaps`, seen from Track D's si
 own (`omsg_...`). See `## Contract gaps`. Also: inject `resolveUser` if you want `user_id`
 populated — pairing is yours, and without a resolver it is null, which the schema allows.
 
+`[prompt 03] RESOLVED 2 Aug — the inbound fixture was wrong, and main corrected it.`
+`contracts/fixtures/inbound/draft_choice_2.json` now carries `reply_to_message_id:
+"lmsg_01J8ZK"` (commit `1661fd1`), matching what a webhook actually delivers. The
+exclusion is deleted and prompt 03's DoD item is green: the normalized reference body now
+matches the fixture in every field except `provider_message_id` and timestamps, exactly as
+written. Pinning the divergence rather than ignoring it is what made this a one-line change
+when the fixture moved.
+
 `[prompt 02] → Track D: durable idempotency is yours.` See `## Contract gaps`. The
 adapter's cache is in-process and cannot survive a restart or span replicas.
 
@@ -759,7 +767,10 @@ blockers.
    live, so `LINE_BAN_COVERED_BY_SLA=yes` silently means false. Should be the strict parser
    in both.
 
-3. **`hmacSha256Verifier` throws `TypeError` on an undefined signature.**
+3. ~~**`hmacSha256Verifier` throws `TypeError` on an undefined signature.**~~ **FIXED 2 Aug
+   at the user's direction — see `## Post-review`.** Original text kept below.
+
+   **`hmacSha256Verifier` throws `TypeError` on an undefined signature.**
    `Buffer.from(undefined)` throws before any comparison. Fastify hands a header as
    `string | string[] | undefined`, so a webhook with no `X-Boi-Signature` becomes a **500
    where `CONTRACTS.md` § 2 requires `401 {"error":"bad_signature"}`**. The mock server's own
@@ -792,6 +803,58 @@ foundation. So the DoD item stays red and the test still pins both sides, includ
 `expect(DRAFT_CHOICE_2.reply_to_message_id).toBe("omsg_9001")`. **The moment the fixture
 does change, that assertion fails loudly** and the exclusion can be removed — which is the
 behaviour I wanted from pinning rather than merely ignoring the field.
+
+## Post-review: the signature guard, and the frozen contract catching up
+
+### The 500-instead-of-401 defect is fixed
+
+`hmacSha256Verifier.verify` called `Buffer.from(signature)` with no type check.
+`Buffer.from(undefined)` throws `TypeError`, so a webhook arriving with no
+`X-Boi-Signature` produced a **500 where `CONTRACTS.md` § 2 requires
+`401 {"error":"bad_signature"}`** — on the first live unsigned request, which is exactly
+when you least want to be debugging a stack trace.
+
+Fixed as agreed: `SignatureHeader = string | string[] | undefined` (what a web framework
+actually hands over), and `verify` returns `false` for anything that is not a string. A
+**duplicated** header is rejected too — picking one of two values at a security boundary is
+guessing.
+
+The mock server's own `verifySignature` had `if (header === undefined) return false` from
+prompt 01. The channel's verifier did not. Two implementations of the same idea, one
+correct, and the gap survived four prompts and a full review pass.
+
+### The frozen contract was amended underneath this
+
+`cloud/shared/src/contracts.ts` now declares
+`normalizeInbound(rawBody: Buffer | string, signature: string)` — it was `unknown` —
+with the reasoning that a type at that seam is what catches the transport and the stub
+disagreeing about what the argument means.
+
+That is the type-level version of `RawBodyRequiredError`, and it is better than the runtime
+guard because it fails at compile time. Both are kept: the type stops TypeScript callers,
+the runtime error catches JavaScript ones and produces a message naming the fix.
+
+`RoutedChannel.normalizeInbound` accepts the wide framework types and narrows via
+`assertRawBody` / `assertSignature` before delegating, so Track D can pass
+`req.headers["x-boi-signature"]` straight through and get a `401`-shaped error rather than
+a crash.
+
+### Third time this pattern appeared, and the fix for it
+
+My first version of those two guards was **redundant**: with `LinqChannel` as the primary,
+removing either changed no test, because the downstream path raised the same errors anyway.
+Same shape as the `err.retryable` guard in prompt 04 and the two overlapping catch
+conditions before it.
+
+The difference is that these guards are genuinely load-bearing — `RoutedChannel` composes
+*any* `Channel`, and the foundation's own `StubChannel` does not raise these errors. So the
+fix was not to delete them but to **make the test exercise what they actually protect**:
+the boundary tests now inject a primary that does no guarding at all and whose
+`normalizeInbound` throws if it is ever reached. Both mutations now fail.
+
+The general rule I would carry forward: **when a mutation does not fail a test, the first
+question is not "is this code dead?" but "is my test set up so this code can matter?"** Two
+of the three times, the answer was the second.
 
 ## Decisions made
 
@@ -845,6 +908,28 @@ conflict for three other tracks over variables only Track C reads.
 
 Anything you noticed that the plan did not anticipate, including work that should exist
 but is not in any track's scope. This is often the most useful section at review time.
+
+0. **Mutation testing proves a test can fail; it cannot tell you the test is asking the
+   right question.**
+
+   Prompt 04's "new number" preamble fired on a user's first ever message — telling
+   somebody "same conversation, new bubbles" when there had been no previous conversation
+   and no previous number. A fabrication about the user's own history, in the product's
+   voice, in the one place they actually read.
+
+   I mutation-tested that prompt seven ways. **Every mutation failed a test.** The tests
+   were rigorous and they were wrong, because they encoded my misunderstanding of what the
+   product should say — the test asserted that a brand-new user *should* get the preamble,
+   so every mutation dutifully confirmed the bug.
+
+   No amount of self-verification would have found it. Mutation testing is a test of the
+   tests, but it inherits their premise. Catching this needed a reader who knew what the
+   product was for and had no memory of the plan — which is precisely the pass this process
+   has and which I could not have substituted for.
+
+   Carry this to the next project: **rigour inside a wrong frame produces confident wrong
+   answers faster.** Budget for the outside reader; do not let a green mutation report stand
+   in for one.
 
 1. **The ownership model has a hole the size of any root-level config file.**
    `check-ownership.sh`'s `SHARED` regex enumerates shared files by name. Any

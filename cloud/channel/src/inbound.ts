@@ -71,8 +71,18 @@ export class InboundParseError extends ChannelError {
 export type SignatureVerifier = {
   /** Named so a log can say which scheme accepted or rejected a body. */
   readonly name: string;
-  verify(rawBody: Buffer, signature: string): boolean;
+  /**
+   * `signature` is typed the way a web framework actually hands it over —
+   * `string | string[] | undefined` — because a missing or duplicated header is a
+   * REQUEST-shaped problem, not a crash. A verifier that only accepts `string` turns an
+   * absent `X-Boi-Signature` into a 500 where CONTRACTS.md § 2 requires
+   * `401 {"error":"bad_signature"}`.
+   */
+  verify(rawBody: Buffer, signature: SignatureHeader): boolean;
 };
+
+/** Exactly what Fastify's `req.headers[...]` yields. */
+export type SignatureHeader = string | string[] | undefined;
 
 /**
  * HMAC-SHA256 over the raw bytes, hex, `sha256=` prefixed — the placeholder scheme.
@@ -84,7 +94,13 @@ export type SignatureVerifier = {
 export function hmacSha256Verifier(secret: string, prefix = "sha256="): SignatureVerifier {
   return {
     name: "hmac-sha256",
-    verify(rawBody: Buffer, signature: string): boolean {
+    verify(rawBody: Buffer, signature: SignatureHeader): boolean {
+      // A missing header is an unsigned request, not a crash. `Buffer.from(undefined)`
+      // throws a TypeError, which would surface as a 500 on the first live webhook that
+      // arrived without a signature — the mock's own verifySignature already guards this.
+      // A repeated header is ambiguous and therefore also a rejection: picking one of two
+      // values is guessing at a security boundary.
+      if (typeof signature !== "string") return false;
       const expected = Buffer.from(`${prefix}${createHmac("sha256", secret).update(rawBody).digest("hex")}`);
       const actual = Buffer.from(signature);
       // timingSafeEqual throws on a length mismatch, so the lengths are compared first —
@@ -137,6 +153,22 @@ export type NormalizeOptions = {
 const ISO_Z = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
 const W3C_TRACEPARENT = /^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$/;
 
+/**
+ * Narrows a caller-supplied body to the raw bytes the frozen `Channel` requires, or
+ * throws `RawBodyRequiredError`. Exported so a composing channel can guard once and then
+ * forward a correctly-typed value rather than casting.
+ */
+export function assertRawBody(rawBody: unknown): asserts rawBody is Buffer | string {
+  if (typeof rawBody === "string" || Buffer.isBuffer(rawBody)) return;
+  throw new RawBodyRequiredError();
+}
+
+/** Narrows a framework-supplied signature header, or throws `SignatureError`. A missing
+ *  or duplicated header is an unsigned request: `401`, never a `500`. */
+export function assertSignature(signature: SignatureHeader): asserts signature is string {
+  if (typeof signature !== "string") throw new SignatureError();
+}
+
 function toBuffer(rawBody: unknown): Buffer {
   if (Buffer.isBuffer(rawBody)) return rawBody;
   if (typeof rawBody === "string") return Buffer.from(rawBody, "utf8");
@@ -148,7 +180,7 @@ function toBuffer(rawBody: unknown): Buffer {
   throw new RawBodyRequiredError();
 }
 
-export function normalizeInbound(rawBody: unknown, signature: string, options: NormalizeOptions): InboundMessage {
+export function normalizeInbound(rawBody: unknown, signature: SignatureHeader, options: NormalizeOptions): InboundMessage {
   const bytes = toBuffer(rawBody);
 
   // Verify FIRST. Nothing below this line runs on unauthenticated input.

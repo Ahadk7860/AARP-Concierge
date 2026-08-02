@@ -44,6 +44,7 @@ import {
   isRecord as isInboundRecord,
   type ExtractedInbound,
   type InboundKind,
+  type SignatureHeader,
   type SignatureVerifier,
   type UserResolver,
 } from "./inbound.js";
@@ -414,7 +415,11 @@ export class LinqChannel implements Channel {
    * the contents, and `InboundParseError` if the authenticated body is not a message we
    * understand — never a partially-normalized result.
    */
-  normalizeInbound(rawBody: unknown, signature: string): InboundMessage {
+  // `signature` is wider than the frozen `Channel` declares (`string`), which TypeScript
+  // permits and which callers on `string` are unaffected by. It has to be: a web framework
+  // hands over `string | string[] | undefined`, and a missing header must be a 401, not a
+  // 500. Narrowing here would push the crash back up into Track D's route handler.
+  normalizeInbound(rawBody: unknown, signature: SignatureHeader): InboundMessage {
     return normalizeInboundGeneric(rawBody, signature, {
       verifier: this.verifier,
       extract: extractLinqWebhook,

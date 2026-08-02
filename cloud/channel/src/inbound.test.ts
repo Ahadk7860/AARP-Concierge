@@ -10,6 +10,7 @@ import {
   InboundParseError,
   RawBodyRequiredError,
   SignatureError,
+  type SignatureHeader,
   normalizeInbound,
   type SignatureVerifier,
 } from "./inbound.js";
@@ -59,33 +60,34 @@ describe("inbound — the reference body", () => {
     expect(result).toMatch(/OK/);
   });
 
-  it("matches draft_choice_2.json on every field it can, and pins the three it cannot", () => {
-    // The DoD allows two exceptions: provider_message_id and timestamps. There are three
-    // more, and none is a normalization bug — see NOTES.md "Contract gaps".
-    //   provider  — the fixture says "mock"; a Linq webhook is "linq". Configurable, so
-    //               this test sets it and the field genuinely matches.
-    //   user_id   — the fixture says "usr_demo0001"; pairing resolves that and pairing is
-    //               Track D's. Injectable, so this test supplies it.
-    //   reply_to_message_id — the fixture says "omsg_9001" (Boi's own outbound id); the
-    //               webhook carries "lmsg_01J8ZK" (the PROVIDER's id). Translating one to
-    //               the other needs a lookup this track does not own. IRREDUCIBLE.
+  it("matches draft_choice_2.json in every field except provider_message_id and timestamps", () => {
+    // Prompt 03's DoD, now fully satisfiable. The fixture originally carried
+    // `reply_to_message_id: "omsg_9001"` — Boi's own outbound id — which a webhook cannot
+    // produce; `inbound.v1` carries the PROVIDER's id. The fixture was corrected on main
+    // (02a815e / 1661fd1) and the exclusion is gone.
+    //
+    // Two fields are still supplied rather than defaulted, and neither is a divergence:
+    //   provider — "mock" here, "linq" in production. Configuration.
+    //   user_id  — pairing resolves it and pairing is Track D's. Injected.
     const message = channel(
       { providerLabel: "mock" },
       { resolveUser: (handle) => (handle === "+15551234567" ? "usr_demo0001" : null) },
     ).normalizeInbound(raw, sign(raw));
 
-    const IGNORED = new Set(["provider_message_id", "received_at", "reply_to_message_id"]);
+    const IGNORED = new Set(["provider_message_id", "received_at"]);
     for (const key of Object.keys(DRAFT_CHOICE_2)) {
       if (IGNORED.has(key)) continue;
       expect(message[key as keyof InboundMessage], key).toEqual(DRAFT_CHOICE_2[key as keyof InboundMessage]);
     }
     expect(Object.keys(message).sort()).toEqual(Object.keys(DRAFT_CHOICE_2).sort());
 
-    // Pin the divergence rather than merely excluding it, so a silent change is caught.
+    // reply_to_message_id now matches outright — the fixture and the wire agree.
+    expect(message.reply_to_message_id).toBe("lmsg_01J8ZK");
+    expect(DRAFT_CHOICE_2.reply_to_message_id).toBe("lmsg_01J8ZK");
+
+    // The two documented exceptions, pinned rather than merely skipped.
     expect(message.provider_message_id).toBe("lmsg_01J8ZM");
     expect(message.received_at).toBe("2026-08-02T12:04:02Z");
-    expect(message.reply_to_message_id).toBe("lmsg_01J8ZK");
-    expect(DRAFT_CHOICE_2.reply_to_message_id).toBe("omsg_9001");
   });
 
   it("defaults to provider linq and user_id null", () => {
@@ -132,6 +134,35 @@ describe("inbound — verification", () => {
     for (const sig of ["", "sha256=", "garbage", "sha256=00"]) {
       expect(() => c.normalizeInbound(raw, sig), sig).toThrow(SignatureError);
     }
+  });
+
+  it("an ABSENT or duplicated header is a 401-shaped SignatureError, not a crash", () => {
+    // req.headers[...] is string | string[] | undefined. Buffer.from(undefined) throws a
+    // TypeError, which would surface as a 500 where CONTRACTS.md § 2 requires
+    // 401 bad_signature — on the very first live webhook that arrived unsigned.
+    const c = channel();
+    const headers: SignatureHeader[] = [undefined, ["sha256=a", "sha256=b"]];
+    for (const sig of headers) {
+      const err = (() => {
+        try {
+          c.normalizeInbound(raw, sig);
+        } catch (e) {
+          return e;
+        }
+        return null;
+      })();
+      expect(err, String(sig)).toBeInstanceOf(SignatureError);
+      expect((err as SignatureError).code).toBe("bad_signature");
+      expect(err, "a TypeError here is a 500 in production").not.toBeInstanceOf(TypeError);
+    }
+  });
+
+  it("the verifier itself rejects a non-string header rather than throwing", () => {
+    const v = hmacSha256Verifier(SECRET);
+    const bytes = Buffer.from(raw, "utf8");
+    expect(v.verify(bytes, undefined)).toBe(false);
+    expect(v.verify(bytes, ["sha256=a", "sha256=b"])).toBe(false);
+    expect(v.verify(bytes, sign(raw))).toBe(true);
   });
 
   it("key reordering does not break verification — the RAW bytes are what is signed", () => {
@@ -190,7 +221,7 @@ describe("inbound — verification", () => {
   });
 
   it("the verifier is swappable — an injected strategy is the one used", () => {
-    const calls: string[] = [];
+    const calls: unknown[] = [];
     const alwaysYes: SignatureVerifier = {
       name: "test-always-yes",
       verify(_body, signature) {
