@@ -257,6 +257,21 @@ So, corrected:
 | `brief.due` | `{ user_id, scheduled_for }` | Track D scheduler | Track D composer |
 | `inbound.normalized` | `inbound.v1` | Track C | Track D |
 
+**`inbound.v1.user_id` is advisory. `from_handle` is authoritative.** Decided 2 Aug,
+after Track D correctly declined to pick unilaterally because the choice changes
+behaviour Track C relies on.
+
+Track C populates `user_id` by calling an injected resolver over `from_handle`, so it is
+a *derived* field. Track D must re-derive from `from_handle` itself and treat a mismatch
+as a rejection, not a warning. Trusting a derivation you were handed, when you hold the
+input it was derived from, is strictly weaker than re-deriving — and the failure mode is
+acting on user A's behalf because a resolver said so.
+
+This is defence in depth: the signature is the real gate, and a forged webhook cannot be
+signed. But the signature proves *the provider sent this*, not *this handle belongs to
+that account*, and those are different claims. Track C should keep populating `user_id`
+— it is useful and it is right — and Track D should verify rather than consume it.
+
 **`inbound.v1.reply_to_message_id` carries the PROVIDER's id** (`lmsg_...`), not Boi's
 own outbound id (`omsg_...`). Track C normalizes what the webhook gave it and cannot know
 which brief item that answers. **Track D owns the translation** — it must keep the
