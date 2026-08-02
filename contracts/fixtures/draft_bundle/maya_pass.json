@@ -5,13 +5,13 @@
   "candidates": [
     {
       "stance": "answer",
-      "text": "sorry been mia — yes im still coming on the 14th, book it",
+      "text": "sorry been mia, yes im still coming on the 14th. book it",
       "chars": 56
     },
     {
       "stance": "defer",
       "text": "sorry been mia, been slammed. still figuring out the 14th, can i tell u by tmrw",
-      "chars": 78
+      "chars": 79
     }
   ],
   "model_id": "gemini-2.5-flash-lite",

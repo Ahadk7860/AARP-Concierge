@@ -5,5 +5,5 @@
   },
   "model_id": "gemini-2.5-flash-lite",
   "prompt_version": "draft.v1",
-  "response": "{\"candidates\":[{\"stance\":\"answer\",\"text\":\"sorry been mia \\u2014 yes im still coming on the 14th, book it\"},{\"stance\":\"defer\",\"text\":\"sorry been mia, been slammed. still figuring out the 14th, can i tell u by tmrw\"}]}"
+  "response": "{\"candidates\": [{\"stance\": \"answer\", \"text\": \"sorry been mia, yes im still coming on the 14th. book it\"}, {\"stance\": \"defer\", \"text\": \"sorry been mia, been slammed. still figuring out the 14th, can i tell u by tmrw\"}]}"
 }

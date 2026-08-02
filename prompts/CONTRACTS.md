@@ -80,6 +80,24 @@ must understand is somebody else's, and those separate. Section 7 covers the gua
 specifics a draft is permitted to name. Anything outside it — a date, a time, a place,
 an amount, a person — is an invented commitment sent in the user's own name.
 
+### The length gate, corrected 2 Aug
+
+The original spec said "within 2× the user's median message length." That is too tight
+and it rejected the project's own reference drafts. The median is computed over every
+sent message including `"ok"` and `"lol"`, a draft has to acknowledge the silence *and*
+answer — structurally two clauses — and the register already records that this user sends
+`avg_msgs_per_burst` messages at a time. A single draft standing in for a burst is
+legitimately longer than one median message.
+
+```
+limit = max(median_len_chars * avg_msgs_per_burst, p90_len_chars) + 30
+```
+
+The `+ 30` is the apology opener, which costs about that much before the answer starts.
+For the Maya pack (median 34, p90 88, burst 2.3) the limit is 118 — a 79-character defer
+passes, and the 300-character paragraph the gate exists to catch still fails by a wide
+margin. The tell was never 2×; it was closer to 9×.
+
 **`draft_bundle.v1.candidates`** is **exactly two, or exactly zero.** Never one, never
 three. The two must differ in **stance** (`answer` vs `defer`), not in phrasing — two
 paraphrases of the same sentence is a fake choice and users notice immediately. Zero is

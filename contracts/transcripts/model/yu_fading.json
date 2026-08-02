@@ -5,5 +5,5 @@
   },
   "model_id": "gemini-2.5-flash-lite",
   "prompt_version": "draft.v1",
-  "response": "{\"candidates\":[{\"stance\":\"answer\",\"text\":\"ok this is embarrassing, its been way too long. how have u been\"},{\"stance\":\"defer\",\"text\":\"hey \\u2014 no excuse for going quiet this long. lmk if ur around sometime\"}]}"
+  "response": "{\"candidates\": [{\"stance\": \"answer\", \"text\": \"ok this is embarrassing, its been way too long. how have u been\"}, {\"stance\": \"defer\", \"text\": \"hey, no excuse for going quiet this long. lmk if ur around sometime\"}]}"
 }
