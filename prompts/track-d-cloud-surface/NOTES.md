@@ -66,6 +66,27 @@ Anything `prompts/CONTRACTS.md` does not specify, specifies wrongly, or specifie
 way that does not work in practice. You may not edit it — record it here and report.
 Every entry names the prompt where it surfaced.
 
+`[prompt 03] OPEN` — **Signup has no documented endpoint.**
+`contracts/openapi/boi-api.v1.yaml` documents `POST /v1/pair` and nothing that creates
+the account the code belongs to. Prompt 03 requires signup — phone, email, terms — and
+a confirmation page, so I implemented `GET /signup` and `POST /signup`, and they are
+**undocumented surface**. Probably deliberate, since it is a web page rather than
+something the Mac calls, but Track C will eventually need to know that an account can
+exist before any device has paired.
+
+The shapes, for the record: `POST /signup` takes
+`{phone_e164, email?, accept_terms: true, timezone?}` as JSON or urlencoded and returns
+`200 text/html`, or `400 {"error":"validation","detail":...}`. It is idempotent on
+`phone_e164`, which is the join key.
+
+`[prompt 03] OPEN` — **`/v1/pair` documents no `400`, so a malformed body returns
+`404 invalid_code`.** The document gives that endpoint exactly `200` and
+`404 {"error":"invalid_code"}`. A body with a missing `device_id` or a five-digit code
+is a validation failure, and inventing a `400` would be a shape Track A has not been
+told about. Collapsing it into the documented `404` also stops the endpoint being an
+oracle that distinguishes "malformed" from "wrong". Flagging because it is a real
+deviation from how every other endpoint in this API reports a bad body.
+
 `[prompt 01] OPEN` — **`brf_` and `dig_` are not in CONTRACTS.md § 6's prefix list.**
 § 6 fixes `usr_`, `dev_`, `h_`, `g_`, `vp_`, `omsg_` and `lmsg_`, and nothing else. But
 § 4 names `digest_id` in the `digest.ingested` payload, so a digest id has to exist and
@@ -254,6 +275,21 @@ Now four tests that can each fail on their own:
 - Every assertion compares against the live enumeration. The literal table list is used
   only by a schema-completeness test, which is a different question.
 
+`[prompt 03]` — **Migration `006_handle_status.sql` is in `cloud/db/`, same deviation as
+005.** Prompt 03 lists `cloud/api/` as its path scope and requires handle-mismatch
+detection to be recorded rather than passing silently. Whether a user is reachable on
+iMessage is a property of the ACCOUNT, not of any one message, so it is a column on
+`users` rather than something re-derived from `messages_out.protocol` at read time.
+`cloud/db/**` is this track's per `TRACK.md`; `check-ownership.sh d` is clean.
+
+`[prompt 03]` — **The pairing clock is a parameter, not `now()` in SQL.** The Definition
+of Done says to test expiry "by controlling the clock, not by sleeping", and the
+original prompt-01 implementation compared against the database's `now()`, which a test
+cannot move. `issuePairingCode`, `consumePairingCode` and
+`bootstrapLookups.resolvePairingCode` now take the instant explicitly, defaulting to
+`new Date()`. The expiry test issues at T, checks `T + 599s` still pairs, and
+`T + 601s` does not — the boundary from both sides, in milliseconds.
+
 `[prompt 02]` — **Migration `005_heartbeat_fields.sql` is in `cloud/db/`, which prompt
 02 lists as out of its path scope.** The prompt says "Paths you may modify:
 `cloud/api/`", and also requires `POST /v1/heartbeat` to record `digest_as_of` "so
@@ -323,6 +359,23 @@ error-handling approach. The user needs to see these before merge, because anoth
 track may have chosen differently.
 
 ### Corrections to prompt 02, applied 2 Aug after review
+
+`[prompt 03] FIXED.` **`@boi/shared` finally broke, exactly where prompt 01 predicted.**
+That prompt's observations said the alias is a `tsconfig` path with no runtime
+resolution, that my code only worked because every import from it was `import type`
+(erased at emit), and that the first prompt needing a real VALUE would hit it. Prompt 03
+needs `StubChannel`, which is a class, and vitest failed with
+`Failed to load url @boi/shared`.
+
+Fixed by replacing every `@boi/shared` specifier in `cloud/api/**` and `cloud/db/**`
+with a relative path to `cloud/shared/src/index.js` — ten files, imports only, no change
+to `cloud/shared` itself. The alternative was a `resolve.alias` entry in
+`vitest.config.ts`, which is foundation-owned and would change module resolution for
+Track C in a worktree I cannot see. Relative paths need no shared-file change and work
+under `tsc`, vitest and plain `node` alike.
+
+`tsconfig.json`'s `paths` entry for `@boi/shared` is now unused by this track. I left it
+alone — it is shared, and Track C may be relying on it.
 
 `[prompt 02] FIXED — severe.` **The 422 guard scanned one of four free-text fields.**
 `findRedactionViolations` took `pack.exemplars`; `upsertVoicePack` stores
@@ -432,6 +485,19 @@ The four it does assert are mechanical and near-zero false positive, and it errs
 rejecting within each: the phone pattern is looser than E.164, the amount pattern covers
 `$40`, `40 dollars` and `30 usd`. `schemas.test.ts` asserts all four fire on realistic
 text and that none fire on the committed fixtures or on ordinary chat.
+
+`[prompt 03]` — **The welcome message's from-handle reads `LINQ_FROM_HANDLE`.** That
+variable is in `.env.example` under Track C's block, and it is the same value the
+outbound fixture uses (`+15550100123`). Adding a second variable for one handle is how
+two names for one thing drift apart, so I read theirs rather than appending
+`BOI_FROM_HANDLE`. If the intent was that Track D owns its own sending identity, this
+should become its own variable — recording it rather than deciding it.
+
+`[prompt 03]` — **A banned line does not fail signup.** If `Channel.send` throws, the
+account is still created and `users.handle_status` is set to `unreachable`. Losing the
+signup would be worse than a delayed welcome, and the status column means nothing
+reports success: `unreachable` is distinguishable from both `imessage` and `mismatch`,
+and prompt 05 can act on it. Asserted with `StubChannel` in `banned` mode.
 
 `[prompt 02]` — **A digest may only name a `device_id` already registered to the
 caller.** The alternative — accepting any well-formed `device_id` — means the Mac can

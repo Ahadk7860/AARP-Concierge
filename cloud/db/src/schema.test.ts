@@ -9,7 +9,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { Digest, VoicePack, Brief, Relationship } from "@boi/shared";
+import type { Digest, VoicePack, Brief, Relationship } from "../../shared/src/index.js";
 import { getPool, closePool, withTransaction } from "./pool.js";
 import { migrate, rollbackAll, loadMigrations, MIGRATIONS_DIR } from "./migrate.js";
 import { acquireSuiteLock, releaseSuiteLock } from "./test-lock.js";

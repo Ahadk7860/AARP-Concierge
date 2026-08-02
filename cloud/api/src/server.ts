@@ -3,17 +3,28 @@
 
 import Fastify, { type FastifyInstance } from "fastify";
 import type { Logger } from "pino";
+import { StubChannel, type Channel } from "../../shared/src/index.js";
 import { makeLogger } from "./logging.js";
 import { send, validation } from "./errors.js";
 import { registerIngestRoutes } from "./routes/ingest.js";
+import { registerSignupRoutes, type Clock } from "./routes/signup.js";
 
 export type BuildOptions = {
   /** Pass a pino destination to capture log output — see the no-user-content test. */
   logger?: Logger;
+  /**
+   * Track C's adapter drops in behind this interface. Until it exists, `StubChannel`
+   * from the foundation — CONTRACTS.md § 10. Nothing above the interface knows which.
+   */
+  channel?: Channel;
+  /** Injected so pairing expiry is tested by moving the clock, not by sleeping. */
+  now?: Clock;
 };
 
 export function buildServer(options: BuildOptions = {}): FastifyInstance {
   const log = options.logger ?? makeLogger();
+  const channel = options.channel ?? new StubChannel();
+  const now = options.now ?? (() => new Date());
 
   // Fastify's own request logging is off: it would log the URL and headers on every
   // request, and this API's job is to be careful about what reaches a log sink.
@@ -34,7 +45,22 @@ export function buildServer(options: BuildOptions = {}): FastifyInstance {
 
   app.setNotFoundHandler((_req, reply) => reply.code(404).send({ error: "not_found" }));
 
+  // The HTML signup form posts urlencoded, which Fastify does not parse by default.
+  // Parsed into the same shape a JSON client sends, so one schema validates both.
+  app.addContentTypeParser(
+    "application/x-www-form-urlencoded",
+    { parseAs: "string" },
+    (_req, body, done) => {
+      try {
+        done(null, Object.fromEntries(new URLSearchParams(body as string)));
+      } catch (err) {
+        done(err as Error, undefined);
+      }
+    },
+  );
+
   registerIngestRoutes(app, log);
+  registerSignupRoutes(app, log, { channel, now });
   return app;
 }
 

@@ -9,7 +9,7 @@
 // and it lives in `bootstrapLookups` at the bottom of this file, isolated and
 // returning nothing but an id.
 
-import type { Digest, Relationship, VoicePack, Brief, OutboundBlock } from "@boi/shared";
+import type { Digest, Relationship, VoicePack, Brief, OutboundBlock } from "../../shared/src/index.js";
 import { getPool, withTransaction, type Queryable } from "./pool.js";
 import { residueByTable } from "./catalog.js";
 import { unsafeScopeFromUserId, scopedQuery, type UserScope } from "./scope.js";
@@ -22,12 +22,16 @@ import {
   deviceTokenHashEquals,
 } from "./ids.js";
 
+/** 'mismatch' means the first send came back as sms — see migration 006. */
+export type HandleStatus = "unknown" | "imessage" | "mismatch" | "unreachable";
+
 export type UserRow = {
   user_id: string;
   phone_e164: string;
   email: string | null;
   user_salt: Buffer;
   timezone: string;
+  handle_status: HandleStatus;
   created_at: Date;
 };
 
@@ -138,7 +142,7 @@ export async function getUser(
   const res = await scopedQuery<UserRow>(
     db,
     scope,
-    `select user_id, phone_e164, email, user_salt, timezone, created_at
+    `select user_id, phone_e164, email, user_salt, timezone, handle_status, created_at
        from users where user_id = $1`,
     [scope.user_id],
   );
@@ -185,6 +189,33 @@ export async function deleteUser(
 // ---------------------------------------------------------------------------
 // Devices
 // ---------------------------------------------------------------------------
+
+export async function setHandleStatus(
+  scope: UserScope,
+  status: HandleStatus,
+  db: Queryable = getPool(),
+): Promise<void> {
+  await scopedQuery(db, scope, "update users set handle_status = $2 where user_id = $1", [
+    scope.user_id,
+    status,
+  ]);
+}
+
+/** Signup needs to know whether this phone already has an account. Phone is the join key. */
+export async function findUserIdByPhone(
+  phoneE164: string,
+  db: Queryable = getPool(),
+): Promise<UserScope | null> {
+  // Unscoped by necessity and by nature: it resolves the ACCOUNT HOLDER's own handle,
+  // which is the one handle CONTRACTS.md section 3 says the server does see. Returns an
+  // id and nothing else, like the two lookups in `bootstrapLookups`.
+  const res = await db.query<{ user_id: string }>(
+    "select user_id from users where phone_e164 = $1",
+    [phoneE164],
+  );
+  const row = res.rows[0];
+  return row === undefined ? null : unsafeScopeFromUserId(row.user_id);
+}
 
 export async function registerDevice(
   scope: UserScope,
@@ -562,6 +593,32 @@ export async function insertOutboundMessage(
   );
 }
 
+/** Record what the Channel came back with. The composer never learns the protocol; this is the audit row. */
+export async function markOutboundSent(
+  scope: UserScope,
+  idempotencyKey: string,
+  result: { protocol: string; provider: string; provider_message_id?: string | null; line_id?: string | null },
+  db: Queryable = getPool(),
+): Promise<void> {
+  await scopedQuery(
+    db,
+    scope,
+    `update messages_out
+        set status = 'sent', sent_at = now(),
+            protocol = $3, provider = $4,
+            provider_message_id = $5, line_id = $6
+      where user_id = $1 and idempotency_key = $2`,
+    [
+      scope.user_id,
+      idempotencyKey,
+      result.protocol,
+      result.provider,
+      result.provider_message_id ?? null,
+      result.line_id ?? null,
+    ],
+  );
+}
+
 export async function listOutboundMessages(
   scope: UserScope,
   db: Queryable = getPool(),
@@ -593,9 +650,14 @@ export type PairingCodeRow = { code: string; expires_at: Date; consumed_at: Date
  */
 export async function issuePairingCode(
   scope: UserScope,
-  input: { code: string; ttl_seconds: number },
+  input: { code: string; ttl_seconds: number; now?: Date },
   pool = getPool(),
 ): Promise<PairingCodeRow> {
+  // The clock is a parameter, not `now()` in SQL. Expiry is a documented behaviour --
+  // ten minutes, CONTRACTS.md's `/v1/pair` -- and a behaviour tested by sleeping is a
+  // behaviour tested for eleven minutes or not at all. Every read below compares
+  // against the SAME injected instant, so a test can issue at T and resolve at T+11m.
+  const at = input.now ?? new Date();
   return withTransaction(async (tx) => {
     await tx.query("select pg_advisory_xact_lock(hashtext($1))", [
       `pairing_code:${input.code}`,
@@ -606,8 +668,8 @@ export async function issuePairingCode(
     // only that the code is taken, which is what the caller already knows it asked.
     const live = await tx.query(
       `select 1 from pairing_codes
-        where code = $1 and consumed_at is null and expires_at > now() limit 1`,
-      [input.code],
+        where code = $1 and consumed_at is null and expires_at > $2 limit 1`,
+      [input.code, at.toISOString()],
     );
     if ((live.rowCount ?? 0) > 0) {
       throw new Error(`pairing code ${input.code} is already live`);
@@ -616,12 +678,12 @@ export async function issuePairingCode(
     const res = await scopedQuery<PairingCodeRow>(
       tx,
       scope,
-      `insert into pairing_codes (user_id, code, expires_at)
-       values ($1, $2, now() + make_interval(secs => $3::double precision))
+      `insert into pairing_codes (user_id, code, created_at, expires_at)
+       values ($1, $2, $3, $3::timestamptz + make_interval(secs => $4::double precision))
        on conflict (user_id, code) do update
-         set expires_at = excluded.expires_at, consumed_at = null, created_at = now()
+         set expires_at = excluded.expires_at, consumed_at = null, created_at = excluded.created_at
        returning code, expires_at, consumed_at`,
-      [scope.user_id, input.code, input.ttl_seconds],
+      [scope.user_id, input.code, at.toISOString(), input.ttl_seconds],
     );
     const row = res.rows[0];
     if (row === undefined) throw new Error("pairing code insert returned no row");
@@ -633,14 +695,16 @@ export async function issuePairingCode(
 export async function consumePairingCode(
   scope: UserScope,
   code: string,
+  now: Date = new Date(),
   db: Queryable = getPool(),
 ): Promise<boolean> {
+  const at = now.toISOString();
   const res = await scopedQuery(
     db,
     scope,
-    `update pairing_codes set consumed_at = now()
-      where user_id = $1 and code = $2 and consumed_at is null and expires_at > now()`,
-    [scope.user_id, code],
+    `update pairing_codes set consumed_at = $3
+      where user_id = $1 and code = $2 and consumed_at is null and expires_at > $3`,
+    [scope.user_id, code, at],
   );
   return (res.rowCount ?? 0) > 0;
 }
@@ -660,12 +724,13 @@ export const bootstrapLookups = {
    */
   async resolvePairingCode(
     code: string,
+    now: Date = new Date(),
     db: Queryable = getPool(),
   ): Promise<UserScope | null> {
     const res = await db.query<{ user_id: string }>(
       `select user_id from pairing_codes
-        where code = $1 and consumed_at is null and expires_at > now() limit 1`,
-      [code],
+        where code = $1 and consumed_at is null and expires_at > $2 limit 1`,
+      [code, now.toISOString()],
     );
     const row = res.rows[0];
     return row === undefined ? null : unsafeScopeFromUserId(row.user_id);

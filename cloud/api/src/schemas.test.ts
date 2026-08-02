@@ -17,7 +17,7 @@ import {
   freeTextFields,
   describeViolations,
 } from "./redaction.js";
-import type { VoicePack } from "@boi/shared";
+import type { VoicePack } from "../../shared/src/index.js";
 
 const ROOT = process.cwd();
 const SCHEMA_DIR = join(ROOT, "contracts", "schema");

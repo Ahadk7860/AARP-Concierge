@@ -146,7 +146,7 @@ report rather than picking a default that another track may also pick.
 |---|---|---|---|---|
 | 01 | `01-schema.md` | Postgres schema, migrations, partitioning, salted IDs | none | done |
 | 02 | `02-ingest.md` | digest, voice-pack and heartbeat endpoints | 01 | done |
-| 03 | `03-pairing.md` | signup, outbound-first with a contact card, pairing exchange | 01 | not started |
+| 03 | `03-pairing.md` | signup, outbound-first with a contact card, pairing exchange | 01 | done |
 | 04 | `04-card.md` | a server-rendered share card from a digest | 01 | not started |
 | 05 | `05-brief.md` | brief composition with drafts attached and staleness gating | 01 | not started |
 | 06 | `06-scheduler.md` | per-timezone scheduling and inbound draft selection | 05 | not started |

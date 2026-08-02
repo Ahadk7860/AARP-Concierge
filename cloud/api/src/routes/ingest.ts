@@ -21,7 +21,7 @@ import {
   recordHeartbeat,
   upsertVoicePack,
 } from "../../../db/src/index.js";
-import type { Digest, VoicePack } from "@boi/shared";
+import type { Digest, VoicePack } from "../../../shared/src/index.js";
 import { authenticate, ownsUser } from "../auth.js";
 import { duplicate, redactionFailed, send, unauthorized, validation } from "../errors.js";
 import { bodyHash, logEvent } from "../logging.js";

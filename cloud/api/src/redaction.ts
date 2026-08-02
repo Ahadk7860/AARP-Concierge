@@ -23,7 +23,7 @@
 // A pack that fails here is rejected with `422 redaction_failed` and stored NOWHERE.
 // This is a frozen anchor. Do not weaken a pattern to make a checklist green.
 
-import type { VoicePack } from "@boi/shared";
+import type { VoicePack } from "../../shared/src/index.js";
 
 export type RedactedField = "exemplars" | "apology_openers" | "abbreviations" | "top_emoji";
 

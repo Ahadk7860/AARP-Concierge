@@ -10,7 +10,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import type { FastifyInstance } from "fastify";
-import type { Digest, VoicePack } from "@boi/shared";
+import type { Digest, VoicePack } from "../../shared/src/index.js";
 import {
   closePool,
   createUser,
