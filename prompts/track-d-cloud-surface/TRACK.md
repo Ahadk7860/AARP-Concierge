@@ -149,7 +149,7 @@ report rather than picking a default that another track may also pick.
 | 03 | `03-pairing.md` | signup, outbound-first with a contact card, pairing exchange | 01 | done |
 | 04 | `04-card.md` | a server-rendered share card from a digest | 01 | done |
 | 05 | `05-brief.md` | brief composition with drafts attached and staleness gating | 01 | done |
-| 06 | `06-scheduler.md` | per-timezone scheduling and inbound draft selection | 05 | not started |
+| 06 | `06-scheduler.md` | per-timezone scheduling and inbound draft selection | 05 | done |
 
 **Read the `Depends on` column, not the numbering.** Numbering implies a sequence and
 most of that sequence is imaginary. A prompt whose dependencies are complete is ready,

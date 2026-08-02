@@ -8,6 +8,7 @@ import { makeLogger } from "./logging.js";
 import { send, validation } from "./errors.js";
 import { registerIngestRoutes } from "./routes/ingest.js";
 import { registerSignupRoutes, type Clock } from "./routes/signup.js";
+import { registerWebhookRoutes } from "./routes/webhook.js";
 
 export type BuildOptions = {
   /** Pass a pino destination to capture log output — see the no-user-content test. */
@@ -45,6 +46,34 @@ export function buildServer(options: BuildOptions = {}): FastifyInstance {
 
   app.setNotFoundHandler((_req, reply) => reply.code(404).send({ error: "not_found" }));
 
+  // THE RAW BODY PARSER, REGISTERED BEFORE ANYTHING ELSE TOUCHES application/json.
+  //
+  // Track C's `normalizeInbound` verifies a signature over the bytes that arrived.
+  // Fastify's default JSON parser hands a handler an object, and re-serialising it is
+  // not the same bytes — key order, whitespace and number formatting all move — so the
+  // signature never matches and the real adapter throws RawBodyRequiredError.
+  //
+  // This replaces the default parser for the whole service: it keeps the raw string on
+  // `req.rawBody` AND returns the parsed object, so every other route is unaffected.
+  app.addContentTypeParser(
+    "application/json",
+    { parseAs: "string" },
+    (req, body, done) => {
+      (req as { rawBody?: string }).rawBody = body as string;
+      if ((body as string).length === 0) {
+        done(null, undefined);
+        return;
+      }
+      try {
+        done(null, JSON.parse(body as string));
+      } catch (err) {
+        // A 400 with the documented validation shape, not Fastify's default body.
+        (err as { statusCode?: number }).statusCode = 400;
+        done(err as Error, undefined);
+      }
+    },
+  );
+
   // The HTML signup form posts urlencoded, which Fastify does not parse by default.
   // Parsed into the same shape a JSON client sends, so one schema validates both.
   app.addContentTypeParser(
@@ -61,6 +90,7 @@ export function buildServer(options: BuildOptions = {}): FastifyInstance {
 
   registerIngestRoutes(app, log);
   registerSignupRoutes(app, log, { channel, now });
+  registerWebhookRoutes(app, log, { channel });
   return app;
 }
 

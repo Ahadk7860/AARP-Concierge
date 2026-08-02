@@ -66,6 +66,55 @@ Anything `prompts/CONTRACTS.md` does not specify, specifies wrongly, or specifie
 way that does not work in practice. You may not edit it — record it here and report.
 Every entry names the prompt where it surfaced.
 
+`[prompt 06] OPEN — THREE CONTRACT CHANGES I WAS TOLD ABOUT BUT CANNOT SEE.**
+I was asked to pull main for three changes affecting this prompt. `git merge main` is a
+genuine no-op: `main` is `618d81a`, `origin/main` matches it, and none of the three is
+present. They are on **`track-c-transport`**, in `206dee1`:
+
+```
+$ git branch --contains 206dee1
+  track-c-transport          <- not main
+$ git show main:contracts/fixtures/brief/stale_warning.json | grep hours_stale
+    "hours_stale": 98.8,     <- still the inconsistent value
+$ grep reply_to_message_id contracts/fixtures/inbound/draft_choice_2.json
+  "reply_to_message_id": "omsg_9001",   <- not lmsg_01J8ZK
+```
+
+MERGE-POLICY forbids merging a sibling branch and TRACK.md forbids reading another
+track's worktree, so I did neither. What I did instead, per change:
+
+1. **The `omsg_` -> provider-id mapping is built and is prefix-agnostic.** It keys on
+   `messages_out.provider_message_id`, matched and never parsed, so it resolves
+   `omsg_9001` today and `lmsg_01J8ZK` unchanged when the fixture lands. There is a test
+   that drives it with a deliberately alien id (`xyz~weird~2`) to prove no prefix
+   assumption exists anywhere in the path. **Nothing needs to change when the fixture
+   updates.**
+2. **The staleness invariant test is kept, unchanged.** It asserts `hours_stale` always
+   equals the difference between the two timestamps emitted — which is the property the
+   current fixture violates and the fixed one will satisfy. It will pass either way.
+3. **The raw-body parser and header guard are implemented** (below).
+
+Nothing here is blocked. Flagging because a contract amendment that lives on a track
+branch reaches no other track — WORKTREE-PROTOCOL's amendment sequence is
+amend -> commit to base -> each track merges base forward, and step two has not happened.
+
+`[prompt 06] OPEN` — **`StubChannel.normalizeInbound` cannot exercise the raw-body
+path.** Track C's adapter requires the raw request bytes and throws
+`RawBodyRequiredError` on a parsed object. The foundation's stub does the opposite: it
+does `rawBody as Record<string, unknown>` and reads `.id` off it, so handing it raw
+bytes yields a message with every field defaulted. `cloud/shared/**` is frozen.
+
+The two stubs therefore disagree about what the first argument of a frozen interface
+means, and a track developing against the stub will write a webhook that breaks the
+moment the real adapter lands — which is exactly what happened to Track C's warning to
+me. I wired the route for the REAL contract (raw bytes) and tested it against a local
+double that behaves as Track C describes, with an explicit test that the double rejects
+a parsed object. `StubChannel` remains used everywhere else.
+
+Worth resolving in the foundation: either the stub should accept raw bytes too, or
+`Channel.normalizeInbound`'s first parameter should be typed `string | Buffer` rather
+than `unknown` so the requirement is visible in the type.
+
 `[prompt 03] OPEN` — **Signup has no documented endpoint.**
 `contracts/openapi/boi-api.v1.yaml` documents `POST /v1/pair` and nothing that creates
 the account the code belongs to. Prompt 03 requires signup — phone, email, terms — and
@@ -303,6 +352,36 @@ Now four tests that can each fail on their own:
 - A test proves the enumeration **refuses to verify what it cannot count**.
 - Every assertion compares against the live enumeration. The literal table list is used
   only by a schema-completeness test, which is a different question.
+
+`[prompt 06] FIXED — and it was the exact failure the review predicted.**
+`deliverBrief` returned the `OutboundMessage`s but discarded the `SendResult`s, so
+`provider_message_id` was never written and every threaded reply resolved to
+`ambiguous`. Four tests caught it. `SendResult.message_id` really is the only place that
+link exists, and I had dropped it on the floor between prompt 05 and prompt 06.
+
+`DeliveryResult` now carries `delivered: SentMessage[]` — message, `SendResult`, and the
+item index — and `run.ts` writes both halves into the same row. Migration `007` adds
+`messages_out.item_index`, without a CHECK on the id's prefix: the value comes from
+whichever transport sent it, and constraining it would break either the stub or Linq.
+
+`[prompt 06]` — **The webhook route wires both of Track C's warnings.** A raw-body
+content-type parser registered before anything else touches `application/json`, keeping
+the bytes on `req.rawBody` while still returning a parsed object so no other route
+changes. A test signs a body with deliberately awkward whitespace and key order, which
+would fail if the route re-serialised. And `signatureHeader` collapses
+`string | string[] | undefined` to `string | null`, treating a duplicated header as a
+refusal rather than taking `[0]` — two headers is an attack shape, not a mistake.
+
+`[prompt 06]` — **`/v1/webhooks/{provider}` is in `cloud/api/`, outside prompt 06's
+stated `cloud/brief/`.** Same documented deviation as migrations 005-007: the endpoint
+is in the frozen OpenAPI as Track D's surface, no prompt ever assigned it, and Track C's
+warning only makes sense if it is wired. `check-ownership.sh d` is clean.
+
+`[prompt 06]` — **An unthreaded reply to a multi-item brief asks instead of guessing.**
+The checklist says a bare `2` attributes to the most recent brief, and it does. But a
+brief with three people and no thread cannot resolve to an ITEM, and picking the first
+would be a guess — the same prohibition the checklist applies to a reply matching no
+brief. One item resolves; more than one asks which person.
 
 `[prompt 05]` — **Threading sends N+1 messages; unthreaded sends exactly one.** The
 prompt says "per-item threading when `capabilities()` reports it", and `outbound.v1` is

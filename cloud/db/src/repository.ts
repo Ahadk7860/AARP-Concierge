@@ -574,6 +574,8 @@ export async function insertOutboundMessage(
     message_id: string;
     idempotency_key: string;
     brief_id?: string | null;
+    /** Which brief item this message rendered. Null for the lead and for non-brief sends. */
+    item_index?: number | null;
     blocks: readonly OutboundBlock[];
   },
   db: Queryable = getPool(),
@@ -581,16 +583,96 @@ export async function insertOutboundMessage(
   await scopedQuery(
     db,
     scope,
-    `insert into messages_out (user_id, message_id, idempotency_key, brief_id, blocks)
-     values ($1, $2, $3, $4, $5)`,
+    `insert into messages_out (user_id, message_id, idempotency_key, brief_id, item_index, blocks)
+     values ($1, $2, $3, $4, $5, $6)`,
     [
       scope.user_id,
       input.message_id,
       input.idempotency_key,
       input.brief_id ?? null,
+      input.item_index ?? null,
       JSON.stringify(input.blocks),
     ],
   );
+}
+
+export type OutboundAttribution = {
+  message_id: string;
+  brief_id: string | null;
+  item_index: number | null;
+  provider_message_id: string | null;
+};
+
+/**
+ * Resolve a provider's message id back to the brief item it rendered.
+ *
+ * THE MAPPING. `inbound.v1.reply_to_message_id` is the PROVIDER's id, and this is the
+ * only way back to ours. Scoped: the resolver establishes the user first — from
+ * `inbound.v1.user_id`, or from the account holder's own handle — so this stays a
+ * single-partition read and does not become a third unscoped lookup.
+ *
+ * Matched, never parsed. `lmsg_`, `omsg_stub_3` and anything else a transport invents
+ * all work, because nothing here looks at the prefix.
+ */
+export async function findOutboundByProviderMessageId(
+  scope: UserScope,
+  providerMessageId: string,
+  db: Queryable = getPool(),
+): Promise<OutboundAttribution | null> {
+  const res = await scopedQuery<OutboundAttribution>(
+    db,
+    scope,
+    `select message_id, brief_id, item_index, provider_message_id
+       from messages_out
+      where user_id = $1 and provider_message_id = $2
+      order by created_at desc
+      limit 1`,
+    [scope.user_id, providerMessageId],
+  );
+  return res.rows[0] ?? null;
+}
+
+/** The most recent brief for a user. The fallback when threading is unavailable. */
+export async function latestBrief(
+  scope: UserScope,
+  db: Queryable = getPool(),
+): Promise<BriefRow | null> {
+  const res = await scopedQuery<BriefRow>(
+    db,
+    scope,
+    `select user_id, brief_id, scheduled_for, payload, digest_as_of, hours_stale, warn,
+            item_count, card_url, created_at, delivered_at
+       from briefs where user_id = $1 order by scheduled_for desc limit 1`,
+    [scope.user_id],
+  );
+  return res.rows[0] ?? null;
+}
+
+/** Has a brief already been composed for this slot? One brief per user per day. */
+export async function briefForSlot(
+  scope: UserScope,
+  scheduledFor: Date,
+  db: Queryable = getPool(),
+): Promise<BriefRow | null> {
+  const res = await scopedQuery<BriefRow>(
+    db,
+    scope,
+    `select user_id, brief_id, scheduled_for, payload, digest_as_of, hours_stale, warn,
+            item_count, card_url, created_at, delivered_at
+       from briefs where user_id = $1 and scheduled_for = $2`,
+    [scope.user_id, scheduledFor.toISOString()],
+  );
+  return res.rows[0] ?? null;
+}
+
+/** Every user the scheduler must consider. Ids and timezones only — no content. */
+export async function allUserSchedules(
+  db: Queryable = getPool(),
+): Promise<Array<{ user_id: string; timezone: string }>> {
+  const res = await db.query<{ user_id: string; timezone: string }>(
+    "select user_id, timezone from users order by user_id",
+  );
+  return res.rows;
 }
 
 /** Record what the Channel came back with. The composer never learns the protocol; this is the audit row. */

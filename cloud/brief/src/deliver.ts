@@ -9,11 +9,37 @@
 // contact's handle — but `deliver.test.ts` asserts it anyway, because this is the one
 // mistake in the system that cannot be taken back.
 
-import type { Brief, BriefItem, Channel, OutboundBlock, OutboundMessage } from "../../shared/src/index.js";
+import type {
+  Brief,
+  BriefItem,
+  Channel,
+  OutboundBlock,
+  OutboundMessage,
+  SendResult,
+} from "../../shared/src/index.js";
+
+/**
+ * One message, what the transport called it, and which brief item it rendered.
+ *
+ * `result.message_id` is the PROVIDER's id, and this is the only moment it exists.
+ * `inbound.v1.reply_to_message_id` will carry it back when the user replies, and
+ * nothing else in the system can reconstruct the link — so `deliverBrief` returns it
+ * rather than discarding it, and `run.ts` writes it to `messages_out`.
+ *
+ * Returning `SendResult` alongside the message is not incidental. An earlier version
+ * returned only the messages, the provider id was never persisted, and every threaded
+ * reply resolved to "ambiguous" because the mapping did not exist.
+ */
+export type SentMessage = {
+  message: OutboundMessage;
+  result: SendResult;
+  /** Null for the lead and for an unthreaded send carrying every item at once. */
+  item_index: number | null;
+};
 
 export type DeliveryResult =
-  | { sent: true; messages: OutboundMessage[]; threaded: boolean }
-  | { sent: false; reason: "digest_too_stale" | "nothing_to_say"; messages: [] };
+  | { sent: true; messages: OutboundMessage[]; delivered: SentMessage[]; threaded: boolean }
+  | { sent: false; reason: "digest_too_stale" | "nothing_to_say"; messages: []; delivered: [] };
 
 /** A stable idempotency key: one brief, one morning, however many times it retries. */
 export function briefIdempotencyKey(brief: Brief, suffix: string): string {
@@ -103,19 +129,20 @@ export async function deliverBrief(input: DeliverInput): Promise<DeliveryResult>
       reason: input.skip.skip_reason,
       hours_stale: brief.staleness.hours_stale,
     });
-    return { sent: false, reason: "digest_too_stale", messages: [] };
+    return { sent: false, reason: "digest_too_stale", messages: [], delivered: [] };
   }
 
   if (brief.items.length === 0) {
     // Nothing to say is a legitimate morning. Sending "you have 0 people today" every
     // day is how a habit becomes a notification people turn off.
     log({ msg: "brief.empty", user_id: brief.user_id });
-    return { sent: false, reason: "nothing_to_say", messages: [] };
+    return { sent: false, reason: "nothing_to_say", messages: [], delivered: [] };
   }
 
   const capabilities = await channel.capabilities();
   const threaded = capabilities.threading === true;
   const messages: OutboundMessage[] = [];
+  const delivered: SentMessage[] = [];
 
   const lead: OutboundMessage = {
     schema_version: "outbound.v1",
@@ -130,6 +157,7 @@ export async function deliverBrief(input: DeliverInput): Promise<DeliveryResult>
 
   const leadResult = await channel.send(lead);
   messages.push(lead);
+  delivered.push({ message: lead, result: leadResult, item_index: null });
 
   if (threaded) {
     for (const [index, item] of brief.items.entries()) {
@@ -141,8 +169,9 @@ export async function deliverBrief(input: DeliverInput): Promise<DeliveryResult>
         reply_to_message_id: leadResult.message_id,
         requested_capabilities: ["threading"],
       };
-      await channel.send(message);
+      const result = await channel.send(message);
       messages.push(message);
+      delivered.push({ message, result, item_index: index });
     }
   }
 
@@ -154,5 +183,5 @@ export async function deliverBrief(input: DeliverInput): Promise<DeliveryResult>
     warn: brief.staleness.warn,
   });
 
-  return { sent: true, messages, threaded };
+  return { sent: true, messages, delivered, threaded };
 }
