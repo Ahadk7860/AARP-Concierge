@@ -36,6 +36,10 @@ class GeminiProvider:
             allow_live if allow_live is not None else env.get("BOI_ALLOW_LIVE_CALLS", "0") == "1"
         )
         self._client = None
+        # Populated after each call so the eval harness can report MEASURED tokens
+        # rather than an estimate. Additive: `ModelProvider` is frozen and only
+        # requires `complete()`, so nothing else needs to know this exists.
+        self.last_usage: dict | None = None
 
     def preflight(self) -> None:
         """Everything that must be true before a request. Separated so the eval harness
@@ -79,5 +83,15 @@ class GeminiProvider:
                 max_output_tokens=400,
                 response_mime_type="application/json",
             ),
+        )
+        usage = getattr(response, "usage_metadata", None)
+        self.last_usage = (
+            {
+                "input_tokens": getattr(usage, "prompt_token_count", None) or 0,
+                "output_tokens": getattr(usage, "candidates_token_count", None) or 0,
+                "cached_tokens": getattr(usage, "cached_content_token_count", None) or 0,
+            }
+            if usage is not None
+            else None
         )
         return response.text or ""

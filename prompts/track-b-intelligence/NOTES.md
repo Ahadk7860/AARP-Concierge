@@ -164,6 +164,50 @@ Every entry names the prompt where it surfaced.
   `.env.example` assigns no salt variable to Track B — `BOI_USER_SALT_PEPPER` belongs
   to Track D and is a different thing. See `## Runtime resources` for what was used.
 
+- `[prompt 04] OPEN — a retention-capped corpus silently undercounts the `revived`
+  state, and `classify()` cannot tell.` Second-order effect of Track A's
+  `first_contact_at` finding (CONTRACTS.md, 2 Aug): on a corpus capped by *Keep
+  Messages = 1 Year*, `threads.max_gap_days` can only ever observe gaps **inside** the
+  window. `classify()` requires `max_gap_days >= 90` to return `revived`, so a
+  friendship that genuinely went quiet for two years and came back reads as an ordinary
+  active thread — the reunion, which is the most emotionally significant state the
+  product has, is invisible. A thread dormant for longer than the retention window is
+  likewise absent entirely rather than `dormant`.
+  What Track B would need to fix it: `corpus.retention_boundary` surfaced alongside the
+  thread statistics, plus a rule that `max_gap_days` is **unknown** rather than small
+  when a thread's earliest message sits within a day of the boundary. Track A already
+  computes that boundary for `first_contact_at`, so the value exists; it is the plumbing
+  to Track B that does not. Windowed statistics — `days_silent`, momentum, the 90-day
+  comparison — are unaffected, and `gist.v1` has no `first_contact_at`, so nothing Track
+  B *emits* is currently wrong. This is a missed signal, not a false claim.
+
+- `[prompt 05] OPEN — the fabrication gate refuses a real human message, and the eval
+  harness is what found it.` The `oracle` row replays the user's own reply through the
+  full pipeline, so its validator pass rate measures how often the gates would refuse
+  something the user actually sent. It comes out at **95% — 19 of 20**. The one refusal:
+
+  ```
+  reply : "sorry been mia this week, work has been insane"
+  gate  : fabrication_gate
+  reason: "this week" was extracted as a date and is not in gist.facts
+  ```
+
+  That is a false positive of a specific shape. The fabrication gate exists to stop an
+  invented **commitment** ("yes im free thursday at 7"). `"been mia this week"` is a
+  relative time expression used **descriptively about the past** — it commits to nothing
+  and invents nothing. `facts.py` cannot tell the two apart because it matches
+  `RELATIVE_DAYS` positionally, with no notion of tense or of whether the phrase is the
+  object of a commitment.
+  **Deliberately not fixed.** Prompt 05 puts it out of scope in as many words: "Any
+  change to the gates in `04` to improve a score. That is scoring your own exam." A
+  plausible fix is to license descriptive relative-time phrases when they refer
+  backwards ("this week", "last week", "all week") while keeping forward-looking ones
+  ("next week", "this weekend") gated — but that is a gate change and it belongs to
+  whoever owns 04's next revision, with this eval run as the evidence.
+  Worth stating plainly: **this is a 5% false-refusal floor on every model row.** No
+  model can score above 95% on `pass` while the gate behaves this way, so the oracle row
+  is the ceiling, not 100%.
+
 ## Shared file changes
 
 Every append to a foundation-owned shared file: dependency manifests, lint config,
@@ -379,6 +423,44 @@ real leaks** — the second was latent and had nothing to do with the amendment:
 
 Both fixes verified to bite by reverting them and watching the new tests fail.
 
+### Prompt 05 — eval harness
+
+- `[prompt 05]` **`oracle` is an added matrix row.** It replays the user's real reply
+  through the whole pipeline. Two jobs: its register-match must come out at 1.0, which
+  is the metric checking itself (if comparing a message to itself does not score 1.0 the
+  metric is broken); and its validator pass rate is the **ceiling** every model row is
+  measured against, because it says how often the gates refuse a real human message.
+  It is not in the router — it is an eval instrument, not a production provider, and
+  adding it to the router would let a typo select it in production.
+- `[prompt 05]` **`fake` answers nothing, and that is reported not hidden.**
+  `FakeProvider` replays four recordings keyed to fixture `gist_id`s, so on
+  corpus-derived cases it matches none of them: 20 cases, 0 answered, 20
+  `no_recording`. It is a determinism and no-network control, **not a quality
+  baseline**, and the table says so. Re-running it produces byte-identical numbers.
+- `[prompt 05]` **Latency is measured closest to the wire** (`Timed`, wrapped *inside*
+  the throttle). Measuring the outer wrapper folded this harness's own rate-limit
+  sleeping into `p50_latency_ms` and reported a 700 ms model as 7,524 ms — a number
+  about our pacing masquerading as a number about the model, in the table that picks the
+  model. Caught by looking at the first live table, not by a test.
+- `[prompt 05]` **Rate limiting is handled in the harness, not in `GeminiProvider`.**
+  The free tier is 15 requests/min/model and the first live matrix run returned
+  `SKIPPED — 429` for both Gemini rows, which would have settled a bake-off on request
+  pacing. `Throttled` paces at `--rpm` and retries a 429, preferring the API's own
+  "Please retry in 996ms" hint over a guessed backoff. It is deliberately *not* in the
+  provider: a production drafter that silently retries is hiding a capacity problem from
+  the morning brief.
+- `[prompt 05]` **`--max-calls` is enforced at the only place a call can happen**
+  (`CallCapped`), and a test asserts the inner provider is never reached past the cap —
+  not merely that the counter stopped.
+- `[prompt 05]` **Prices carry a `source` field.** `gemini-3.1-flash-lite` is
+  user-provided; `gemini-3.5-flash-lite` is **assumed identical and labelled as such**
+  in the table output. An unsourced price silently becomes a fact, and this table feeds
+  a spend decision.
+- `[prompt 05]` **Cases come from the pending inbound run the user actually answered**,
+  with a 30-day cap on reply lag: a reply three months later is a new conversation and
+  scoring a draft against it measures nothing. Threads are capped at 4 cases each so one
+  chatty relationship cannot dominate.
+
 ### Prompt 04 correction — the contract gap closed, and the live call landed
 
 Both halves of the frozen-artifact conflict were resolved upstream while this batch was
@@ -485,15 +567,31 @@ track may have chosen differently.
 Anything you noticed that the plan did not anticipate, including work that should exist
 but is not in any track's scope. This is often the most useful section at review time.
 
-- **`[checked, no code change]` The 2 Aug decoder/`first_contact_at` amendment does not
-  reach a Track B artifact.** `gist.v1` has no `first_contact_at` and Track B never
-  decodes a typedstream, so the truncation trap has no Track B casualty —
-  `ThreadStats.first_ts` exists but is internal and never serialized. One second-order
-  note for whoever tunes `classify()` later: on a corpus capped by *Keep Messages = 1
-  Year*, `max_gap_days` can only ever see gaps inside the window, so the `revived` state
-  (which needs a ≥90-day prior gap) is undercounted near the boundary, and a thread
-  dormant for longer than the retention window is invisible rather than `dormant`.
-  Windowed statistics — `days_silent`, momentum, the 90-day comparison — are unaffected.
+- **`[prompt 05]` The newer model is the worse model here, and the failure mode says
+  why.** `gemini-3.5-flash-lite` scored 70% validator pass against
+  `gemini-3.1-flash-lite`'s 100%, at the same price, and **every one of its six failures
+  was `fabrication_gate`** — it invents dates and times that `gist.facts` does not
+  license. That is the highest-severity failure mode in the system, not a stylistic
+  quibble. Across three runs 3.5 scored 60/70/75% and 3.1 scored 95/100%, so the gap is
+  consistent rather than one unlucky sample, but **n=20 on synthetic data is not enough
+  to be certain** — see the caveat below.
+- **`[prompt 05]` The eval corpus is synthetic and that bounds every number in the
+  table.** `make_synthetic_chatdb.py` draws sent messages from ten fixed lines, so the
+  voice packs are 4–10 exemplars of near-identical register and the "real reply" the
+  drafter is scored against is one of those ten strings. Register match at 100% for both
+  models is partly the corpus being easy. The harness is corpus-agnostic — pointing it
+  at a real `chat.db` needs no code change — and the numbers should be re-read before
+  they decide anything permanent. **What would change the recommendation:** a real-corpus
+  run, or 3.5's fabrication rate dropping once the gate's `"this week"` false positive is
+  fixed.
+- **`[prompt 05]` The 50-pair held-out set is not implemented; the 20-pair review file
+  is.** The scope lists both a "held-out set of 50 pairs for human preference" and the
+  20-pair send/edit/delete export. Only 20 usable pairs exist on this corpus — the whole
+  synthetic database yields 24 eval cases total — so a 50-pair held-out split would be
+  fabricated padding. `HELD_OUT_PAIRS = 50` is defined and `--review-pairs` is
+  parameterised, so both are one flag away on a real corpus. Recorded here rather than
+  quietly delivering 20 and calling it 50.
+
 - **`[prompt 04]` The 2× median length gate may be too tight, and the project's own
   reference drafts are the evidence.** With `maya.json`'s median of 34 the limit is 68
   characters. Of the four recorded "good" candidates across `maya_action_needed.json`

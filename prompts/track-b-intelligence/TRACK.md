@@ -148,7 +148,7 @@ report rather than picking a default that another track may also pick.
 | 02 | `02-gist.md` | gist.v1 from a thread, with a fallback that needs no model | 01 | done — SQL path verified; local model unavailable in this environment, see NOTES.md |
 | 03 | `03-drafter.md` | a drafter and model router producing draft_bundle.v1 | 01 | done — live Gemini call succeeded; pinned default model is retired, see NOTES.md |
 | 04 | `04-validator.md` | deterministic gates that refuse bad drafts | 01 | done — all criteria green after the length-gate amendment; `maya_pass` passes every gate |
-| 05 | `05-eval-harness.md` | a model bake-off decided on evidence, not benchmarks | 03, 04 | not started |
+| 05 | `05-eval-harness.md` | a model bake-off decided on evidence, not benchmarks | 03, 04 | done — live matrix run; 50-pair held-out set not built (corpus yields 24 cases), see NOTES.md |
 
 **Read the `Depends on` column, not the numbering.** Numbering implies a sequence and
 most of that sequence is imaginary. A prompt whose dependencies are complete is ready,
