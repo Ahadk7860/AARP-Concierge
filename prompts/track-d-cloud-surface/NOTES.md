@@ -242,6 +242,11 @@ last entry of the block; nothing reordered, reformatted, or removed.
 (never hand-edited) for the above. 21 inserted lines, no deletions. Expect a conflict
 here at merge if another track also appends a dependency.
 
+`[pass 2] package.json` — **the merge conflict I predicted, resolved as a union.**
+Track C appended `yaml`; this track had appended `@types/pg`, `js-yaml`, `@types/js-yaml`
+and `ajv`. Both sets kept, nothing reordered, lockfile regenerated with
+`npm install --package-lock-only`. Prompt 01's NOTES said to expect exactly this.
+
 ⚠️ **Warning for the other tracks:** `npm install --save-dev` rewrote the entire
 manifest — it alphabetised both dependency blocks and re-encoded the `—` escape in
 `description` to a literal `—`. That is a reformat, which the append-only rule forbids,
@@ -374,7 +379,23 @@ request is measured in hundreds of milliseconds. Not exploited by anything today
 nothing links to it, but it is the obvious denial-of-service target the moment it is
 public.
 
-`[pass 2] OPEN` — **`inbound.user_id` is trusted when present.** `resolveUser` takes the
+`[pass 2] RESOLVED (2 Aug, CONTRACTS § 4)` — **`from_handle` is authoritative,
+`inbound.v1.user_id` is advisory.** Decided after I declined to pick unilaterally.
+`resolveUserStrict` now re-derives from `from_handle` — the input the claim was derived
+from — and returns `mismatch` rather than correcting silently. A mismatch is **loud in
+the log and silent to the sender**: it is a transport bug or a compromise, and answering
+a request whose provenance is in doubt is the thing to avoid.
+
+A malformed claim is a mismatch too. The old code caught the parse failure and quietly
+fell through to the handle; a transport emitting a malformed id is broken, and papering
+over that on the way to touching somebody's account is the wrong instinct.
+
+Five tests, and I verified the rejection bites by regressing it to correct silently:
+three fail. Four pre-existing tests set `user_id` while leaving the fixture's
+`from_handle`, which correctly stops resolving under the new rule — updated to carry the
+account's real number rather than relaxed.
+
+`[pass 2] SUPERSEDED` — **`inbound.user_id` is trusted when present.** `resolveUser` takes the
 transport's word and only falls back to `from_handle`. A transport bug — or a transport
 compromise — that sets the wrong `user_id` reads and writes the wrong account. Cross-
 checking it against `from_handle` and refusing on disagreement is cheap; I did not do it

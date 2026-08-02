@@ -44,7 +44,13 @@ import {
   slotFor,
   WINDOW_MINUTES,
 } from "./scheduler.js";
-import { handleInbound, parseSelection, resolveSelection, resolveUser } from "./inbound.js";
+import {
+  handleInbound,
+  parseSelection,
+  resolveSelection,
+  resolveUser,
+  resolveUserStrict,
+} from "./inbound.js";
 import { DEFAULT_SKIP_HOURS } from "./staleness.js";
 
 const ROOT = process.cwd();
@@ -94,10 +100,30 @@ function channelWith(capabilities: Partial<Capabilities> = {}): Channel & { sent
 }
 
 const cleanup: UserScope[] = [];
+/** user_id -> phone. `from_handle` is authoritative now, so tests must set it. */
+const phoneOf = new Map<string, string>();
+
+/**
+ * An inbound document whose `from_handle` really is this account's number.
+ *
+ * CONTRACTS.md § 4: `from_handle` is authoritative and `user_id` is advisory, so a
+ * fixture carrying somebody else's handle no longer resolves — correctly.
+ */
+function inboundFor(scope: UserScope, over: Partial<InboundMessage> = {}): InboundMessage {
+  const base = fixture<InboundMessage>("inbound", "draft_choice_2.json");
+  return {
+    ...base,
+    from_handle: phoneOf.get(scope.user_id) ?? base.from_handle,
+    user_id: scope.user_id,
+    ...over,
+  };
+}
 
 /** An account with a stored digest, ready to be briefed. */
 async function seededUser(timezone: string, digestAsOf: Date): Promise<UserScope> {
-  const { scope } = await createUser({ phone_e164: nextPhone(), timezone });
+  const phone = nextPhone();
+  const { scope } = await createUser({ phone_e164: phone, timezone });
+  phoneOf.set(scope.user_id, phone);
   cleanup.push(scope);
   const deviceId = newDeviceId();
   await registerDevice(scope, { device_id: deviceId, platform: "test" });
@@ -534,9 +560,9 @@ describe("the reply that matters: '2'", () => {
 
     // A fresh channel, so `sent` contains only the reply.
     const replyChannel = channelWith({ threading: true });
-    const inbound = fixture<InboundMessage>("inbound", "draft_choice_2.json");
-    inbound.user_id = scope.user_id;
-    inbound.reply_to_message_id = `lmsg_stub${mayaIndex + 2}`;
+    const inbound = inboundFor(scope, {
+      reply_to_message_id: `lmsg_stub${mayaIndex + 2}`,
+    });
 
     const result = await handleInbound({ inbound, channel: replyChannel });
 
@@ -611,14 +637,13 @@ describe("the reply that matters: '2'", () => {
 
 describe("replies that match nothing", () => {
   it("responds gracefully to a reply with no brief at all, and does not throw", async () => {
-    const { scope } = await createUser({ phone_e164: nextPhone(), timezone: "Europe/London" });
+    const phone = nextPhone();
+    const { scope } = await createUser({ phone_e164: phone, timezone: "Europe/London" });
+    phoneOf.set(scope.user_id, phone);
     cleanup.push(scope);
     const channel = channelWith();
 
-    const inbound = fixture<InboundMessage>("inbound", "draft_choice_2.json");
-    inbound.user_id = scope.user_id;
-
-    const result = await handleInbound({ inbound, channel });
+    const result = await handleInbound({ inbound: inboundFor(scope), channel });
     expect(result.selection.kind).toBe("no_brief");
     expect(channel.sent).toHaveLength(1);
     const text = channel.sent[0]!.blocks.map((b) => (b.type === "text" ? b.text : "")).join(" ");
@@ -642,6 +667,7 @@ describe("replies that match nothing", () => {
   it("resolves the user from their own handle when the transport did not", async () => {
     const phone = nextPhone();
     const { scope } = await createUser({ phone_e164: phone, timezone: "Europe/London" });
+    phoneOf.set(scope.user_id, phone);
     cleanup.push(scope);
 
     const inbound = fixture<InboundMessage>("inbound", "draft_choice_2.json");
@@ -660,10 +686,7 @@ describe("replies that match nothing", () => {
     );
 
     const channel = channelWith();
-    const inbound = fixture<InboundMessage>("inbound", "draft_choice_2.json");
-    inbound.user_id = scope.user_id;
-    inbound.text = "thanks!";
-    inbound.reply_to_message_id = null;
+    const inbound = inboundFor(scope, { text: "thanks!", reply_to_message_id: null });
 
     const result = await handleInbound({ inbound, channel });
     expect(result.selection.kind).toBe("not_a_selection");
@@ -689,9 +712,7 @@ describe("replies that match nothing", () => {
     );
 
     const replyChannel = channelWith();
-    const inbound = fixture<InboundMessage>("inbound", "draft_choice_2.json");
-    inbound.user_id = scope.user_id;
-    inbound.reply_to_message_id = null;
+    const inbound = inboundFor(scope, { reply_to_message_id: null });
 
     const result = await handleInbound({ inbound, channel: replyChannel });
     expect(result.selection.kind).toBe("no_drafts");
@@ -778,5 +799,107 @@ describe("StubChannel still works end to end", () => {
     );
     expect(outcome.status).toBe("sent");
     expect(stub.sent.length).toBeGreaterThan(0);
+  }, 60_000);
+});
+
+// ---------------------------------------------------------------------------
+
+describe("from_handle is authoritative, user_id is advisory", () => {
+  // CONTRACTS.md § 4, decided 2 Aug. Track C derives `user_id` from `from_handle`, so
+  // Track D re-derives from the input it also holds rather than trusting the output.
+
+  it("re-derives the user from the handle and ignores a matching claim", async () => {
+    const phone = nextPhone();
+    const { scope } = await createUser({ phone_e164: phone, timezone: "Europe/London" });
+    phoneOf.set(scope.user_id, phone);
+    cleanup.push(scope);
+
+    const inbound = fixture<InboundMessage>("inbound", "draft_choice_2.json");
+    inbound.from_handle = phone;
+    inbound.user_id = scope.user_id; // agrees
+
+    const resolution = await resolveUserStrict(inbound);
+    expect(resolution.kind).toBe("resolved");
+    expect(resolution.kind === "resolved" && resolution.scope.user_id).toBe(scope.user_id);
+  }, 60_000);
+
+  it("resolves from the handle when the transport supplied no claim", async () => {
+    const phone = nextPhone();
+    const { scope } = await createUser({ phone_e164: phone, timezone: "Europe/London" });
+    phoneOf.set(scope.user_id, phone);
+    cleanup.push(scope);
+
+    const inbound = fixture<InboundMessage>("inbound", "draft_choice_2.json");
+    inbound.from_handle = phone;
+    inbound.user_id = null;
+
+    expect((await resolveUser(inbound))?.user_id).toBe(scope.user_id);
+  }, 60_000);
+
+  it("REJECTS a claim that disagrees with the handle, rather than correcting it", async () => {
+    // The attack the decision exists for: a resolver bug or a compromised transport
+    // naming somebody else's account. Trusting it means reading and writing the wrong
+    // user's data — acting on A's behalf because something said so.
+    const victimPhone = nextPhone();
+    const victim = await createUser({ phone_e164: victimPhone, timezone: "Europe/London" });
+    const other = await createUser({ phone_e164: nextPhone(), timezone: "Europe/London" });
+    cleanup.push(victim.scope, other.scope);
+
+    const inbound = fixture<InboundMessage>("inbound", "draft_choice_2.json");
+    inbound.from_handle = victimPhone;
+    inbound.user_id = other.scope.user_id; // disagrees
+
+    const resolution = await resolveUserStrict(inbound);
+    expect(resolution.kind).toBe("mismatch");
+    if (resolution.kind !== "mismatch") return;
+    expect(resolution.claimed).toBe(other.scope.user_id);
+    expect(resolution.derived).toBe(victim.scope.user_id);
+
+    // A rejection, not a silent correction to the derived id.
+    expect(await resolveUser(inbound)).toBeNull();
+  }, 60_000);
+
+  it("acts on nobody's behalf on a mismatch, and says so in the log", async () => {
+    const victimPhone = nextPhone();
+    const victim = await createUser({ phone_e164: victimPhone, timezone: "Europe/London" });
+    const other = await createUser({ phone_e164: nextPhone(), timezone: "Europe/London" });
+    cleanup.push(victim.scope, other.scope);
+
+    const channel = channelWith();
+    const logs: Array<Record<string, unknown>> = [];
+    const inbound = fixture<InboundMessage>("inbound", "draft_choice_2.json");
+    inbound.from_handle = victimPhone;
+    inbound.user_id = other.scope.user_id;
+
+    const result = await handleInbound({ inbound, channel, log: (e) => logs.push(e) });
+
+    expect(result.selection.kind).toBe("handle_mismatch");
+    // Silent to the sender: the provenance of the request is in doubt.
+    expect(channel.sent).toHaveLength(0);
+    // Loud in the log: this is a transport bug or a compromise.
+    const event = logs.find((l) => l["msg"] === "inbound.handle_mismatch");
+    expect(event).toBeDefined();
+    expect(event?.["claimed_user_id"]).toBe(other.scope.user_id);
+    expect(event?.["derived_user_id"]).toBe(victim.scope.user_id);
+
+    // Neither account gained anything.
+    expect((await residueByTable(other.scope.user_id, pool))["messages_out"]).toBe(0);
+    expect((await residueByTable(victim.scope.user_id, pool))["messages_out"]).toBe(0);
+  }, 60_000);
+
+  it("rejects a malformed claim too, rather than falling through to the handle", async () => {
+    // The old code caught the parse failure and quietly used the handle. A transport
+    // emitting a malformed id is broken, and a broken transport is not a thing to
+    // paper over on the way to touching somebody's account.
+    const phone = nextPhone();
+    const { scope } = await createUser({ phone_e164: phone, timezone: "Europe/London" });
+    phoneOf.set(scope.user_id, phone);
+    cleanup.push(scope);
+
+    const inbound = fixture<InboundMessage>("inbound", "draft_choice_2.json");
+    inbound.from_handle = phone;
+    inbound.user_id = "usr_not-the-right-shape";
+
+    expect((await resolveUserStrict(inbound)).kind).toBe("mismatch");
   }, 60_000);
 });

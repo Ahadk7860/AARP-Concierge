@@ -23,7 +23,6 @@ import {
   getPool,
   issuePairingCode,
   latestBrief,
-  unsafeScopeFromUserId,
   type UserScope,
 } from "../../db/src/index.js";
 
@@ -41,7 +40,9 @@ export type Selection =
   | { kind: "no_drafts"; item_index: number; brief_id: string }
   | { kind: "pairing_code"; code: string; bound: boolean }
   | { kind: "not_a_selection" }
-  | { kind: "unknown_user" };
+  | { kind: "unknown_user" }
+  /** `user_id` disagreed with `from_handle`. CONTRACTS.md § 4: reject, do not correct. */
+  | { kind: "handle_mismatch" };
 
 /** `1` or `2`, alone, possibly with whitespace or a trailing full stop. */
 export function parseSelection(text: string | null): number | null {
@@ -51,25 +52,45 @@ export function parseSelection(text: string | null): number | null {
   return Number(match[1]) - 1;
 }
 
+export type UserResolution =
+  | { kind: "resolved"; scope: UserScope }
+  | { kind: "unknown_handle" }
+  /** The transport's `user_id` disagreed with the handle it was derived from. */
+  | { kind: "mismatch"; claimed: string; derived: string };
+
 /**
  * Resolve the user an inbound message belongs to.
  *
- * `inbound.v1.user_id` when the transport already knows. Otherwise the sender's own
- * handle: this is the ACCOUNT HOLDER texting their own assistant, and CONTRACTS.md § 3
- * says the account holder's handle is the one handle the server does see. Doing it this
- * way keeps every subsequent read user-scoped rather than adding a third unscoped
- * lookup to `bootstrapLookups`.
+ * **`from_handle` is AUTHORITATIVE; `inbound.v1.user_id` is ADVISORY.** CONTRACTS.md § 4,
+ * decided 2 Aug. Track C populates `user_id` by running an injected resolver over
+ * `from_handle`, which makes it a DERIVED field — and re-deriving something you hold the
+ * input for is strictly stronger than trusting the derivation you were handed.
+ *
+ * This used to return the claimed id whenever it parsed, and only fell back to the
+ * handle when it was absent. A resolver bug, or a transport compromise, meant reading
+ * and writing the wrong account — acting on user A's behalf because something said so.
+ *
+ * Defence in depth rather than the primary gate: the signature is the real barrier and a
+ * forged webhook cannot be signed. But a signature proves *the provider sent this*, not
+ * *this handle belongs to that account*, and those are different claims.
  */
-export async function resolveUser(inbound: InboundMessage): Promise<UserScope | null> {
-  if (typeof inbound.user_id === "string" && inbound.user_id.length > 0) {
-    try {
-      return unsafeScopeFromUserId(inbound.user_id);
-    } catch {
-      // A transport handing us a malformed id is a transport bug, not a user. Fall
-      // through to the handle rather than throwing at the edge of the system.
-    }
+export async function resolveUserStrict(inbound: InboundMessage): Promise<UserResolution> {
+  const derived = await findUserIdByPhone(inbound.from_handle);
+  if (derived === null) return { kind: "unknown_handle" };
+
+  const claimed = inbound.user_id;
+  if (typeof claimed === "string" && claimed.length > 0 && claimed !== derived.user_id) {
+    // A rejection, not a warning. Continuing on the derived id would be quietly
+    // correcting a transport that is telling us something is wrong.
+    return { kind: "mismatch", claimed, derived: derived.user_id };
   }
-  return findUserIdByPhone(inbound.from_handle);
+  return { kind: "resolved", scope: derived };
+}
+
+/** The scope, or null. Kept for callers that do not need to tell the two failures apart. */
+export async function resolveUser(inbound: InboundMessage): Promise<UserScope | null> {
+  const resolution = await resolveUserStrict(inbound);
+  return resolution.kind === "resolved" ? resolution.scope : null;
 }
 
 export type ResolveDeps = { db?: Parameters<typeof latestBrief>[1]; now?: Date };
@@ -211,6 +232,10 @@ export function replyBlocks(selection: Selection, display?: string): OutboundMes
     case "not_a_selection":
       return [{ type: "text", text: "reply 1 or 2 to pick a draft." }];
     case "unknown_user":
+    case "handle_mismatch":
+      // Silence, both times. Replying to an unknown handle confirms to a stranger that
+      // this number is a service; replying to a mismatch answers a request whose
+      // provenance is in doubt.
       return [];
   }
 }
@@ -229,14 +254,28 @@ export async function handleInbound(input: {
   log?: (event: Record<string, unknown>) => void;
 }): Promise<HandleInboundResult> {
   const log = input.log ?? (() => {});
-  const scope = await resolveUser(input.inbound);
+  const resolution = await resolveUserStrict(input.inbound);
 
-  if (scope === null) {
+  if (resolution.kind === "mismatch") {
+    // Loud in the log, silent to the sender. This is a transport bug or a compromise,
+    // and it is the one inbound condition an operator needs to see immediately.
+    log({
+      msg: "inbound.handle_mismatch",
+      provider: input.inbound.provider,
+      claimed_user_id: resolution.claimed,
+      derived_user_id: resolution.derived,
+    });
+    return { selection: { kind: "handle_mismatch" }, sent: [] };
+  }
+
+  if (resolution.kind === "unknown_handle") {
     // An inbound from a handle with no account. Nothing to say and nobody to say it to;
     // replying would confirm to a stranger that this number is a service.
     log({ msg: "inbound.unknown_user", provider: input.inbound.provider });
     return { selection: { kind: "unknown_user" }, sent: [] };
   }
+
+  const scope = resolution.scope;
 
   const selection = await resolveSelection(input.inbound, scope, {
     db: input.db,
