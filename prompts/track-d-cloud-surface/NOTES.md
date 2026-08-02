@@ -254,6 +254,38 @@ Now four tests that can each fail on their own:
 - Every assertion compares against the live enumeration. The literal table list is used
   only by a schema-completeness test, which is a different question.
 
+`[prompt 02]` — **Migration `005_heartbeat_fields.sql` is in `cloud/db/`, which prompt
+02 lists as out of its path scope.** The prompt says "Paths you may modify:
+`cloud/api/`", and also requires `POST /v1/heartbeat` to record `digest_as_of` "so
+staleness is computable". `devices` had only `last_heartbeat_at` after prompt 01, which
+answers "is the Mac awake" and not "how old is the newest fact we hold" — and prompt 05
+needs the second. There is no way to satisfy the criterion without a column.
+
+`cloud/db/**` is owned by this track per `TRACK.md`, so this is inside the track and
+outside the prompt. `check-ownership.sh d` is clean. Flagging rather than silently
+widening the prompt's scope.
+
+`[prompt 02]` — **Oversized voice packs return `400`, not `422`.** The checklist says a
+pack with more than 40 exemplars or an exemplar over 200 characters "is rejected"
+without naming a code. `maxItems: 40` and `maxLength: 200` are `voice_pack.v1.json`
+constraints, so they are schema violations, and the OpenAPI document reserves `422`
+specifically for the redaction assertions (`error: {const: redaction_failed}`).
+Returning 422 for a size violation would make the code meaningless. Both are asserted
+as 400, and both also assert nothing was stored.
+
+`[prompt 02]` — **The two database test files are serialised with a Postgres advisory
+lock, not a vitest setting.** Adding a second database-touching file created exactly
+the collision I predicted in prompt 01's observations: `schema.test.ts` drops and
+rebuilds the schema in `beforeAll` while `ingest.test.ts` inserts into it, and the
+first combined run failed 41 tests with errors that read as flakiness.
+
+The natural fix is `--no-file-parallelism` or a `poolOptions` entry in
+`vitest.config.ts`. That file is foundation-owned, and the setting is global — it would
+serialise Track C's suite too, in a worktree I cannot see, and slow it down for a
+problem it does not have. So `cloud/db/src/test-lock.ts` takes a session-level advisory
+lock that binds exactly the two files that need it. If the foundation would rather have
+the config setting, it is a two-line change and I will drop the lock.
+
 `[prompt 01]` — **Unique constraints on partitioned tables are declared unnamed.** A
 `UNIQUE` constraint on a partitioned table is enforced by a per-partition index, and a
 violation reports *that index's* name (`digests_p3_user_id_generated_at_key`), never a
@@ -289,6 +321,32 @@ so will Track C.
 Choices the prompt left open that you had to resolve: a library, a data structure, an
 error-handling approach. The user needs to see these before merge, because another
 track may have chosen differently.
+
+`[prompt 02]` — **Third-party full names are NOT asserted by the upload guard.**
+CONTRACTS.md § 7 lists five things the Mac redacts: phone numbers, email addresses,
+street addresses, dollar amounts, and third-party full names. The server guard asserts
+the first four. It does not assert the fifth, and this is a deliberate choice I want
+overruled if you disagree.
+
+A server-side full-name assertion means "two consecutive capitalised words". That
+rejects "Union Square", "Blue Bottle", "New Year", "Whole Foods" — legitimate redacted
+exemplars, rejected permanently, with no edit the Mac can make to comply. Over-rejection
+looks like the safe side and is not: a user whose packs are always rejected gets no
+drafts at all, and the whole pack is the unit of rejection. Names need a name list to
+detect, the Mac has one (it has the address book), and guards one and three both cover
+this. Guard two cannot, without a heuristic that is wrong in both directions.
+
+The four it does assert are mechanical and near-zero false positive, and it errs toward
+rejecting within each: the phone pattern is looser than E.164, the amount pattern covers
+`$40`, `40 dollars` and `30 usd`. `schemas.test.ts` asserts all four fire on realistic
+text and that none fire on the committed fixtures or on ordinary chat.
+
+`[prompt 02]` — **A digest may only name a `device_id` already registered to the
+caller.** The alternative — accepting any well-formed `device_id` — means the Mac can
+write rows attributed to a device that never existed, and `digests.device_id` has no
+foreign key to lean on. Returns `400 validation`, not `401`: the caller is who they say
+they are, the body is wrong. A digest naming another `user_id` is `401`, because that
+one is an authorization failure.
 
 `[prompt 01] 2 Aug` — **The delete enumeration walks foreign keys; it does not look for
 a column named `user_id`.** § 3's correction asks this to be decided now rather than at
@@ -383,6 +441,29 @@ TypeScript ingest path can call per request. Prompt `02` will presumably do this
 `zod`, which is already in the baseline manifest; flagging that the two definitions of
 each shape (JSON Schema and zod) can then drift, with `contracts/schema/*.json` being
 the stated arbiter.
+
+`[prompt 02]` — **The OpenAPI document has two lines that the § 3 correction outdated.**
+Its `info.description` says "Every endpoint is partitioned by user_id; delete is a
+partition drop", and `DELETE /v1/users/{user_id}` documents its 204 as "partition
+dropped". Cascade is the mechanism, not partitioning, and `users` is now exempt from
+partitioning entirely. The behaviour is right and only the prose is stale, so nothing is
+blocked — but `contracts/**` is frozen and I cannot fix it. Worth correcting before
+Track A reads it as a description of what actually happens.
+
+`[prompt 02]` — **`/v1/digest`'s 409 is documented as "duplicate generated_at for this
+device" but enforced per USER.** The constraint from prompt 01 is
+`unique (user_id, generated_at)`. Two devices belonging to one user that generate
+digests in the same second would collide, where the document implies they would not.
+Per-user is the safer of the two and matches "the corpus never moves" — one Mac per user
+today. Recording it because a two-Mac user is the case where the document and the
+database disagree, and nobody would find out until it happened.
+
+`[prompt 02]` — **The parallel-test collision I predicted in prompt 01 happened
+immediately.** That observation said a future prompt adding a second database-touching
+test file would get two workers rebuilding one database and read the result as
+flakiness. Prompt 02 was that prompt, one commit later, and 41 tests failed exactly
+that way. Recorded as a small piece of evidence that the observations section earns its
+place — and that "documented in NOTES" is not the same as "prevented".
 
 `[prompt 01]` — **`vitest` runs test *files* in parallel.** All the database tests are
 in one file on purpose, because they drop and rebuild the schema. A future prompt that

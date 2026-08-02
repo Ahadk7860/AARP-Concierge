@@ -12,6 +12,7 @@ import { join } from "node:path";
 import type { Digest, VoicePack, Brief, Relationship } from "@boi/shared";
 import { getPool, closePool, withTransaction } from "./pool.js";
 import { migrate, rollbackAll, loadMigrations, MIGRATIONS_DIR } from "./migrate.js";
+import { acquireSuiteLock, releaseSuiteLock } from "./test-lock.js";
 import {
   partitionedTables,
   userScopedTables,
@@ -91,13 +92,17 @@ function nextPhone(): string {
 const pool = getPool();
 
 beforeAll(async () => {
+  // Serialised against cloud/api/src/ingest.test.ts, which uses the same database.
+  // See cloud/db/src/test-lock.ts for why this is not a vitest config change.
+  await acquireSuiteLock();
   // Prove "runs clean from empty" by actually starting from empty.
   await rollbackAll(pool);
   await migrate(pool);
-}, 60_000);
+}, 120_000);
 
 afterAll(async () => {
   await closePool();
+  await releaseSuiteLock();
 });
 
 // ---------------------------------------------------------------------------

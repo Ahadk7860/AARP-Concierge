@@ -24,7 +24,10 @@
     "eslint": "^9.0.0",
     "@typescript-eslint/parser": "^8.0.0",
     "@typescript-eslint/eslint-plugin": "^8.0.0",
-    "@types/pg": "^8.11.0"
+    "@types/pg": "^8.11.0",
+    "js-yaml": "^4.1.0",
+    "@types/js-yaml": "^4.0.9",
+    "ajv": "^8.17.1"
   },
   "dependencies": {
     "fastify": "^5.0.0",

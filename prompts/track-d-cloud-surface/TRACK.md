@@ -144,8 +144,8 @@ report rather than picking a default that another track may also pick.
 
 | # | File | Outcome | Depends on | Status |
 |---|---|---|---|---|
-| 01 | `01-schema.md` | Postgres schema, migrations, partitioning, salted IDs | none | done — lint blocked, see NOTES |
-| 02 | `02-ingest.md` | digest, voice-pack and heartbeat endpoints | 01 | not started |
+| 01 | `01-schema.md` | Postgres schema, migrations, partitioning, salted IDs | none | done |
+| 02 | `02-ingest.md` | digest, voice-pack and heartbeat endpoints | 01 | done |
 | 03 | `03-pairing.md` | signup, outbound-first with a contact card, pairing exchange | 01 | not started |
 | 04 | `04-card.md` | a server-rendered share card from a digest | 01 | not started |
 | 05 | `05-brief.md` | brief composition with drafts attached and staleness gating | 01 | not started |

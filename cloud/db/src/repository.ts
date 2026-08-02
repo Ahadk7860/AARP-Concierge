@@ -204,17 +204,79 @@ export async function registerDevice(
   return { device_token: token };
 }
 
+export type HeartbeatFields = {
+  app_version?: string | null;
+  /** What the DEVICE last computed — not what the server holds. See migration 005. */
+  digest_as_of?: string | null;
+  macos_version?: string | null;
+  fda_granted?: boolean | null;
+};
+
 export async function recordHeartbeat(
   scope: UserScope,
   deviceId: string,
   at: Date,
+  fields: HeartbeatFields = {},
   db: Queryable = getPool(),
 ): Promise<boolean> {
   const res = await scopedQuery(
     db,
     scope,
-    "update devices set last_heartbeat_at = $3 where user_id = $1 and device_id = $2",
-    [scope.user_id, deviceId, at.toISOString()],
+    `update devices
+        set last_heartbeat_at = $3,
+            app_version   = coalesce($4, app_version),
+            digest_as_of  = coalesce($5, digest_as_of),
+            macos_version = coalesce($6, macos_version),
+            fda_granted   = coalesce($7, fda_granted)
+      where user_id = $1 and device_id = $2`,
+    [
+      scope.user_id,
+      deviceId,
+      at.toISOString(),
+      fields.app_version ?? null,
+      fields.digest_as_of ?? null,
+      fields.macos_version ?? null,
+      fields.fda_granted ?? null,
+    ],
+  );
+  return (res.rowCount ?? 0) > 0;
+}
+
+export type DeviceStateRow = {
+  device_id: string;
+  last_heartbeat_at: Date | null;
+  app_version: string | null;
+  digest_as_of: Date | null;
+  macos_version: string | null;
+  fda_granted: boolean | null;
+};
+
+export async function getDeviceState(
+  scope: UserScope,
+  deviceId: string,
+  db: Queryable = getPool(),
+): Promise<DeviceStateRow | null> {
+  const res = await scopedQuery<DeviceStateRow>(
+    db,
+    scope,
+    `select device_id, last_heartbeat_at, app_version, digest_as_of, macos_version, fda_granted
+       from devices where user_id = $1 and device_id = $2`,
+    [scope.user_id, deviceId],
+  );
+  return res.rows[0] ?? null;
+}
+
+/** Does this device belong to this user? The ingest routes will not trust a body's claim. */
+export async function deviceBelongsToUser(
+  scope: UserScope,
+  deviceId: string,
+  db: Queryable = getPool(),
+): Promise<boolean> {
+  const res = await scopedQuery(
+    db,
+    scope,
+    "select 1 from devices where user_id = $1 and device_id = $2",
+    [scope.user_id, deviceId],
   );
   return (res.rowCount ?? 0) > 0;
 }
