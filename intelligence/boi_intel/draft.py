@@ -39,8 +39,10 @@ from boi_intel.prompts import (
     prompt_hash,
     render_gist,
     render_voice_pack,
+    retry_note,
 )
 from boi_intel.router import select_provider
+from boi_intel.validator import validate_candidates
 
 SCHEMA_VERSION = "draft_bundle.v1"
 
@@ -96,13 +98,13 @@ def draft(
     user_id: str = DEFAULT_USER_ID,
     prompt_version: str | None = None,
     as_of: str | None = None,
-    validate=None,
+    validate=validate_candidates,
 ) -> DraftBundle:
     """Two stance-distinct candidates for one gist, or zero.
 
-    `validate` is the seam prompt 04 fills: a callable taking the candidate dicts and
-    the gist and returning a list of failure slugs. Left `None`, only the structural
-    gates run.
+    `validate` defaults to the deterministic gates in `boi_intel.validator`. Pass
+    `validate=None` to run only the structural checks the drafter cannot avoid — useful
+    for isolating a model's raw behaviour in the eval harness, never in production.
     """
     provider = provider if provider is not None else select_provider()
     prompt_version = (
@@ -119,10 +121,18 @@ def draft(
     candidates: list[dict] = []
     failures: list[str] = []
     attempts = 0
+    retry_hash: str | None = None
 
     while attempts < MAX_ATTEMPTS:
         attempts += 1
-        raw = provider.complete(SYSTEM, cached_prefix, suffix)
+        # Prompt 04: retry with the failures NAMED. A blind second attempt at
+        # temperature 0.9 is a coin flip; telling the model it wrote 210 characters
+        # against a 34-character register is a correction.
+        attempt_suffix = suffix if attempts == 1 else suffix + retry_note(failures)
+        if attempts > 1:
+            retry_hash = prompt_hash(SYSTEM, cached_prefix, attempt_suffix)
+
+        raw = provider.complete(SYSTEM, cached_prefix, attempt_suffix)
         candidates = parse_candidates(raw)
         failures = structural_failures(candidates)
         if not failures and validate is not None:
@@ -142,6 +152,7 @@ def draft(
         voice_pack_version=voice_pack["voice_pack_version"],
         gist_id=gist["gist_id"],
         contact_id=gist["contact_id"],
+        retry_prompt_hash=retry_hash,
         attempts=attempts,
         passed=passed,
         failures=failures,

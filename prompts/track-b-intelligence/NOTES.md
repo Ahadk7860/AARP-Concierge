@@ -60,6 +60,53 @@ Anything `prompts/CONTRACTS.md` does not specify, specifies wrongly, or specifie
 way that does not work in practice. You may not edit it — record it here and report.
 Every entry names the prompt where it surfaced.
 
+- `[prompt 04] OPEN — two frozen artifacts contradict each other, and the prompt's
+  "maya_pass passes every gate" criterion cannot be met without softening a gate.`
+
+  `contracts/fixtures/draft_bundle/maya_pass.json` declares `validator.passed = true`.
+  Implemented exactly as prompt 04 specifies, it fails **two** gates:
+
+  | Gate | Why | Evidence |
+  |---|---|---|
+  | `forbidden_phrase` | the `answer` candidate contains **U+2014 EM DASH**, and the frozen `contracts.FORBIDDEN_PHRASES` lists the em dash | `"sorry been mia — yes im still coming on the 14th, book it"` |
+  | `length_gate` | the `defer` candidate is **79 chars** against a limit of **2 × 34 = 68**, where 34 is `maya.json`'s own `median_len_chars` | prompt 04: "within 2× the user's median message length" |
+
+  **It is not only the fixture.** `contracts/transcripts/model/maya_action_needed.json`
+  and `yu_fading.json` are the recorded *good* model output for the FakeProvider replay,
+  and **both contain an em dash too**. So under a literal reading of the frozen phrase
+  list, the drafter's entire happy path degrades to zero candidates. That is visible as
+  a real behaviour change: prompt 03's checklist item "the CLI prints two candidates for
+  the Maya fixture" was green when 03 was committed (03 shipped structural gates only)
+  and is **red now that 04 wires the real validator in**. Pinned by
+  `test_draft.py::test_the_happy_path_transcripts_degrade_CONTRACT_GAP`.
+
+  **Not worked around, and deliberately not fixed here.** Prompt 04 is explicit:
+  "Softening a gate because a real draft tripped it… If a gate is wrong, that is a
+  finding for `NOTES.md`, not an edit," and "extend, never shorten" the phrase list.
+  Both offending artifacts are frozen and user-owned. A test asserts
+  `FORBIDDEN_PHRASES ⊆ ALL_FORBIDDEN_PHRASES`, so the em dash cannot be quietly dropped
+  later either.
+
+  Resolutions available to the user — all four are one-line, and **the choice is
+  yours, not a track's**:
+  1. Amend the three frozen artifacts to use a comma or a hyphen instead of an em dash,
+     and shorten the `defer` candidate to ≤ 68 chars. Keeps both gates strict.
+  2. Remove `"—"` from `FORBIDDEN_PHRASES` in the frozen `contracts.py` and treat
+     the em dash as a **register** signal instead — it is arguably closer to one, since
+     whether an em dash reads as assistant-speak depends entirely on whether *that user*
+     types them.
+  3. Loosen the length rule to `max(2 × median, p90)`. On `maya.json` that is
+     `max(68, 88) = 88` and the fixture passes. Note this is a **spec change**, not an
+     implementation detail — prompt 04 says 2× median.
+  4. Accept that these fixtures are illustrative rather than gate-conformant, and amend
+     prompt 04's criterion.
+
+  My read, offered as input only: the em dash entry is doing real work (it is the single
+  most reliable machine tell in 2026) and the fixtures were most likely written by a
+  model, which is why they contain one. Option 1 fixes the artifacts rather than the
+  rule. But the 2× median limit is separately worth re-examining — see
+  `## Observations`.
+
 - `[prompt 01] RESOLVED by the foundation` — the two gaps below were both closed by
   `548d125` on `main`, merged forward into this branch. `ruff check intelligence` now
   exits zero with no suppressions, and `BOI_DEV_USER_SALT` now exists in
@@ -275,6 +322,39 @@ test fail (runs are in the report):
   `BOI_MODEL_PROVIDER` *and* `BOI_ALLOW_LIVE_CALLS=1` — plus a key, and `preflight()` is
   separate from `complete()` so 05 can check a whole matrix without sending anything.
 
+### Prompt 04 — validator
+
+- `[prompt 04]` **Extended the forbidden-phrase list by 24 entries**, never shortened
+  it. A test asserts `FORBIDDEN_PHRASES ⊆ ALL_FORBIDDEN_PHRASES`, and another asserts
+  every single entry — frozen and added — actually causes a rejection, so nothing in the
+  list is decorative. Added: `hope you're doing well` / `hope you are doing well` /
+  `hope all is well` / `hope this message finds you`, `following up on`, `per my last`,
+  `i wanted to reach out` / `wanted to reach out`, `happy to help`,
+  `let me know if you have any questions`, `thank you for your patience` /
+  `thanks for your patience`, `looking forward to hearing from you`, `as discussed`,
+  `kind regards`, `sincerely,`, `regards,`, `i apologize for any inconvenience` /
+  `apologies for any inconvenience`, `please do not hesitate`,
+  `don't hesitate to reach out`, `i trust this`, `noted with thanks`, `as per`.
+  **Deliberately NOT added** despite being tempting: `feel free to`, `in the meantime`,
+  `no worries at all`, `cheers`. Real people text those. Over-blocking does not produce
+  a safer draft, it produces zero drafts, and zero drafts every morning is a dead
+  product rather than a careful one. A test pins those five as *not* flagged.
+- `[prompt 04]` **The fabrication gate reuses `facts.extract_facts`** to scan the draft,
+  rather than a second pattern set. Two different extractors would guarantee
+  disagreement — the gist licenses "the 14th" and the gate objects to "14th". Matching
+  is containment in both directions for the same reason.
+- `[prompt 04]` **The retry names the failures.** `prompts.retry_note()` appends a
+  correction listing what was rejected, and a test asserts attempt 2's suffix carries it
+  and attempt 1's does not. A blind retry at temperature 0.9 is a coin flip.
+- `[prompt 04]` **`draft(validate=...)` now defaults to the real validator.** Passing
+  `validate=None` runs structural gates only; three prompt-03 tests use it to isolate
+  drafter mechanics from the semantic gates, which is documented in their docstrings.
+- `[prompt 04]` **The validator only ever refuses — it never rewrites.** Scope says so,
+  and it also keeps the gates auditable: a rewriting validator would make "why did this
+  draft ship" unanswerable.
+- `[prompt 04]` `explain()` carries candidate text and is a **developer/CLI tool only**.
+  It must never become a log line; `draft.py`'s `_log` remains hashes and identifiers.
+
 ## Decisions made
 
 Choices the prompt left open that you had to resolve: a library, a data structure, an
@@ -322,6 +402,24 @@ track may have chosen differently.
 Anything you noticed that the plan did not anticipate, including work that should exist
 but is not in any track's scope. This is often the most useful section at review time.
 
+- **`[prompt 04]` The 2× median length gate may be too tight, and the project's own
+  reference drafts are the evidence.** With `maya.json`'s median of 34 the limit is 68
+  characters. Of the four recorded "good" candidates across `maya_action_needed.json`
+  and `yu_fading.json`, **two exceed it** (79 and 68... the 79 fails, and `yu`'s defer is
+  68 exactly). A gate that rejects half of the project's own hand-picked good output is
+  worth a second look before launch. Two things make this suspicious rather than merely
+  strict: the median is computed over *all* sent messages including one-word replies
+  like "ok", which drags it far below the length of a considered reply; and an apology
+  opener ("sorry been mia, been slammed.") costs ~30 characters before the actual answer
+  starts. A rule like `max(2 × median, p90)` or `2 × median + apology_opener_length`
+  would track intent better. **Not changed** — prompt 04 specifies 2× median and
+  changing it is a spec decision, not an implementation one.
+- **`[prompt 04]` The fabrication gate's recall is bounded by `facts.py`.** It can only
+  object to a specific it can *recognise*, so a fabricated place or name outside those
+  patterns passes silently. This is the highest-severity gate in the system and its
+  false-negative rate is entirely a function of an extractor tuned against synthetic
+  data. Before launch it deserves an adversarial pass with real drafts — the eval
+  harness in 05 is the natural place.
 - **`[prompt 03]` `contracts/fixtures/draft_bundle/maya_pass.json` has `chars` off by one
   on both candidates.** Declared 56 and 78; the actual `len(text)` is 57 and 79. The
   schema only requires `chars >= 1`, so `validate_fixtures.py` passes it. This

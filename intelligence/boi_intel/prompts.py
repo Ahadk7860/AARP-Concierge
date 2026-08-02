@@ -122,6 +122,34 @@ def render_gist(gist: dict) -> str:
     return "\n".join(lines)
 
 
+_RETRY_GUIDANCE = {
+    "length_gate": "Both were too long. Match the typical length above, not a paragraph.",
+    "register_gate": "Wrong register: match the capitalisation, full stops and emoji use exactly.",
+    "fabrication_gate": (
+        "You named a date, time, place, amount or person that is NOT in ALLOWED "
+        "SPECIFICS. Use only what is listed, or nothing."
+    ),
+    "forbidden_phrase": "You wrote like an assistant. No stock phrases, no sign-off, no em dash.",
+    "stance_collision": "Both had the same stance. One must commit, the other must buy time.",
+    "empty": "Return exactly two candidates as minified JSON.",
+}
+
+
+def retry_note(failures: list[str]) -> str:
+    """The correction appended to the suffix on the second and final attempt.
+
+    Naming the failures is the whole point. A blind retry at temperature 0.9 is a coin
+    flip; telling the model it wrote 210 characters against a 34-character register is
+    information it can act on.
+    """
+    if not failures:
+        return ""
+    lines = ["", "YOUR PREVIOUS ATTEMPT WAS REJECTED:"]
+    lines += [f"- {_RETRY_GUIDANCE.get(f, f)}" for f in failures]
+    lines.append("Write two new candidates that fix all of the above.")
+    return "\n".join(lines)
+
+
 def cache_key(user_id: str, contact_id: str, voice_pack_version: str) -> str:
     """`(user_id, contact_id, voice_pack_version)` — and deliberately nothing else.
 

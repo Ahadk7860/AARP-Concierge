@@ -147,7 +147,7 @@ report rather than picking a default that another track may also pick.
 | 01 | `01-voice-pack.md` | voice packs from a chat.db, with zero inbound leakage | none | done — see NOTES.md contract gap on `ruff check` |
 | 02 | `02-gist.md` | gist.v1 from a thread, with a fallback that needs no model | 01 | done — SQL path verified; local model unavailable in this environment, see NOTES.md |
 | 03 | `03-drafter.md` | a drafter and model router producing draft_bundle.v1 | 01 | done — FakeProvider path verified; live Gemini call blocked on GEMINI_API_KEY, see NOTES.md |
-| 04 | `04-validator.md` | deterministic gates that refuse bad drafts | 01 | not started |
+| 04 | `04-validator.md` | deterministic gates that refuse bad drafts | 01 | done, one criterion RED — `maya_pass` cannot pass: two frozen artifacts conflict, see NOTES.md contract gap |
 | 05 | `05-eval-harness.md` | a model bake-off decided on evidence, not benchmarks | 03, 04 | not started |
 
 **Read the `Depends on` column, not the numbering.** Numbering implies a sequence and
