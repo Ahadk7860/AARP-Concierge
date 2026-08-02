@@ -144,7 +144,7 @@ report rather than picking a default that another track may also pick.
 
 | # | File | Outcome | Depends on | Status |
 |---|---|---|---|---|
-| 01 | `01-voice-pack.md` | voice packs from a chat.db, with zero inbound leakage | none | not started |
+| 01 | `01-voice-pack.md` | voice packs from a chat.db, with zero inbound leakage | none | done — see NOTES.md contract gap on `ruff check` |
 | 02 | `02-gist.md` | gist.v1 from a thread, with a fallback that needs no model | 01 | not started |
 | 03 | `03-drafter.md` | a drafter and model router producing draft_bundle.v1 | 01 | not started |
 | 04 | `04-validator.md` | deterministic gates that refuse bad drafts | 01 | not started |
