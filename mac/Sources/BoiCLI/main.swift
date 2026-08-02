@@ -24,6 +24,7 @@ func flag(_ name: String) -> Bool { arguments.contains("--" + name) }
 
 let usage = """
 usage: boi-cli scan --db <path> [options]
+       boi-cli sync --db <path> --mirror <path> [--search <text>]
 
   --db <path>                 chat.db to read. Opened file:<path>?mode=ro, always.
   --snapshot                  copy the db and both sidecars first, then read the copy
@@ -149,6 +150,41 @@ case "scan":
         )
     } catch {
         StructuredLog.emit("scan.failed", level: .error, fields: ["detail": "\(error)"])
+        exit(1)
+    }
+
+case "sync":
+    guard let databasePath = value("db"), let mirrorPath = value("mirror") else { fail(usage) }
+    do {
+        let reader = try MessageReader(path: databasePath)
+        let mirror = try MirrorDatabase(path: mirrorPath)
+        let before = try mirror.messageCount()
+        let stats = try MirrorSync(reader: reader, mirror: mirror).run()
+
+        StructuredLog.emit("sync.complete", at: stats.startedAt, fields: [
+            "db": databasePath,
+            "mirror": mirrorPath,
+            "rows_scanned": stats.scanned,
+            "rows_inserted": stats.inserted,
+            "rows_updated": stats.updated,
+            "rows_skipped_duplicate": stats.duplicatesSkipped,
+            "mirror_rows_before": before,
+            "mirror_rows_after": try mirror.messageCount(),
+            "watermark_before": stats.watermarkBefore,
+            "watermark_after": stats.watermarkAfter,
+            "trailing_window_days": stats.trailingWindowDays,
+            "mirror_schema_version": MirrorDatabase.schemaVersion,
+        ])
+
+        if let needle = value("search") {
+            let hits = try mirror.search(needle)
+            StructuredLog.emit("sync.search", fields: ["query": needle, "hits": hits.count])
+            for guid in hits.prefix(5) {
+                StructuredLog.emit("sync.search.hit", fields: ["guid": guid])
+            }
+        }
+    } catch {
+        StructuredLog.emit("sync.failed", level: .error, fields: ["detail": "\(error)"])
         exit(1)
     }
 

@@ -150,6 +150,29 @@ Format: `[prompt NN] → Track <X>: <what you need and why>`
 Anywhere the implementation departs from what the prompt described, and why. A
 deviation is not a failure — an unrecorded one is.
 
+`[prompt 02] The Definition of Done's backfill test does not discriminate, so I added
+one that does.` The criterion is: insert a message with a *new* ROWID and a 60-day-old
+date, re-sync, assert it lands. It says "a ROWID-only watermark fails this test" — but a
+new ROWID is by definition above the high-water mark, so a ROWID-only watermark finds it
+and the test passes without the trailing re-scan existing at all. I implemented the
+criterion exactly as written and kept it, then added
+`testAMessageArrivingBelowTheWatermarkIsStillIngested`, where the row arrives with an id
+*below* the watermark and a recent date — a transaction committing after one that took a
+larger id, which is what a restore or an iCloud resync produces. Only the trailing
+re-scan sees that one, and the test proves it rather than asserting it: it then runs a
+ROWID-only scan over the same database and requires that scan to miss the row.
+
+Verified by canary rather than by inspection. With `newerThan` forced to `nil` — a
+ROWID-only watermark — the mirror suite goes from 15 passed to **5 failures**. Restored
+immediately; the canary was never committed.
+
+Also recorded as a limit, not smoothed over:
+`testBackfillOlderThanTheWindowAndBelowTheWatermarkIsNotRecovered` asserts that a row
+both below the watermark and older than 30 days is **not** recovered. That is the real
+boundary of this design. Thirty days is iMessage's own server-side queue depth, so a
+source in that state has usually lost the message too — but the code should not imply a
+guarantee it cannot keep.
+
 `[prompt 01] CORRECTIONS PASS — five defects the user caught in review, all fixed.`
 Recorded because each one is a case where the checks I ran came back green while the
 thing being checked did not hold.
@@ -266,6 +289,36 @@ judgement call I want buried in a diff.
 Choices the prompt left open that you had to resolve: a library, a data structure, an
 error-handling approach. The user needs to see these before merge, because another
 track may have chosen differently.
+
+`[prompt 02] The mirror ingests everything, not the 1:1 subset.` Tapbacks, group
+threads, and rows joined to no chat all land in the mirror. Filtering is a query concern
+for prompt `04`; a row dropped at ingest is gone the moment `chat.db` prunes it, and the
+mirror's whole purpose is to outlive the source. This needed a `LEFT JOIN` variant of
+the scan (`ScanOptions.includeMessagesInNoChat`) so chat-less rows are not silently
+dropped by the join itself.
+
+`[prompt 02] Identity is guid, and only guid.` ROWIDs are reused and reassigned across
+restores, so the upsert compares *content* — text, handle, service, sent_at,
+chat_identifier, is_from_me — and treats a changed `source_rowid` alone as no change. A
+restore that renumbers every row would otherwise rewrite the entire mirror without a
+single message having changed.
+
+`[prompt 02] first_seen_at is written once and never updated, and there is no
+last_seen_at.` The prompt asks that two runs over the same input produce identical
+mirror contents. A "last seen" column would change on every run and quietly break that,
+so the mirror does not have one.
+
+`[prompt 02] FTS5 is standalone rather than external-content.` The content table is keyed
+by `guid`, and external-content FTS needs an integer `content_rowid` plus three triggers
+that have to stay correct through every future migration. The index is maintained
+explicitly in `reindex`, which also makes the update path — delete the old entry, insert
+the new — obvious rather than implicit. `testAnUpdatedMessageIsReindexed` covers the
+case prompt `03` will actually hit: a message whose text changes from NULL to decoded
+text must become findable, and its stale index entry must not survive.
+
+`[prompt 02] Mirror schema version lives in PRAGMA user_version`, and a mirror written by
+a newer build is refused rather than opened. Silently reading a future schema with an
+older build is how durable storage loses columns.
 
 `[prompt 01] No new dependencies.` Argument parsing in `boi-cli` is hand-rolled rather
 than `swift-argument-parser`, and SQLite is reached through the system `SQLite3` module

@@ -28,14 +28,36 @@ public struct ScanOptions: Sendable {
     /// metrics in a later prompt may want them back, which is why this is a knob.
     public var excludeGroupChats: Bool
     public var limit: Int?
+    /// Keep rows joined to no chat at all. The 1:1 read does not want them; the mirror
+    /// does, because the mirror keeps everything it has ever seen.
+    public var includeMessagesInNoChat: Bool
+    /// Incremental selection: keep a row if its ROWID is above this **or** its date is
+    /// at or after `newerThan`. The two are OR'd, never AND'd — that is the whole
+    /// backfill defence.
+    public var afterROWID: Int64?
+    public var newerThan: Date?
 
-    public init(excludeTapbacks: Bool = true, excludeGroupChats: Bool = true, limit: Int? = nil) {
+    public init(excludeTapbacks: Bool = true,
+                excludeGroupChats: Bool = true,
+                limit: Int? = nil,
+                includeMessagesInNoChat: Bool = false,
+                afterROWID: Int64? = nil,
+                newerThan: Date? = nil) {
         self.excludeTapbacks = excludeTapbacks
         self.excludeGroupChats = excludeGroupChats
         self.limit = limit
+        self.includeMessagesInNoChat = includeMessagesInNoChat
+        self.afterROWID = afterROWID
+        self.newerThan = newerThan
     }
 
     public static let oneToOne = ScanOptions()
+
+    /// Everything, unfiltered — what the mirror ingests. Tapbacks, group threads and
+    /// chat-less rows all belong in the durable record; filtering is a query concern.
+    public static let everything = ScanOptions(excludeTapbacks: false,
+                                               excludeGroupChats: false,
+                                               includeMessagesInNoChat: true)
 }
 
 /// What one pass over the database saw.
@@ -62,12 +84,18 @@ public struct MessageReader {
 
     private let database: ChatDatabase
 
-    public init(database: ChatDatabase) {
+    /// Verifies the source schema before any query can run against it.
+    ///
+    /// A renamed column does not crash a query that never mentions it — it produces a
+    /// smaller number. "You don't text anyone much" is indistinguishable from a bug,
+    /// so the schema check happens at open time and fails by name.
+    public init(database: ChatDatabase) throws {
+        try ChatSchema.verify(database)
         self.database = database
     }
 
     public init(path: String) throws {
-        self.init(database: try ChatDatabase(path: path))
+        try self.init(database: try ChatDatabase(path: path))
     }
 
     public var path: String { database.path }
@@ -98,7 +126,7 @@ public struct MessageReader {
     /// writes exactly one join row per message and therefore hides this entirely.
     public func count(options: ScanOptions = .oneToOne) throws -> Int {
         Int(try database.scalar("""
-            SELECT count(DISTINCT m.ROWID) FROM message m \(Self.joinClause) \(Self.whereClause(options))
+            SELECT count(DISTINCT m.ROWID) FROM message m \(Self.joinClause(options)) \(Self.whereClause(options))
             """))
     }
 
@@ -138,7 +166,7 @@ public struct MessageReader {
 
     public func threadCount(options: ScanOptions = .oneToOne) throws -> Int {
         Int(try database.scalar("""
-            SELECT count(DISTINCT c.ROWID) FROM message m \(Self.joinClause) \(Self.whereClause(options))
+            SELECT count(DISTINCT c.ROWID) FROM message m \(Self.joinClause(options)) \(Self.whereClause(options))
             """))
     }
 
@@ -154,14 +182,14 @@ public struct MessageReader {
 
         if loadMessages {
             messages.reserveCapacity(min(options.limit ?? 4096, 4096))
-            try database.query(Self.selectClause + " \(Self.joinClause) \(Self.whereClause(options)) \(Self.groupClause) ORDER BY m.ROWID" + (options.limit.map { " LIMIT \($0)" } ?? "")) { row in
+            try database.query(Self.selectClause + " \(Self.joinClause(options)) \(Self.whereClause(options)) \(Self.groupClause) ORDER BY m.ROWID" + (options.limit.map { " LIMIT \($0)" } ?? "")) { row in
                 let message = Self.message(from: row)
                 if message.text == nil { withoutText += 1 }
                 messages.append(message)
             }
         } else {
             withoutText = Int(try database.scalar("""
-                SELECT count(DISTINCT m.ROWID) FROM message m \(Self.joinClause) \(Self.whereClause(options))
+                SELECT count(DISTINCT m.ROWID) FROM message m \(Self.joinClause(options)) \(Self.whereClause(options))
                   AND m.text IS NULL
                 """))
         }
@@ -198,11 +226,20 @@ public struct MessageReader {
     /// from the same chat whose ROWID is reported, rather than from an arbitrary one.
     private static let groupClause = "GROUP BY m.ROWID"
 
-    private static let joinClause = """
-        JOIN chat_message_join j ON j.message_id = m.ROWID
-        JOIN chat c ON c.ROWID = j.chat_id
-        LEFT JOIN handle h ON h.ROWID = m.handle_id
-        """
+    private static let joinClause = joins(leftOuter: false)
+
+    private static func joins(leftOuter: Bool) -> String {
+        let join = leftOuter ? "LEFT JOIN" : "JOIN"
+        return """
+            \(join) chat_message_join j ON j.message_id = m.ROWID
+            \(join) chat c ON c.ROWID = j.chat_id
+            LEFT JOIN handle h ON h.ROWID = m.handle_id
+            """
+    }
+
+    private static func joinClause(_ options: ScanOptions) -> String {
+        joins(leftOuter: options.includeMessagesInNoChat)
+    }
 
     private static func whereClause(_ options: ScanOptions) -> String {
         var predicates = ["1 = 1"]
@@ -212,8 +249,41 @@ public struct MessageReader {
         if options.excludeTapbacks {
             predicates.append("coalesce(m.associated_message_type, 0) NOT BETWEEN 2000 AND 3999")
         }
+        if let incremental = incrementalPredicate(options) {
+            predicates.append(incremental)
+        }
         return "WHERE " + predicates.joined(separator: " AND ")
     }
+
+    /// `ROWID > watermark OR date >= cutoff`.
+    ///
+    /// OR, never AND. A ROWID-only watermark misses any row that arrives with an id
+    /// below the high-water mark — which happens whenever a transaction commits after
+    /// one with a larger id, and on every restore and iCloud resync. A date-only
+    /// watermark misses backfill, which arrives with a fresh id and an old date. Each
+    /// alone loses messages silently; together they cannot.
+    private static func incrementalPredicate(_ options: ScanOptions) -> String? {
+        var clauses: [String] = []
+        if let afterROWID = options.afterROWID {
+            clauses.append("m.ROWID > \(afterROWID)")
+        }
+        if let newerThan = options.newerThan {
+            // chat.db mixes units in one column: nanoseconds since the 2001 epoch on
+            // modern rows, seconds on pre-High-Sierra ones. Compare in whichever unit
+            // the row is actually stored in.
+            let seconds = Int64(newerThan.timeIntervalSinceReferenceDate)
+            let nanoseconds = seconds * 1_000_000_000
+            clauses.append("""
+                (m.date >= \(nanoseconds) \
+                OR (abs(m.date) <= \(appleSecondsCeiling) AND m.date >= \(seconds)))
+                """)
+        }
+        guard !clauses.isEmpty else { return nil }
+        return "(" + clauses.joined(separator: " OR ") + ")"
+    }
+
+    /// Above this, a raw `message.date` is nanoseconds; at or below, seconds.
+    static let appleSecondsCeiling: Int64 = 100_000_000_000
 
     private static func message(from row: ChatDatabase.Row) -> ChatMessage {
         ChatMessage(
@@ -239,7 +309,7 @@ public struct MessageReader {
     /// metric, so switch on magnitude rather than assuming.
     public static func appleDate(_ raw: Int64?) -> Date? {
         guard let raw, raw != 0 else { return nil }
-        let seconds = abs(raw) > 100_000_000_000 ? Double(raw) / 1_000_000_000 : Double(raw)
+        let seconds = abs(raw) > appleSecondsCeiling ? Double(raw) / 1_000_000_000 : Double(raw)
         return Date(timeIntervalSinceReferenceDate: seconds)
     }
 }

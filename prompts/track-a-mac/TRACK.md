@@ -140,7 +140,7 @@ report rather than picking a default that another track may also pick.
 | # | File | Outcome | Depends on | Status |
 |---|---|---|---|---|
 | 01 | `01-reader.md` | a CLI that reads the fixture database and proves the WAL is visible | none | **done** — DoD green, 23 tests pass |
-| 02 | `02-mirror.md` | SQLite + FTS5 mirror with a watermark that survives backfill | 01 (consumes the reader; same files) | not started |
+| 02 | `02-mirror.md` | SQLite + FTS5 mirror with a watermark that survives backfill | 01 (consumes the reader; same files) | **done** — DoD green, 42 tests pass |
 | 03 | `03-typedstream.md` | attributedBody decoded; unrecoverable share drops below 2% | 01 (consumes the reader; same files) | not started |
 | 04 | `04-metrics-digest.md` | a valid digest.v1 written to disk from real message history | 02, 03 | not started |
 | 05 | `05-voice-pack.md` | valid voice_pack.v1 with zero inbound leakage | 02, 03 | not started |
