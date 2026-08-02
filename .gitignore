@@ -3,6 +3,9 @@ dist/
 .venv/
 __pycache__/
 *.pyc
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
 .env
 .env.local
 .DS_Store
@@ -30,5 +33,3 @@ chat.db-shm
 
 # Bootstrap artifact
 .bootstrap.tar.gz
-.pytest_cache/
-.ruff_cache/
