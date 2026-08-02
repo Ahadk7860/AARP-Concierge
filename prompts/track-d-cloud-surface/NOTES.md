@@ -13,8 +13,27 @@ happened, what you tried, and whether it is still open.
 
 Format: `[prompt NN] <OPEN | RESOLVED> — <what and what you tried>`
 
-`[prompt 01] OPEN` — **`npm run lint` cannot pass, and the fix is out of bounds for
-this track.** Running the Definition of Done's
+`[prompt 01] RESOLVED (2 Aug, by main)` — the foundation added a root
+`eslint.config.js` in `548d125`. Re-run after merging: `npm run lint` exited **1**, not
+0, on one genuine error in my own code — `'user_salt' is assigned a value but never
+used` in `schema.test.ts`. Fixed; `npm run lint && npm run typecheck` now exits 0.
+Original entry below, kept for the record.
+
+⚠️ **Correction to my own report.** When I filed this blocker I also wrote "every other
+Definition of Done item is green". That was wrong twice over, and both were my errors,
+not the foundation's:
+
+- Lint was red, so the checklist was not green with one exception — it was green with
+  one **failure**, and describing a failure as an exception is how a red checklist gets
+  reported as a pass.
+- `npm test -- cloud/api cloud/brief cloud/card cloud/db` names four directories and
+  only `cloud/db` exists. It exited 0 because vitest matched the one real path. It
+  would have exited 1 on `No test files found` had `cloud/db` also been missing, so
+  that criterion was passing for a weaker reason than I claimed. Re-run after merging
+  (`vitest run --passWithNoTests` now on main): exits **0**, with 56 tests.
+
+`[prompt 01] SUPERSEDED` — **`npm run lint` cannot pass, and the fix is out of bounds
+for this track.** Running the Definition of Done's
 `npm run lint && npm run typecheck`, I expected an exit code of 0. `eslint` exits 2
 because **no ESLint configuration file exists anywhere in the repository, at any
 commit**:
@@ -47,7 +66,31 @@ Anything `prompts/CONTRACTS.md` does not specify, specifies wrongly, or specifie
 way that does not work in practice. You may not edit it — record it here and report.
 Every entry names the prompt where it surfaced.
 
-`[prompt 01]` — **`users` cannot be hash-partitioned as § 3 is written.** `TRACK.md`
+`[prompt 01] OPEN` — **`brf_` and `dig_` are not in CONTRACTS.md § 6's prefix list.**
+§ 6 fixes `usr_`, `dev_`, `h_`, `g_`, `vp_`, `omsg_` and `lmsg_`, and nothing else. But
+§ 4 names `digest_id` in the `digest.ingested` payload, so a digest id has to exist and
+§ 6 gives it no shape. `brief_id` is worse: nothing in any contract names it — I
+invented it outright for the `briefs` primary key, which I should have flagged instead
+of quietly minting a prefix.
+
+Both are now **provisional** and hex, matching the house style of the other
+server-minted ids (`g_`, `h_`, `vp_` are all hex), and constrained in migration `004`
+so the shape is at least consistent and checkable. Neither appears on any wire shape
+today.
+
+**If you rule against either prefix, nothing is lost:** `briefs` already has the unique
+natural key `(user_id, scheduled_for)` — which is exactly how § 4's `brief.due` event
+identifies a brief — and `digests` has `(user_id, generated_at)`. Both tables can drop
+the surrogate without a data migration. Needs a ruling before `brief.v1` documents are
+stored anywhere durable, i.e. before prompt 05.
+
+`[prompt 01] RESOLVED (2 Aug, by the § 3 correction)` — the user amended § 3: cascade
+is the delete mechanism, partitioning is optional, `users` is exempt. My original entry
+below reached the same conclusion, and the amendment supersedes it. `users` remains
+unpartitioned; the other seven tables stay hash-partitioned because that costs nothing.
+
+`[prompt 01] SUPERSEDED` — **`users` cannot be hash-partitioned as § 3 is written.**
+`TRACK.md`
 says `user_id` is the partition key "everywhere", and prompt `01` asks that every
 user-data table be partitioned. `CONTRACTS.md` § 3 gives the `users` DDL **without** a
 `partition by` clause and **with** `phone_e164 text not null unique`. Both cannot hold:
@@ -125,6 +168,92 @@ None. Nothing in this prompt required another track's code, per `CONTRACTS.md` �
 Anywhere the implementation departs from what the prompt described, and why. A
 deviation is not a failure — an unrecorded one is.
 
+### Corrections to prompt 01, applied 2 Aug after review
+
+`[prompt 01] FIXED — severe, and it was mine.` **Generated ids violated the frozen
+schemas about a third of the time.** `ids.ts` built `usr_` and `dev_` ids with
+`randomBytes(9).toString("base64url")`, whose alphabet includes `-` and `_`.
+`contracts/schema/digest.v1.json` requires `^usr_[0-9a-zA-Z]{8,32}$` and
+`^dev_[0-9a-zA-Z]{8,32}$`. Roughly one id in three carried a character the wire
+contract rejects.
+
+Nothing local caught it because every local check was written with the same wrong
+assumption: the SQL `CHECK`s and the scope regex both used `[A-Za-z0-9_-]`, and no
+stored payload is validated against its schema anywhere in this track. It would have
+surfaced at integration with Track A as an intermittent one-in-three failure — the
+worst possible shape for a bug, because it reads as flakiness rather than as a defect.
+
+Fixed in three places, so no single one of them has to be right on its own:
+
+1. `ids.ts` uses base62 (rejection-sampled, not `% 62`) for `usr_`/`dev_`/`omsg_`, and
+   hex for `dig_`/`brf_`.
+2. Migration `004_tighten_id_constraints.sql` makes every SQL `CHECK` match the frozen
+   pattern exactly, including the upper bounds the originals omitted. Written as a new
+   migration rather than an edit to 001-003, because those have been applied and the
+   runner rejects a changed checksum on purpose.
+3. `scope.test.ts` reads the patterns **out of `contracts/schema/*.json` at run time**
+   and generates 1,000 of each. It follows the frozen contract rather than a copy of
+   it, so a future drift in either direction fails here instead of at integration.
+   Plus a check that all 62 alphabet characters are reachable, since a modulo-biased
+   generator would still satisfy the pattern.
+
+`[prompt 01] FIXED — I overclaimed what the scope guard delivers.** `scopedQuery`'s SQL
+check is a substring regex and it does not hold. All of these satisfied it and returned
+other users' rows:
+
+```sql
+select b.user_id from relationships a join relationships b
+  on a.display = b.display where a.user_id = $1
+select user_id, display from relationships -- user_id = $1
+select user_id from relationships where user_id = $1 or true
+```
+
+What changed:
+
+- **Comment stripping**, which kills the third bypass outright.
+- **Result verification** — every returned row whose `user_id` is not the scope's now
+  throws `CrossUserResultError`. This is the half that actually holds, because it
+  inspects what came back rather than what was asked, and it cannot be talked around by
+  rewriting the SQL. It catches the self-join and the `or true`.
+- **The claim in `cloud/db/README.md` is now a table** stating each mechanism's real
+  strength, with the SQL regex marked *weak — a typo catch, not a boundary*.
+- **The remaining hole is a passing test.** `select b.display ... where a.user_id = $1`
+  still leaks, because the result check has no `user_id` column to inspect.
+  `scopeLeakRegressions` in `scope.test.ts` asserts the leak, against real Postgres in
+  `schema.test.ts`, so it is documented in executable form and any future fix breaks
+  the test and forces the README to be updated with it. Closing it properly needs SQL
+  parsing or Postgres RLS under a non-superuser role — neither is in this prompt.
+
+`[prompt 01] FIXED — the IDOR the branded type does not prevent.** A `UserScope` proves
+you named *a* user, never that you named the *authorized* user, and the constructor was
+exported as the innocuous-sounding `openUserScope`. A prompt-02 handler writing
+`openUserScope(req.params.user_id)` would have had a full IDOR on
+`DELETE /v1/users/{id}` that typechecks cleanly.
+
+Renamed to **`unsafeScopeFromUserId`**, with the IDOR spelled out at the definition, in
+the README, and here. The name is the fix: every call site now reads as a place to
+stop. The safe sources are `createUser` and the two `bootstrapLookups`.
+
+**Carried into prompt 02 as a hard requirement:** every endpoint taking a `user_id` in
+its path or body must compare it against the scope derived from the device token and
+return `401 {"error":"unauthorized"}` on mismatch. The database layer cannot do this.
+
+`[prompt 01] FIXED — the delete test restated production code.** `deleteUser` runs
+`residueByTable` itself and throws `ResidualUserDataError` first, so the test's
+zero-row assertion could never fail independently. And its last line compared
+`verified_tables` to a hard-coded list — the exact hard-coding the prompt forbade,
+reintroduced at the end.
+
+Now four tests that can each fail on their own:
+
+- The zero-row proof issues the **bare `delete from users where user_id = $1`** and
+  checks the catalog itself, so it tests the cascade rather than the guard.
+- A separate test proves the guard is **live rather than decorative**, by giving
+  `deleteUser` a table that references `users` without cascading.
+- A test proves the enumeration **refuses to verify what it cannot count**.
+- Every assertion compares against the live enumeration. The literal table list is used
+  only by a schema-completeness test, which is a different question.
+
 `[prompt 01]` — **Unique constraints on partitioned tables are declared unnamed.** A
 `UNIQUE` constraint on a partitioned table is enforced by a per-partition index, and a
 violation reports *that index's* name (`digests_p3_user_id_generated_at_key`), never a
@@ -160,6 +289,31 @@ so will Track C.
 Choices the prompt left open that you had to resolve: a library, a data structure, an
 error-handling approach. The user needs to see these before merge, because another
 track may have chosen differently.
+
+`[prompt 01] 2 Aug` — **The delete enumeration walks foreign keys; it does not look for
+a column named `user_id`.** § 3's correction asks this to be decided now rather than at
+prompt 04, and offers two options: give every table a `user_id`, or walk foreign keys
+from `users`.
+
+**Chose the foreign-key walk**, because the other option is a convention and this one
+is a fact. "Every table carries `user_id`" holds only until somebody adds a
+`brief_items` table and nothing tells them they broke the delete guarantee — the
+enumeration would keep returning a clean zero for a table it never looked at, which is
+the failure mode dressed as a pass.
+
+`deletionReachableTables` walks `pg_constraint` transitively from `users`.
+`residueByTable` uses it and raises `UncountableTableError` if it finds a reachable
+table with no `user_id` column, naming the table and refusing to report. A test creates
+exactly that shape and asserts the refusal. A second test asserts every reachable table
+is reached through `on delete cascade` — a non-cascading edge would block or orphan.
+
+Both enumerations are kept, and a test asserts they **agree**. They do today. The
+moment they disagree, a table exists that one of them cannot see, and that is the
+moment to find out rather than at the first CCPA request.
+
+Still open, and not in this prompt: § 3 also counts derived data **outside** Postgres.
+A rendered card at `briefs.card_url` is derived data and nothing here reaches it.
+Prompt 04 owns that, and it needs a real answer, not a note.
 
 `[prompt 01]` — **The device token carries its user id: `<user_id>.<secret>`.** The
 alternative, an opaque token, forces authentication to search for a row without knowing

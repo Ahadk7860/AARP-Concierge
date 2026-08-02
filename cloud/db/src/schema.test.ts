@@ -12,8 +12,20 @@ import { join } from "node:path";
 import type { Digest, VoicePack, Brief, Relationship } from "@boi/shared";
 import { getPool, closePool, withTransaction } from "./pool.js";
 import { migrate, rollbackAll, loadMigrations, MIGRATIONS_DIR } from "./migrate.js";
-import { partitionedTables, userScopedTables, residueByTable } from "./catalog.js";
-import { openUserScope, scopedQuery, UnscopedQueryError, type UserScope } from "./scope.js";
+import {
+  partitionedTables,
+  userScopedTables,
+  residueByTable,
+  deletionReachableTables,
+  UncountableTableError,
+} from "./catalog.js";
+import {
+  unsafeScopeFromUserId,
+  scopedQuery,
+  UnscopedQueryError,
+  CrossUserResultError,
+  type UserScope,
+} from "./scope.js";
 import { contactIdForTest, newDigestId, newBriefId, newOutboundMessageId, newDeviceId } from "./ids.js";
 import {
   createUser,
@@ -43,8 +55,16 @@ async function fixture<T>(...parts: string[]): Promise<T> {
   return JSON.parse(await readFile(join(FIXTURES, ...parts), "utf8")) as T;
 }
 
-/** The tables this schema is supposed to have. Asserted, never used as the source. */
-const EXPECTED_USER_TABLES = [
+/**
+ * The tables prompt 01 asked for. Used ONLY by the schema-completeness test below,
+ * which is a question about whether the migrations built what was specified.
+ *
+ * It is deliberately not used by the delete test. CONTRACTS.md § 3 requires the delete
+ * verification to enumerate from the catalog, and a test that ends by comparing the
+ * catalog's answer to this list has reintroduced the hard-coding through the back door
+ * — the list becomes the thing being trusted again.
+ */
+const TABLES_PROMPT_01_SPECIFIED = [
   "briefs",
   "devices",
   "digests",
@@ -54,6 +74,13 @@ const EXPECTED_USER_TABLES = [
   "users",
   "voice_packs",
 ];
+
+let pairingCounter = 0;
+/** Distinct six-digit codes: `issuePairingCode` enforces global uniqueness of live codes. */
+function pairingSeq(): number {
+  pairingCounter += 1;
+  return pairingCounter;
+}
 
 let phoneCounter = 0;
 function nextPhone(): string {
@@ -77,15 +104,20 @@ afterAll(async () => {
 
 describe("migrations", () => {
   it("run clean from empty and are idempotent on re-run", async () => {
+    // Versions come from disk. A literal list here would silently stop covering the
+    // newest migration the moment one is added, which is when coverage matters most.
+    const onDisk = (await loadMigrations(MIGRATIONS_DIR)).map((m) => m.version);
+    expect(onDisk.length).toBeGreaterThanOrEqual(4);
+
     await rollbackAll(pool);
 
     const first = await migrate(pool);
-    expect(first.applied).toEqual(["001_identity", "002_ingest", "003_pairing_and_delivery"]);
+    expect(first.applied).toEqual(onDisk);
     expect(first.skipped).toEqual([]);
 
     const second = await migrate(pool);
     expect(second.applied).toEqual([]);
-    expect(second.skipped).toEqual(["001_identity", "002_ingest", "003_pairing_and_delivery"]);
+    expect(second.skipped).toEqual(onDisk);
 
     // A third run must also change nothing -- idempotence is not a one-shot property.
     const third = await migrate(pool);
@@ -117,11 +149,13 @@ describe("partitioning", () => {
     const partitioned = await partitionedTables(pool);
     const byName = new Map(partitioned.map((p) => [p.table_name, p]));
 
-    // `users` is the identity root and is deliberately not partitioned: CONTRACTS.md
-    // section 3 declares `phone_e164 not null unique`, and a UNIQUE constraint on a
-    // partitioned table must include the partition key. Everything holding derived
-    // user data below it is partitioned, and cascades from it.
-    const mustBePartitioned = EXPECTED_USER_TABLES.filter((t) => t !== "users");
+    // CONTRACTS.md section 3, as corrected 2 Aug: partitioning is OPTIONAL and kept
+    // only where it costs nothing; `users` is exempt because a UNIQUE constraint on a
+    // partitioned table must include the partition key and `phone_e164 unique` cannot.
+    // Cascade, not partitioning, is what makes delete one operation.
+    const mustBePartitioned = (await userScopedTables(pool))
+      .map((t) => t.table_name)
+      .filter((t) => t !== "users");
 
     for (const table of mustBePartitioned) {
       const p = byName.get(table);
@@ -141,7 +175,7 @@ describe("partitioning", () => {
        where n.nspname = 'public' and parent.relkind = 'p'
        group by parent.relname order by parent.relname
     `);
-    expect(res.rows.length).toBe(EXPECTED_USER_TABLES.length - 1);
+    expect(res.rows.length).toBe((await userScopedTables(pool)).length - 1);
     for (const row of res.rows) {
       expect(Number(row.n), `${row.parent} partition count`).toBe(8);
     }
@@ -149,10 +183,8 @@ describe("partitioning", () => {
 });
 
 describe("the delete", () => {
-  it("is one operation and leaves zero rows in every user-scoped table", async () => {
-    const { scope, user_salt } = await createUser({ phone_e164: nextPhone() });
-
-    // Seed EVERY user-scoped table, so a delete that misses one is visible.
+  /** Fills every table reachable from `users`. Returns the enumeration proving it. */
+  async function seedEveryReachableTable(scope: UserScope): Promise<Record<string, number>> {
     const deviceId = newDeviceId();
     await registerDevice(scope, { device_id: deviceId, platform: "test" });
     await recordHeartbeat(scope, deviceId, new Date());
@@ -177,28 +209,112 @@ describe("the delete", () => {
       blocks: [{ type: "text", text: "good morning" }],
     });
 
-    await issuePairingCode(scope, { code: "410100", ttl_seconds: 600 });
+    await issuePairingCode(scope, { code: `4${String(pairingSeq()).padStart(5, "0")}`, ttl_seconds: 600 });
 
-    // Every table must be NON-EMPTY first. Without this, "zero rows everywhere"
+    // Every reachable table must be NON-EMPTY. Without this, "zero rows everywhere"
     // passes vacuously against a schema that was never seeded.
-    const before = await residueByTable(scope.user_id, pool);
-    expect(Object.keys(before).sort()).toEqual(EXPECTED_USER_TABLES);
-    for (const [table, n] of Object.entries(before)) {
+    const seeded = await residueByTable(scope.user_id, pool);
+    expect(Object.keys(seeded).length).toBeGreaterThan(0);
+    for (const [table, n] of Object.entries(seeded)) {
       expect(n, `${table} should be seeded before the delete`).toBeGreaterThan(0);
     }
+    return seeded;
+  }
 
-    const result = await deleteUser(scope);
-    expect(result.deleted).toBe(true);
+  it("is ONE raw statement, and the catalog says nothing survived it", async () => {
+    // Deliberately does NOT go through `deleteUser`. `deleteUser` runs residueByTable
+    // itself and throws ResidualUserDataError before any assertion here could fail, so
+    // a test built on it only restates production code. This issues the bare DELETE
+    // and checks the catalog independently, which is what the criterion actually asks.
+    const { scope } = await createUser({ phone_e164: nextPhone() });
+    const seeded = await seedEveryReachableTable(scope);
 
-    // Enumerated from pg_class, not from a list in this file: a table added later
-    // cannot be silently missed.
+    const res = await pool.query("delete from users where user_id = $1", [scope.user_id]);
+    expect(res.rowCount).toBe(1);
+
+    // Enumerated by walking foreign keys from `users`, not from a list in this file.
     const after = await residueByTable(scope.user_id, pool);
-    expect(Object.keys(after).sort()).toEqual(EXPECTED_USER_TABLES);
+    expect(Object.keys(after).sort()).toEqual(Object.keys(seeded).sort());
     for (const [table, n] of Object.entries(after)) {
       expect(n, `${table} still holds rows for the deleted user`).toBe(0);
     }
-    expect(result.verified_tables).toEqual(EXPECTED_USER_TABLES);
   }, 60_000);
+
+  it("reports the tables it verified, enumerated from the catalog", async () => {
+    const { scope } = await createUser({ phone_e164: nextPhone() });
+    const seeded = await seedEveryReachableTable(scope);
+
+    const result = await deleteUser(scope);
+    expect(result.deleted).toBe(true);
+    // Compared against the live enumeration, never a literal list.
+    expect(result.verified_tables).toEqual(Object.keys(seeded).sort());
+  }, 60_000);
+
+  it("throws rather than reporting success when a row survives", async () => {
+    // Proves the residue guard inside `deleteUser` is live rather than decorative, by
+    // giving it a table that carries user_id and a foreign key but does NOT cascade.
+    // Nothing else in the suite can distinguish a working guard from a missing one.
+    const { scope } = await createUser({ phone_e164: nextPhone() });
+    await pool.query(`
+      create table if not exists uncascaded_probe (
+        user_id text not null references users(user_id) on delete restrict,
+        note text not null,
+        primary key (user_id)
+      )`);
+    try {
+      await pool.query("insert into uncascaded_probe (user_id, note) values ($1, $2)", [
+        scope.user_id,
+        "survives",
+      ]);
+      // `on delete restrict` makes Postgres refuse the delete outright, which is the
+      // loud failure the guard exists to guarantee: never a quiet partial success.
+      await expect(deleteUser(scope)).rejects.toThrow();
+      expect(await getUser(scope)).not.toBeNull();
+    } finally {
+      await pool.query("drop table if exists uncascaded_probe");
+      await deleteUser(scope);
+    }
+  }, 60_000);
+
+  it("refuses to verify a delete it cannot count", async () => {
+    // The brief_items shape CONTRACTS.md § 3 warns about: reachable from users by
+    // foreign key, but with no user_id column of its own. A column-name enumeration
+    // cannot see it and would report a clean zero. The foreign-key walk must refuse.
+    const { scope } = await createUser({ phone_e164: nextPhone() });
+    await pool.query(`
+      create table if not exists brief_items_probe (
+        item_id text primary key,
+        brief_owner text not null references users(user_id) on delete cascade,
+        headline text not null
+      )`);
+    try {
+      const reachable = await deletionReachableTables(pool);
+      expect(reachable.map((t) => t.table_name)).toContain("brief_items_probe");
+      await expect(residueByTable(scope.user_id, pool)).rejects.toBeInstanceOf(
+        UncountableTableError,
+      );
+    } finally {
+      await pool.query("drop table if exists brief_items_probe");
+      await deleteUser(scope);
+    }
+  }, 60_000);
+
+  it("reaches every reachable table through a cascading foreign key", async () => {
+    const reachable = await deletionReachableTables(pool);
+    expect(reachable.length).toBeGreaterThan(1);
+    for (const t of reachable) {
+      if (t.depth === 0) continue; // `users` itself is the root, it has no inbound edge
+      expect(t.on_delete, `${t.table_name} does not cascade from users`).toBe("c");
+    }
+  });
+
+  it("agrees with the column-name enumeration while every table carries user_id", async () => {
+    // Today both enumerations return the same set. When they stop agreeing, a table
+    // has been added that one of them cannot see, and that is the moment to find out.
+    const byColumn = (await userScopedTables(pool)).map((t) => t.table_name).sort();
+    const byForeignKey = (await deletionReachableTables(pool)).map((t) => t.table_name).sort();
+    expect(byForeignKey).toEqual(byColumn);
+  });
 
   it("does not touch another user's rows", async () => {
     const doomed = await createUser({ phone_e164: nextPhone() });
@@ -264,6 +380,41 @@ describe("cross-user isolation", () => {
       ]),
     ).rejects.toThrow(UnscopedQueryError);
 
+    // The self-join that DEFEATS the SQL text check, run against real Postgres rather
+    // than a stub: `a.user_id = $1` is present, so the text check passes, and the join
+    // genuinely returns b's row. The result check is what stops it.
+    await expect(
+      scopedQuery(
+        pool,
+        a.scope,
+        `select b.user_id, b.contact_id
+           from relationships a
+           join relationships b on a.display = b.display
+          where a.user_id = $1`,
+        [a.scope.user_id],
+      ),
+    ).rejects.toThrow(CrossUserResultError);
+
+    // And `or true`, likewise live.
+    await expect(
+      scopedQuery(pool, a.scope, "select user_id from relationships where user_id = $1 or true", [
+        a.scope.user_id,
+      ]),
+    ).rejects.toThrow(CrossUserResultError);
+
+    // The hole that remains, demonstrated against real Postgres so it is not a
+    // theoretical claim: projecting only `display` leaks b's row past both guards.
+    const leaked = await scopedQuery<{ display: string }>(
+      pool,
+      a.scope,
+      `select b.display
+         from relationships a
+         join relationships b on a.display = b.display
+        where a.user_id = $1`,
+      [a.scope.user_id],
+    );
+    expect(leaked.rows.length).toBe(2); // a's own row and b's — see scope.ts's header.
+
     await deleteUser(a.scope);
     await deleteUser(b.scope);
   });
@@ -290,7 +441,7 @@ describe("the schema's own invariants", () => {
     await expect(
       pool.query(
         `insert into users (user_id, phone_e164, user_salt) values ($1, $2, $3)`,
-        ["usr_shortsalt", nextPhone(), Buffer.alloc(16, 7)],
+        ["usr_shortsalt01", nextPhone(), Buffer.alloc(16, 7)],
       ),
     ).rejects.toThrow(/users_salt_min_32_bytes/);
   });
@@ -299,15 +450,15 @@ describe("the schema's own invariants", () => {
     const salt = Buffer.alloc(32, 9);
     await pool.query(
       `insert into users (user_id, phone_e164, user_salt) values ($1, $2, $3)`,
-      ["usr_saltone", nextPhone(), salt],
+      ["usr_saltone01", nextPhone(), salt],
     );
     await expect(
       pool.query(
         `insert into users (user_id, phone_e164, user_salt) values ($1, $2, $3)`,
-        ["usr_salttwo", nextPhone(), salt],
+        ["usr_salttwo01", nextPhone(), salt],
       ),
     ).rejects.toThrow(/users_salt_unique/);
-    await deleteUser(openUserScope("usr_saltone"));
+    await deleteUser(unsafeScopeFromUserId("usr_saltone01"));
   });
 
   it("stores a salt of at least 32 bytes for a real user, unique per user", async () => {
@@ -459,7 +610,7 @@ describe("pairing and device authentication", () => {
 describe("catalog enumeration", () => {
   it("finds every user-scoped table and excludes leaf partitions", async () => {
     const tables = await userScopedTables(pool);
-    expect(tables.map((t) => t.table_name).sort()).toEqual(EXPECTED_USER_TABLES);
+    expect(tables.map((t) => t.table_name).sort()).toEqual(TABLES_PROMPT_01_SPECIFIED);
     // schema_migrations has no user_id and must not appear.
     expect(tables.some((t) => t.table_name === "schema_migrations")).toBe(false);
     expect(tables.some((t) => t.table_name.endsWith("_p0"))).toBe(false);

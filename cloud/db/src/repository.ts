@@ -12,7 +12,7 @@
 import type { Digest, Relationship, VoicePack, Brief, OutboundBlock } from "@boi/shared";
 import { getPool, withTransaction, type Queryable } from "./pool.js";
 import { residueByTable } from "./catalog.js";
-import { openUserScope, scopedQuery, type UserScope } from "./scope.js";
+import { unsafeScopeFromUserId, scopedQuery, type UserScope } from "./scope.js";
 import {
   newUserId,
   newUserSalt,
@@ -128,7 +128,7 @@ export async function createUser(
      values ($1, $2, $3, $4, coalesce($5, 'America/Los_Angeles'))`,
     [userId, input.phone_e164, input.email ?? null, salt, input.timezone ?? null],
   );
-  return { scope: openUserScope(userId), user_salt: salt };
+  return { scope: unsafeScopeFromUserId(userId), user_salt: salt };
 }
 
 export async function getUser(
@@ -148,14 +148,18 @@ export async function getUser(
 /**
  * Delete everything, derived data included.
  *
- * ONE statement. Every user-data table carries `user_id` and an FK to `users` with
- * `on delete cascade`, so the cascade reaches derived rows in the same operation --
- * there is no second pass to forget and no table to add to a list.
+ * ONE statement. Every user-data table has an FK to `users` with `on delete cascade`,
+ * so the cascade reaches derived rows in the same operation -- there is no second pass
+ * to forget and no table to add to a list. Cascade is the mechanism; partitioning
+ * never was (CONTRACTS.md section 3, corrected 2 Aug).
  *
- * The residue assertion is not test scaffolding: it enumerates from the catalog on
+ * The residue assertion is not test scaffolding: it walks foreign keys from `users` on
  * every real delete, so a table added next month that somehow escapes the cascade
  * fails the request loudly instead of leaving user data behind quietly. One-click
  * delete that leaves derived rows behind is the gap the FTC prosecutes.
+ *
+ * STILL OPEN: section 3 also counts derived data outside Postgres. A rendered card at
+ * `briefs.card_url` is derived data and nothing here reaches it. Prompt 04 owns that.
  */
 export async function deleteUser(
   scope: UserScope,
@@ -602,7 +606,7 @@ export const bootstrapLookups = {
       [code],
     );
     const row = res.rows[0];
-    return row === undefined ? null : openUserScope(row.user_id);
+    return row === undefined ? null : unsafeScopeFromUserId(row.user_id);
   },
 
   /**
@@ -617,7 +621,7 @@ export const bootstrapLookups = {
     const userId = userIdFromDeviceToken(cleartext);
     if (userId === null) return null;
 
-    const scope = openUserScope(userId);
+    const scope = unsafeScopeFromUserId(userId);
     const presented = hashDeviceToken(cleartext);
     const res = await scopedQuery<{ device_id: string; device_token_hash: Buffer }>(
       db,

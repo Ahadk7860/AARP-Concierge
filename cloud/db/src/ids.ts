@@ -4,29 +4,82 @@
 
 import { createHmac, randomBytes, randomInt, timingSafeEqual, createHash } from "node:crypto";
 
-/** Every secret and identifier here comes from node:crypto's CSPRNG. Never Math.random. */
-function token(bytes: number): string {
+/**
+ * THE ALPHABETS ARE PART OF THE WIRE CONTRACT. `contracts/schema/digest.v1.json`
+ * requires `^usr_[0-9a-zA-Z]{8,32}$` and `^dev_[0-9a-zA-Z]{8,32}$`; the hex-prefixed
+ * ids (`h_`, `g_`, `vp_`) are `[0-9a-f]`. Neither alphabet contains `-` or `_`.
+ *
+ * `randomBytes(n).toString("base64url")` was used here originally and was WRONG:
+ * base64url's alphabet includes `-` and `_`, so roughly one generated id in three
+ * carried a character the frozen schema rejects. Nothing local caught it, because the
+ * SQL CHECKs and the scope regex both used the looser `[A-Za-z0-9_-]` and no stored
+ * payload is validated against its schema. It would have surfaced at integration with
+ * Track A as an intermittent one-in-three failure.
+ *
+ * `idsMatchTheFrozenSchemas` in scope.test.ts reads the patterns out of
+ * `contracts/schema/*.json` and generates a thousand of each, so a future change to
+ * either the generator or the schema fails here rather than at integration.
+ */
+const BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+
+/**
+ * Uniform over the alphabet by rejection sampling. `byte % 62` would be biased toward
+ * the first 8 characters, which is not a security problem at these lengths but is the
+ * kind of thing that is free to get right and awkward to change later.
+ */
+function base62(length: number): string {
+  const limit = 256 - (256 % BASE62.length); // 248: discard 248..255
+  let out = "";
+  while (out.length < length) {
+    for (const byte of randomBytes(length)) {
+      if (byte >= limit) continue;
+      out += BASE62[byte % BASE62.length];
+      if (out.length === length) break;
+    }
+  }
+  return out;
+}
+
+function hex(length: number): string {
+  return randomBytes(Math.ceil(length / 2))
+    .toString("hex")
+    .slice(0, length);
+}
+
+/** Every secret here comes from node:crypto's CSPRNG. Never Math.random. */
+function secret(bytes: number): string {
   return randomBytes(bytes).toString("base64url");
 }
 
 export function newUserId(): string {
-  return `usr_${token(9)}`;
+  return `usr_${base62(16)}`;
 }
 
 export function newDeviceId(): string {
-  return `dev_${token(9)}`;
+  return `dev_${base62(16)}`;
 }
 
+/**
+ * `brf_` and `dig_` are NOT in CONTRACTS.md § 6's prefix list, which fixes `usr_`,
+ * `dev_`, `h_`, `g_`, `vp_`, `omsg_` and `lmsg_` and nothing else. § 4 nonetheless
+ * names `digest_id` in the `digest.ingested` payload, so an id has to exist.
+ *
+ * Both are PROVISIONAL, recorded as a contract gap in NOTES.md, and hex so they at
+ * least match the house style of the other server-minted ids. Neither appears on any
+ * wire shape today. If the user rules against the prefixes, `briefs` already has the
+ * natural key `(user_id, scheduled_for)` and `digests` has `(user_id, generated_at)`,
+ * both unique, so both tables can drop the surrogate without a data migration.
+ */
 export function newBriefId(): string {
-  return `brf_${token(9)}`;
+  return `brf_${hex(16)}`;
 }
 
 export function newDigestId(): string {
-  return `dig_${token(9)}`;
+  return `dig_${hex(16)}`;
 }
 
 export function newOutboundMessageId(): string {
-  return `omsg_${token(9)}`;
+  return `omsg_${base62(16)}`;
 }
 
 /**
@@ -60,7 +113,9 @@ export function newPairingCode(): string {
  * and only its SHA-256 is ever stored.
  */
 export function newDeviceToken(userId: string): { token: string; hash: Buffer } {
-  const cleartext = `${userId}.${token(32)}`;
+  // The secret half is opaque and never crosses a schema boundary, so base64url is
+  // fine here — unlike the identifiers above, which are contract-shaped.
+  const cleartext = `${userId}.${secret(32)}`;
   return { token: cleartext, hash: hashDeviceToken(cleartext) };
 }
 
@@ -91,5 +146,5 @@ export function deviceTokenHashEquals(a: Buffer, b: Buffer): boolean {
  */
 export function contactIdForTest(userSalt: Buffer, normalizedHandle: string): string {
   const mac = createHmac("sha256", userSalt).update(normalizedHandle, "utf8").digest("hex");
-  return `h_${mac.slice(0, 16)}`;
+  return `h_${mac.slice(0, 16)}`; // ^h_[0-9a-f]{8,32}$
 }
