@@ -122,7 +122,8 @@ THEIR_LINES = [
 ]
 
 
-def build(out: pathlib.Path, seed: int = 7, leave_wal_open: bool = True) -> dict:
+def build(out: pathlib.Path, seed: int = 7, leave_wal_open: bool = True,
+          retention_cap_days: int | None = None) -> dict:
     rng = random.Random(seed)
     out.parent.mkdir(parents=True, exist_ok=True)
     for suffix in ("", "-wal", "-shm"):
@@ -156,6 +157,13 @@ def build(out: pathlib.Path, seed: int = 7, leave_wal_open: bool = True) -> dict
         # spread messages over a year, ending quiet_days ago
         end = now - timedelta(days=quiet_days)
         start = end - timedelta(days=350)
+        if retention_cap_days is not None:
+            # Apple's Keep Messages setting deletes everything older than the cap, so
+            # every thread's first message lands on the boundary rather than on the day
+            # the friendship actually started. That exact-boundary signature is the
+            # thing prompt 06 detects and the reason first_contact_at must be nulled.
+            floor = now - timedelta(days=retention_cap_days)
+            start = max(start, floor)
         for i in range(n):
             frac = i / max(n - 1, 1)
             when = start + (end - start) * frac + timedelta(seconds=rng.randint(0, 3600))
@@ -289,8 +297,16 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--checkpoint", action="store_true",
                     help="checkpoint the WAL instead of leaving rows in it")
+    ap.add_argument("--retention-cap-days", type=int, default=None, metavar="N",
+                    help="floor every thread's first message at exactly N days ago, the "
+                         "way Apple's Keep Messages setting does. Use 365 to reproduce "
+                         "the exact-boundary signature: on a real 94k corpus every "
+                         "first_contact_at was floored at the cap, so a friendship that "
+                         "began in 2019 reported as beginning a year ago. Needed to test "
+                         "the first_contact_at null rule in CONTRACTS section 10.")
     a = ap.parse_args()
-    stats = build(pathlib.Path(a.out), a.seed, leave_wal_open=not a.checkpoint)
+    stats = build(pathlib.Path(a.out), a.seed, leave_wal_open=not a.checkpoint,
+                  retention_cap_days=a.retention_cap_days)
     print(f"wrote {a.out}")
     for k, v in stats.items():
         print(f"  {k}: {v}")
