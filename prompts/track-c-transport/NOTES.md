@@ -84,7 +84,28 @@ asserts that `/chats`, `/v3/chats` and `/partner/v3/chats` all 404. The lesson g
 when the contract is ambiguous, the mock must pick one reading and record it, never satisfy
 both.
 
-No other gap. Every contract prompt 01 needed was present and sufficient.
+`[prompt 02]` **`outbound.v1` carries no recipient handle, so a `Channel` cannot address
+a message on its own.** The schema has `user_id` and is closed (`additionalProperties:
+false`), so the handle cannot travel inside the message — which is *correct* privacy design
+(§ 3: the server never holds a raw handle for anyone but the account holder) but leaves the
+adapter unable to fill `to`.
+
+Resolved without touching anything frozen: `LinqChannel` takes an injected
+`resolveHandles(user_id) => string[]`. Track D owns the users table and supplies it. This
+needs to be in `CONTRACTS.md` before Track D wires the two together, because right now
+nothing tells Track D that the constructor requires it.
+
+`[prompt 02]` **`SendResult.line_id` is required, but the documented `POST /chats` 200
+response has no line field** — only `id`, `status`, `protocol`, `trace_id`. So the adapter
+cannot report which line actually carried a message. It falls back to a configured
+`LINQ_LINE_ID`, which is a guess dressed as a fact whenever more than one line exists.
+
+This matters more than it looks: a line-level ban is the failure mode that actually hurts,
+and attributing a send to the wrong line is exactly the datum you need to be right when
+diagnosing one. Either the real response carries a line (resolve on the first live send,
+§ 11 item 1) or `line_id` should be nullable in the contract. Prompt 04 will hit this.
+
+No other gap. Every contract prompts 01 and 02 needed was present and sufficient.
 
 ## Shared file changes
 
@@ -123,7 +144,8 @@ Format: `[prompt NN] needed <resource> — used <what> provisionally / blocked`
 
 `[prompt 01] needed a webhook receiver port for the signature tests — used 3033`, inside
 Track C's assigned 3030–3039 range, so it is assigned-by-range rather than borrowed.
-`3032` is left free for the channel test server in prompt 02.
+`[prompt 02] needed the channel test server port — used 3032`, which `CONTRACTS.md` § 9
+assigns to Track C by name.
 
 The test suite drives the mock through `fastify.inject()` rather than a socket, so it binds
 exactly one real port (3033) and running it never collides with a hand-run server on 3031.
@@ -150,8 +172,19 @@ did not append it myself — `.env.example` ships `LINQ_API_TOKEN=` deliberately
 comment explaining it is not provisioned, and overwriting that value is an edit rather than
 an append. Documented in `cloud/mock-linq/README.md` instead.
 
-Nothing is needed from Track A, B, or D. Prompt 01 reached a green checklist using only
-the foundation stubs and Track C's own code, as `CONTRACTS.md` § 10 requires.
+`[prompt 02] → Track D: LinqChannel's constructor needs a handle resolver.`
+`new LinqChannel(config, { resolveHandles })`, where `resolveHandles(user_id)` returns the
+recipient handles for that user. `outbound.v1` cannot carry them. Nothing in `CONTRACTS.md`
+tells Track D this yet — see `## Contract gaps`.
+
+`[prompt 02] → Track D: branch on the typed errors, not on strings.` `LineBannedError`,
+`RateLimitedError` (with `.local` distinguishing our limiter from the provider's 429),
+`UpstreamError`, `CapabilityError`, `EmptyMessageError`, all exported from
+`cloud/channel/src/errors.js`. `LineBannedError` is a migration event, never a retry.
+
+Otherwise nothing is needed from Track A, B, or D. Prompts 01 and 02 reached a green
+checklist using only the foundation stubs and Track C's own code, as `CONTRACTS.md` § 10
+requires.
 
 ## Deviations from the plan
 
@@ -256,6 +289,68 @@ Every one of these made a test greener. The mock's job is to be the thing you di
 response against, and each defect quietly reduced the surface where a diff could show up.
 When I next reach for "make the mock accommodate this," that is the signal to stop.
 
+## Prompt 02 — the adapter
+
+Nothing was weakened, skipped, or loosened. No existing test, assertion, lint rule or type
+was modified; no test is skipped or pending. `@typescript-eslint/no-explicit-any` is an
+error in `eslint.config.js` and there is no `any` and no `as` cast in the non-test channel
+source — verified with `grep -n ': any\|<any>\| as [A-Z]' cloud/channel/src/*.ts` over
+`linq-channel.ts`, `errors.ts` and `rate-limiter.ts`.
+
+### How the no-leakage criterion was verified, both halves
+
+The first half is the grep the prompt names: `grep -rn 'linq' cloud/channel/src
+--include=*.ts -il` matches `linq-channel.ts` and `linq-channel.test.ts` and nothing else.
+`errors.ts` and `rate-limiter.ts` contain no provider vocabulary at all, including in
+comments — a limiter that names its callee has already leaked.
+
+The second half — "the `Channel` return types contain no Linq-specific field" — is not
+greppable, so it is verified three ways:
+
+1. **Structurally.** `SendResult`, `Capabilities` and `ChannelHealth` are imported from the
+   frozen `cloud/shared/src/contracts.ts` and `LinqChannel implements Channel`. `tsc`
+   rejects an extra field on a returned object literal, so a leak cannot compile.
+2. **At runtime.** A test asserts `Object.keys(result).sort()` is exactly
+   `["line_id","message_id","protocol","provider"]` and that the serialized result contains
+   neither `trace_id` nor `parts`. `trace_id` is the clearest tell — the mock returns one on
+   every send, and it stops at `toSendResult`.
+3. **By mutation.** Adding `trace_id` to the returned `SendResult` fails two tests. Evidence
+   in the report.
+
+`provider: "linq"` is not a leak: `provider` is a field the frozen contract defines, and
+the foundation's own `StubChannel` sets it to `"mock"`.
+
+### Decisions this prompt forced
+
+- **A fourth and fifth error type.** The prompt names three. `CapabilityError` and
+  `EmptyMessageError` were added because "refuse a group send" and "every block degraded
+  away" are neither upstream failures nor rate limits, and folding them into `UpstreamError`
+  would tell Track D the provider failed when it did not. Additions, not weakenings.
+- **`RateLimitedError.local`.** Our own limiter and the provider's 429 both surface as
+  `RateLimitedError`, so Track D branches once — but they warrant different responses, and
+  a flag is cheaper than a sixth class.
+- **Health degrades on ambiguity.** An unparseable or unreachable `GET /lines` yields
+  `degraded`, never `up`. Choosing `up` would be the confident wrong answer the product
+  rules forbid; choosing `banned` would trigger a migration on no evidence.
+- **`normalizeInbound` throws.** Prompt 03 owns it. It throws rather than returning a
+  plausible stub because the frozen contract says it never returns a partially-normalized
+  message, and Track D building against fabricated inbound is a failure nobody finds until
+  integration.
+- **`alt` text on image blocks is dropped.** The Linq media part has `url` and `mime` and
+  nowhere to put alternative text. That is a real accessibility cost, recorded rather than
+  hidden, and it is a question for the sales call.
+- **Idempotency is in-process only.** The subset documents no idempotency header and
+  inventing one would be inventing wire format. A retry after a process restart can still
+  double-send. Listed below as an open question.
+
+### Mutation testing
+
+Every headline criterion was checked by breaking the implementation and confirming a test
+fails. Dropping the idempotency cache, attempting a group send, swallowing `Retry-After`,
+mapping `503 line_banned` to a generic throw, leaking `trace_id`, and having `health()`
+report `up` on an unparseable body each fail 1-2 tests. A criterion never observed failing
+is a criterion that has not been tested.
+
 ## Decisions made
 
 Choices the prompt left open that you had to resolve: a library, a data structure, an
@@ -286,10 +381,18 @@ config change, not a rewrite.
 | 2 | webhook signature scheme | `LINQ_WEBHOOK_SECRET`, and the `signBody` / `verifySignature` pair |
 | 3 | real rate limits | `MOCK_LINQ_RETRY_AFTER` |
 | 7 | tenants per line, dedicated lines | `MOCK_LINQ_LINE_ID` |
-| 8 | `GET /lines` health shape | implemented as the spec guesses it; prompt 02's `health()` must tolerate a different shape |
+| 8 | `GET /lines` health shape | mock implements the spec's guess; `parseHealth` tolerates five envelopes and three key names, and degrades rather than guessing `up` |
 
 Items 4, 5 and 6 (does the SLA cover a line-level ban; is a line sticky; are we warned
-before rotation) do not bind on prompt 01 — they land in prompt 04's line-health config.
+before rotation) do not bind on prompts 01 or 02 — they land in prompt 04's line-health
+config.
+
+Three more for the same call, surfaced by prompt 02:
+
+- **Does `POST /chats` accept an idempotency key?** Ours is in-process only, so a retry
+  after a restart double-sends. Nothing can be done about that without a documented header.
+- **Does the send response identify the line?** See `## Contract gaps`.
+- **Is there any capabilities endpoint?** Capabilities are configured guesses today.
 
 Only `MOCK_LINQ_PORT`, `MOCK_LINQ_MODE`, `LINQ_FROM_HANDLE` and `LINQ_WEBHOOK_SECRET` are
 in `.env.example`. The other knobs have working defaults and were deliberately **not**
