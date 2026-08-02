@@ -162,9 +162,15 @@ is a line running on somebody else's data.
 - **Constant-time comparison**, `crypto.timingSafeEqual`. An early-returning compare leaks
   how much of a forged signature was right, which is enough to build a valid one a byte at
   a time.
-- **Two distinct errors.** `SignatureError` (`bad_signature`) is a security event;
-  `InboundParseError` (`malformed_inbound`) is schema drift. Collapsing them means neither
-  gets the response it deserves.
+- **Three distinct errors, on purpose.** `SignatureError` (`bad_signature`) is a security
+  event. `InboundParseError` (`malformed_inbound`) is schema drift. `RawBodyRequiredError`
+  (`raw_body_required`) is a caller bug — you passed a parsed object. Collapsing any two
+  means neither gets the response it deserves, and the worst collapse is a config bug
+  arriving as a forged-signature alert, which trains people to ignore the alert.
+
+> **Callers on Fastify:** register a raw-body content-type parser *ahead of* the JSON
+> parser and pass `req.rawBody`. With Fastify's default you get a parsed object, every
+> webhook throws `RawBodyRequiredError`, and it looks like a signature problem.
 - **Swappable verifier.** The real scheme is unconfirmed (`CONTRACTS.md` § 11 item 2), so
   it is an injected strategy: `new LinqChannel(config, { verifier })`.
 - **Unknown `type` is refused, never defaulted to `text`.** Defaulting would turn a read

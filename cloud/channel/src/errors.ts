@@ -69,7 +69,8 @@ export type ChannelErrorCode =
   | "unsupported_capability"
   | "empty_message"
   | "bad_signature"
-  | "malformed_inbound";
+  | "malformed_inbound"
+  | "raw_body_required";
 
 /**
  * The line this user is assigned to is dead — not the platform, this line.

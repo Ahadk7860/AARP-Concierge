@@ -11,6 +11,7 @@ import {
   slugLooksBanned,
   type LinqChannelConfig,
 } from "./linq-channel.js";
+import { SignatureError } from "./inbound.js";
 import {
   CapabilityError,
   ChannelError,
@@ -622,6 +623,7 @@ describe("LinqChannel — the abstraction boundary", () => {
     // guarantee is unchanged and still asserted here: an unverifiable input throws, and
     // no partially-normalized message is ever returned. Full coverage in inbound.test.ts.
     expect(() => channel().normalizeInbound({}, "sha256=x")).toThrow(/raw body required/);
+    expect(() => channel().normalizeInbound({}, "sha256=x")).not.toThrow(SignatureError);
     expect(() => channel().normalizeInbound('{"id":"x"}', "sha256=wrong")).toThrow(/bad_signature/);
   });
 

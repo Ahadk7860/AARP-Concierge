@@ -30,6 +30,24 @@ export class SignatureError extends ChannelError {
   }
 }
 
+/**
+ * The caller handed us something other than raw bytes.
+ *
+ * A programming error at the call site, and deliberately NOT a `SignatureError`: raising
+ * one would page somebody about a forged webhook when the actual fault is a missing
+ * raw-body parser. That is the same conflation `SignatureError` and `InboundParseError`
+ * exist to avoid, pointing the other way — and it is the more dangerous direction,
+ * because a security alert that is really a config bug trains people to ignore the alert.
+ */
+export class RawBodyRequiredError extends ChannelError {
+  constructor(
+    message = "raw body required: pass the exact bytes received, not a parsed object — " +
+      "register a raw-body content-type parser ahead of your JSON parser",
+  ) {
+    super("raw_body_required", false, message);
+  }
+}
+
 /** The bytes are authentic but the contents are not a message we understand. */
 export class InboundParseError extends ChannelError {
   readonly detail: string;
@@ -127,7 +145,7 @@ function toBuffer(rawBody: unknown): Buffer {
   // signature would compare a signature against bytes that were never on the wire — key
   // order and whitespace normalize away — and would pass every test written the same
   // wrong way before failing on the first real webhook.
-  throw new SignatureError("raw body required: pass the exact bytes received, not a parsed object");
+  throw new RawBodyRequiredError();
 }
 
 export function normalizeInbound(rawBody: unknown, signature: string, options: NormalizeOptions): InboundMessage {

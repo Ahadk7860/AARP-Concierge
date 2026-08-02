@@ -8,6 +8,7 @@ import { LinqChannel, loadLinqChannelConfig, extractLinqWebhook, type LinqChanne
 import {
   hmacSha256Verifier,
   InboundParseError,
+  RawBodyRequiredError,
   SignatureError,
   normalizeInbound,
   type SignatureVerifier,
@@ -153,8 +154,28 @@ describe("inbound — verification", () => {
     expect(() => channel().normalizeInbound(reordered, sign(raw))).toThrow(SignatureError);
   });
 
-  it("refuses an already-parsed object rather than re-serializing to verify it", () => {
-    expect(() => channel().normalizeInbound(REFERENCE.body, sign(raw))).toThrow(/raw body required/);
+  it("refuses an already-parsed object as a CALLER error, not a forged signature", () => {
+    // A caller programming error must not surface as a security alert. Track D forgetting
+    // a raw-body parser would otherwise page somebody about a forged webhook.
+    const err = (() => {
+      try {
+        channel().normalizeInbound(REFERENCE.body, sign(raw));
+      } catch (e) {
+        return e;
+      }
+      return null;
+    })();
+
+    expect(err).toBeInstanceOf(RawBodyRequiredError);
+    expect(err).not.toBeInstanceOf(SignatureError);
+    expect((err as RawBodyRequiredError).code).toBe("raw_body_required");
+    // The message has to tell the caller how to fix it, since the symptom looks nothing
+    // like the cause.
+    expect((err as RawBodyRequiredError).message).toMatch(/raw-body content-type parser/);
+
+    for (const bad of [42, null, undefined, { id: "x" }, ["bytes"]]) {
+      expect(() => channel().normalizeInbound(bad, sign(raw))).toThrow(RawBodyRequiredError);
+    }
   });
 
   it("accepts a Buffer as well as a string", () => {

@@ -236,6 +236,34 @@ an append. Documented in `cloud/mock-linq/README.md` instead.
 recipient handles for that user. `outbound.v1` cannot carry them. Nothing in `CONTRACTS.md`
 tells Track D this yet — see `## Contract gaps`.
 
+`[prompt 03] → Track D: RAW BYTES ARE MANDATORY on POST /v1/webhooks/{provider}.`
+**This will break in production and look like a signature bug.** You own that endpoint.
+Fastify's default JSON parser hands the route an already-parsed object, and
+`normalizeInbound` refuses one — it cannot verify a signature against bytes that were never
+on the wire, because key order and whitespace normalize away. Register a raw-body
+content-type parser **ahead of** the JSON parser and pass the exact bytes received:
+
+```ts
+app.addContentTypeParser("application/json", { parseAs: "string" }, (req, body, done) => {
+  (req as FastifyRequest & { rawBody?: string }).rawBody = body as string;
+  try { done(null, JSON.parse(body as string)); } catch { done(null, undefined); }
+});
+// then:
+channel.normalizeInbound(req.rawBody, req.headers["x-boi-signature"]);
+```
+
+Getting this wrong throws `RawBodyRequiredError` (code `raw_body_required`), deliberately
+**not** `SignatureError` — see `## Prompt 03 corrections`. The message names the fix.
+
+`[prompt 03] → Track D: provider ids and Boi ids are different namespaces.`
+`inbound.v1`'s `provider_message_id` and `reply_to_message_id` both carry the **provider's**
+ids (`lmsg_...`). Boi's own outbound ids are `omsg_...` (`CONTRACTS.md` § 6). Nothing
+translates between them today, and nothing in `CONTRACTS.md` says so. A brief that sent
+`omsg_9001` and gets a reply referencing `lmsg_01J8ZK` will not join unless you keep the
+`SendResult.message_id -> omsg_*` mapping at send time — `SendResult.message_id` is the
+provider's id, so that mapping is the only place the link exists. This is the same gap as
+the `draft_choice_2.json` mismatch in `## Contract gaps`, seen from Track D's side.
+
 `[prompt 03] → Track D: reply_to_message_id arrives provider-scoped.` A normalized
 `inbound.v1` carries the provider's id for the replied-to message (`lmsg_...`), not Boi's
 own (`omsg_...`). See `## Contract gaps`. Also: inject `resolveUser` if you want `user_id`
@@ -555,6 +583,25 @@ The constant-time assertion is a source-text check on
 it asserts the implementation rather than the behaviour — but timing behaviour cannot be
 asserted reliably in a unit test, and the alternative is no check at all. Flagging the
 weakness rather than letting it read as equivalent to the others.
+
+## Prompt 03 corrections
+
+**`RawBodyRequiredError` split out of `SignatureError`.** Passing a non-`Buffer`,
+non-string body used to throw `SignatureError`, so a caller's programming error — Track D
+forgetting a raw-body parser — surfaced as a forged-webhook alert.
+
+That is precisely the conflation `SignatureError` and `InboundParseError` exist to prevent,
+pointing the other way, and it is the more dangerous direction: **a security alert that is
+really a config bug trains people to ignore the alert.** Every inbound webhook would fail
+on day one of production, the dashboard would show a flood of signature failures, and the
+real cause is one missing content-type parser.
+
+Now its own class with code `raw_body_required`, `retryable: false`, and a message that
+names the fix rather than describing the symptom. The test asserts it is a
+`RawBodyRequiredError` and explicitly **not** a `SignatureError`, and covers `42`, `null`,
+`undefined`, an object and an array.
+
+Recorded for Track D under `## Requests to other tracks`, with the Fastify parser they need.
 
 ## Decisions made
 
