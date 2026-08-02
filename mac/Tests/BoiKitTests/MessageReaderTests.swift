@@ -6,11 +6,17 @@ enum Fixture {
 
     /// Repo root, derived from this file's location rather than the working directory,
     /// which `swift test` does not guarantee.
+    ///
+    /// FOUR deletions, not three. The first strips the file name and lands on the
+    /// directory holding it, so three lands on `mac/` and a fourth is needed to clear
+    /// it. `FoundationTests.swift` shipped with three and its comments are off by one
+    /// step throughout -- see NOTES.md.
     static var repositoryRoot: URL {
         URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()   // BoiKitTests
-            .deletingLastPathComponent()   // Tests
-            .deletingLastPathComponent()   // mac
+            .deletingLastPathComponent()   // .../mac/Tests/BoiKitTests
+            .deletingLastPathComponent()   // .../mac/Tests
+            .deletingLastPathComponent()   // .../mac
+            .deletingLastPathComponent()   // repo root
     }
 
     /// Track A's assigned fixture database — CONTRACTS.md section 9.
@@ -326,6 +332,11 @@ final class SourceGuardTests: XCTestCase {
     private static let fileWatcherTokens = ["FS" + "Events",
                                             "makeFileSystem" + "ObjectSource"]
 
+    /// Every hand-written Swift file under `mac/`.
+    ///
+    /// `.build` is skipped: it holds compiler output and generated shims derived from
+    /// these same sources, not source anyone wrote. The Definition of Done's
+    /// `grep -rn` over `mac/` covers it anyway.
     private func swiftSources() throws -> [(path: String, body: String)] {
         let root = Fixture.repositoryRoot.appendingPathComponent("mac")
         guard let walker = FileManager.default.enumerator(atPath: root.path) else {
@@ -333,6 +344,7 @@ final class SourceGuardTests: XCTestCase {
         }
         var sources: [(String, String)] = []
         for case let relative as String in walker where relative.hasSuffix(".swift") {
+            if relative.hasPrefix(".build/") { continue }
             let url = root.appendingPathComponent(relative)
             sources.append((relative, try String(contentsOf: url, encoding: .utf8)))
         }

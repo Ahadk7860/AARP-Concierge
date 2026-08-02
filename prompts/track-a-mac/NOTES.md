@@ -13,6 +13,14 @@ happened, what you tried, and whether it is still open.
 
 Format: `[prompt NN] <OPEN | RESOLVED> — <what and what you tried>`
 
+`[prompt 01] RESOLVED` — the user installed **Xcode 16.4** (build `16F6`, the newest
+release supporting macOS Sequoia; Xcode 26.6+ requires Tahoe) and ran
+`sudo xcode-select -s /Applications/Xcode.app/Contents/Developer`. Xcode 16.4 ships
+Swift 6.1.2 (6.1.2.1.2) — byte-identical to the Command Line Tools toolchain that was
+already active — so the switch added XCTest and changed nothing about how this code
+compiles. `swift test --package-path mac` now exits 0 with 23 tests, 0 failures. The
+original report follows.
+
 `[prompt 01] OPEN` — **`swift test --package-path mac` cannot run on this host: Xcode
 is not installed, so the toolchain has no XCTest.** This blocks the test-based
 Definition of Done items in every prompt in this track, not just `01`.
@@ -56,6 +64,26 @@ Every entry names the prompt where it surfaced.
 
 `[prompt 01]` None. § 10's stated WAL property reproduces exactly on this track's
 fixture: `mode=ro` → 9637 rows, frozen-open → 9636.
+
+`[prompt 01] Contract amendment pulled forward, re-verified, no effect on 01.` The user
+merged `main` into this branch twice mid-prompt (`039c6ed`, `abe5510`), the second
+carrying a `CONTRACTS.md` amendment. Per `WORKTREE-PROTOCOL.md` I re-ran the whole
+prompt `01` Definition of Done against the amended tree — all green, and the green run
+reported below was already against it.
+
+What the amendment adds lands on **prompt 05**, not the reader: nearest-rank half-up
+percentiles pinned so Swift and Python cannot disagree on `p90_len_chars`;
+`voice_pack_version = "vp_" + sha256(canonical_json)[:8]` over
+`{contact_id, scope, register, exemplars}` with sorted keys, no whitespace and
+`ensure_ascii=false`; register computed **before** redaction, not after; name redaction
+that must not assume `[A-Z]` because the corpus is lowercase texting; and an explicit
+statement that guard three is a regression alarm rather than a proof, since it compares
+verbatim and anything redaction rewrote no longer matches. Carrying these into `05`.
+
+Also regenerated `.env` from the amended `.env.example`, which gained
+`BOI_DEV_USER_SALT=boi-dev-salt-do-not-ship-0001` — a fixed dev salt shared with Track B
+so `contact_id` agrees across the Swift and Python implementations. Needed from prompt
+`04` onward; unused in `01`.
 
 ## Shared file changes
 
@@ -113,6 +141,36 @@ Format: `[prompt NN] → Track <X>: <what you need and why>`
 
 Anywhere the implementation departs from what the prompt described, and why. A
 deviation is not a failure — an unrecorded one is.
+
+`[prompt 01] I changed two lines in the foundation-authored
+mac/Tests/BoiKitTests/FoundationTests.swift. Read this one.` The moment the suite could
+actually run, both of its fixture-loading tests failed:
+
+```
+The file "healthy.json" couldn't be opened because there is no such file.
+  NSFilePath=<repo>/mac/contracts/fixtures/digest/healthy.json
+```
+
+The path walks up from `#filePath` with three `deletingLastPathComponent()` calls,
+commented `// BoiKitTests`, `// Tests`, `// mac`. The comments are off by one step: the
+*first* call strips the file name and lands on the directory containing it, so three
+calls land on `mac/`, not the repo root, and `contracts/` was being looked up under
+`mac/`. It needs four. My own `Fixture.repositoryRoot` had the identical bug because I
+copied the pattern from this file; that is what broke my WAL test and my source-guard
+test in the same run.
+
+The fix is one added `.deletingLastPathComponent()` in each of the two tests, plus
+corrected comments. **No assertion, threshold, type, or test was changed, removed,
+skipped, or marked pending.** The change is strictly strengthening: before it, both
+tests threw on `Data(contentsOf:)` and none of their assertions about `digest.v1` and
+`voice_pack.v1` ever executed. After it, all of them run and pass — including
+`corpus.message_count == 83_887`, `health == .fixable`, `relationships.count == 5`,
+`yu.momentum_90d < 0.1`, and the voice-pack `n_exemplars == exemplars.count`.
+
+It is committed **on its own** (`109baf4`) so the diff is unambiguous, and flagged here
+because a fresh-context reviewer reading a rewritten foundation harness should not have
+to guess at intent. The bug was undetectable before this session: the suite had never
+been runnable on this machine, so nothing had ever exercised those two paths.
 
 `[prompt 01] The forbidden tokens are spelled as concatenated fragments in the
 source-guard test` — `"im" + "mutable"`, `"FS" + "Events"`. The Definition of Done
