@@ -13,10 +13,16 @@ public enum ChatSchema {
     /// Columns this track depends on. Anything not listed here is a column we may read
     /// opportunistically but must never require.
     public static let required: [String: Set<String>] = [
+        // cache_has_attachments is required because the decoder metric depends on it:
+        // attachment-only rows must be classified from Apple's own attachment evidence,
+        // never from the decoder's output. A decoder that grades its own failures as
+        // "that one was just a photo" exonerates itself.
         "message": ["ROWID", "guid", "text", "handle_id", "service", "date",
-                    "is_from_me", "associated_message_type", "attributedBody"],
+                    "is_from_me", "associated_message_type", "attributedBody",
+                    "cache_has_attachments"],
         "chat": ["ROWID", "guid", "style", "chat_identifier"],
         "chat_message_join": ["chat_id", "message_id"],
+        "message_attachment_join": ["message_id", "attachment_id"],
         "handle": ["ROWID", "id"],
     ]
 

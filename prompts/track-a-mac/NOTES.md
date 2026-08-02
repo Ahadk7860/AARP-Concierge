@@ -150,8 +150,40 @@ Format: `[prompt NN] → Track <X>: <what you need and why>`
 Anywhere the implementation departs from what the prompt described, and why. A
 deviation is not a failure — an unrecorded one is.
 
-`[prompt 03] THE 2% BAR IS NOT MET AS THE METRIC IS CURRENTLY DEFINED — 2.26%. I did not
-redefine it to pass. This needs the user's decision.`
+`[prompt 03] RESOLVED by contract amendment (CONTRACTS.md § 10, 2 Aug). The bar is now
+decoder failures only, under 0.5%. Measured: 0.0300%. GREEN.`
+
+```
+rows with a blob    94,158
+decoder failures        30
+failure share       0.0300%    bar < 0.5%    PASS
+```
+
+Two things changed, and the second is the one that matters:
+
+1. `meetsBar` is now `decoderFailureShare < 0.005`. `unrecoverableShare` is still
+   computed and logged with **no bar attached** — it is a real corpus statistic that
+   prompt 06's health check should see, and a corpus that is mostly photos is a real
+   user segment rather than a broken decoder. Two tests pin the split from both sides:
+   a 60%-attachment corpus must pass the decoder bar, and a decoder failing 10% of
+   blobs must fail it even though that is only 1% of the corpus.
+
+2. **Attachment-only is now classified from `cache_has_attachments` and
+   `message_attachment_join`, never from the decoder's own output** — the contract is
+   explicit that a decoder grading its own failures as "that one was just a photo" is
+   self-exoneration. This immediately cost me 30 rows: previously *all* 1,642
+   placeholder-only blobs were written off as attachments, but only 1,612 have
+   attachment evidence. The other **30 are now counted as decoder failures**, which is
+   what they always were. The share is 0.0300% rather than 0.0000% because of it.
+
+   `cache_has_attachments` and `message_attachment_join` are now in
+   `ChatSchema.required`, so a schema where they are absent fails loudly rather than
+   silently reclassifying every attachment as a decoder failure.
+
+The original report follows.
+
+`[prompt 03] THE 2% BAR WAS NOT MET AS ORIGINALLY DEFINED — 2.26%. I did not
+redefine it to pass; the contract was amended instead.`
 
 Real corpus, 94,652 messages: **65.23% → 2.26%** unrecoverable. The bar is "under 2%",
 so as written this criterion is **red**.
@@ -432,12 +464,18 @@ behave the way I would have guessed.
    cannot compute the path to grant by walking up one level — it has to resolve the
    responsible process.
 
-3. **That direct parent is version-numbered — `claude-code/2.1.219/` — which is
-   `CONTRACTS.md` § 11 item 10 in the wild.** If TCC ever bound to a versioned inner
-   bundle, every auto-update would silently drop the grant, and the symptom would be a
-   sync that stops with no error. Boi's own bundle must keep its privileged I/O in a
-   stable outer bundle path, and the fleet-wide heartbeat alarm should ship regardless,
-   exactly as item 10 assumes.
+3. **That direct parent is version-numbered — `claude-code/2.1.219/` — and this is
+   `CONTRACTS.md` § 11 item 10 observed in the wild.** Item 10 asks whether an FDA grant
+   survives a Sparkle auto-update and tells us to assume it may not. Here is why that
+   assumption is right and why the consequence is worse than per-user breakage: if TCC
+   binds to a versioned inner bundle, **an auto-update silently drops the grant for the
+   entire fleet at once**. Every Mac stops syncing on the same day, none of them raise
+   an error, and the first signal is briefs quietly going stale across the whole user
+   base simultaneously. That is the strongest argument yet for the fleet-wide heartbeat
+   alarm: a per-user "your Mac hasn't checked in" notice is a support ticket, but a
+   fleet-wide drop is an outage nobody is paged for. Boi's own bundle must keep every
+   privileged read inside a stable outer bundle path, and the heartbeat alarm has to
+   ship regardless of how confident we are about the path.
 
 4. **The grant does not apply to an already-running process.** After granting, the
    identical query still returned `authorization denied`; it only worked after Claude

@@ -257,14 +257,15 @@ final class MessageReaderTests: XCTestCase {
             CREATE TABLE message (ROWID INTEGER PRIMARY KEY, guid TEXT, text TEXT,
                                   handle_id INTEGER, service TEXT, date INTEGER,
                                   is_from_me INTEGER, associated_message_type INTEGER,
-                                  attributedBody BLOB);
+                                  attributedBody BLOB, cache_has_attachments INTEGER);
             CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER,
                                             message_date INTEGER);
+            CREATE TABLE message_attachment_join (message_id INTEGER, attachment_id INTEGER);
             INSERT INTO handle VALUES (1, '+15550100001', 'iMessage');
             -- the same person, reached two ways: SMS thread and iMessage thread
             INSERT INTO chat VALUES (1, 'SMS;-;+15550100001', 45, '+15550100001', 'SMS');
             INSERT INTO chat VALUES (2, 'iMessage;-;+15550100001', 45, '+15550100001', 'iMessage');
-            INSERT INTO message VALUES (1, 'MSG-1', 'hi', 1, 'iMessage', 700000000000000000, 0, 0, NULL);
+            INSERT INTO message VALUES (1, 'MSG-1', 'hi', 1, 'iMessage', 700000000000000000, 0, 0, NULL, 0);
             INSERT INTO chat_message_join VALUES (1, 1, 700000000000000000);
             INSERT INTO chat_message_join VALUES (2, 1, 700000000000000000);
             """])

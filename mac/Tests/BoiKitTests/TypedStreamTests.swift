@@ -183,17 +183,43 @@ final class TextCoverageTests: XCTestCase {
 
         XCTAssertEqual(coverage.total, 100)
         XCTAssertEqual(coverage.unrecoverableShare, 0.01, accuracy: 0.0001)
-        XCTAssertTrue(coverage.meetsBar)
         // Without the decoder, the two recovered rows would also have been lost.
         XCTAssertEqual(coverage.shareWithoutDecoder, 0.03, accuracy: 0.0001)
     }
 
-    func testTheBarIsStrictlyUnderTwoPercent() {
+    /// A corpus that is overwhelmingly photos must NOT fail the decoder bar. This is
+    /// the whole point of the split: unrecoverableShare is reported and never barred.
+    func testAPhotoHeavyCorpusDoesNotFailTheDecoderBar() {
         var coverage = TextCoverage()
-        for _ in 0..<98 { coverage.record(message(.column, hasBlob: false)) }
-        for _ in 0..<2 { coverage.record(message(.unrecoverable)) }
-        XCTAssertEqual(coverage.unrecoverableShare, 0.02, accuracy: 0.0001)
-        XCTAssertFalse(coverage.meetsBar, "exactly 2% must not pass a bar of 'under 2%'")
+        for _ in 0..<40 { coverage.record(message(.column, hasBlob: false)) }
+        for _ in 0..<60 { coverage.record(message(.attachmentOnly)) }
+
+        XCTAssertEqual(coverage.unrecoverableShare, 0.60, accuracy: 0.0001)
+        XCTAssertEqual(coverage.decoderFailureShare, 0, accuracy: 0.0001)
+        XCTAssertTrue(coverage.meetsBar,
+                      "a corpus of photos is a real user segment, not a broken decoder")
+    }
+
+    /// And a genuinely broken decoder must fail it even on a corpus that looks healthy.
+    func testABrokenDecoderFailsTheBarEvenWhenMostRowsHaveText() {
+        var coverage = TextCoverage()
+        for _ in 0..<900 { coverage.record(message(.column, hasBlob: false)) }
+        for _ in 0..<90 { coverage.record(message(.attributedBody)) }
+        for _ in 0..<10 { coverage.record(message(.unrecoverable, hasBlob: true)) }
+
+        XCTAssertEqual(coverage.rowsWithBlob, 100)
+        XCTAssertEqual(coverage.decoderFailureShare, 0.10, accuracy: 0.0001)
+        XCTAssertFalse(coverage.meetsBar)
+        // Only 1% of the corpus, so the old bar would have called this fine.
+        XCTAssertEqual(coverage.unrecoverableShare, 0.01, accuracy: 0.0001)
+    }
+
+    func testTheBarIsStrictlyUnderItsThreshold() {
+        var coverage = TextCoverage()
+        for _ in 0..<995 { coverage.record(message(.attributedBody)) }
+        for _ in 0..<5 { coverage.record(message(.unrecoverable, hasBlob: true)) }
+        XCTAssertEqual(coverage.decoderFailureShare, 0.005, accuracy: 0.000001)
+        XCTAssertFalse(coverage.meetsBar, "exactly 0.5% must not pass a bar of 'under'")
     }
 
     /// A row with no blob at all is empty at the source; a row whose blob failed to

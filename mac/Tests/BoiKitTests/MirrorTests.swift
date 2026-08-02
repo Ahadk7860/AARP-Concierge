@@ -16,9 +16,10 @@ enum ChatDBBuilder {
         CREATE TABLE message (ROWID INTEGER PRIMARY KEY, guid TEXT, text TEXT,
                               handle_id INTEGER, service TEXT, date INTEGER,
                               is_from_me INTEGER, associated_message_type INTEGER,
-                              attributedBody BLOB);
+                              attributedBody BLOB, cache_has_attachments INTEGER);
         CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER,
                                         message_date INTEGER);
+        CREATE TABLE message_attachment_join (message_id INTEGER, attachment_id INTEGER);
         INSERT INTO handle VALUES (1, '+15550100001', 'iMessage');
         INSERT INTO chat VALUES (1, 'iMessage;-;+15550100001', 45, '+15550100001', 'iMessage');
         """
@@ -35,9 +36,10 @@ enum ChatDBBuilder {
         let date = appleNanos(daysAgo: daysAgo, from: now)
         var sql = """
             INSERT INTO message (ROWID, guid, text, handle_id, service, date, is_from_me,
-                                 associated_message_type, attributedBody)
+                                 associated_message_type, attributedBody,
+                                 cache_has_attachments)
             VALUES (\(rowID), '\(guid)', '\(text)', 1, 'iMessage',
-                    \(date), \(isFromMe), 0, NULL);
+                    \(date), \(isFromMe), 0, NULL, 0);
             """
         if join {
             sql += "\nINSERT INTO chat_message_join VALUES (1, \(rowID), \(date));"

@@ -248,7 +248,10 @@ public struct MessageReader {
         SELECT m.ROWID, m.guid, m.text, m.attributedBody, m.handle_id,
                h.id, m.service, m.date, m.is_from_me,
                coalesce(m.associated_message_type, 0), min(c.ROWID), c.chat_identifier,
-               coalesce(c.style, 0)
+               coalesce(c.style, 0),
+               coalesce(m.cache_has_attachments, 0)
+                 OR EXISTS (SELECT 1 FROM message_attachment_join maj
+                            WHERE maj.message_id = m.ROWID)
         FROM message m
         """
 
@@ -323,6 +326,7 @@ public struct MessageReader {
         // THE SINGLE TEXT PATH: `text` when the column has it, otherwise decode the
         // typedstream. Nothing downstream reads attributedBody directly.
         let blob = row.blob(3)
+        let hasAttachment = row.bool(13)
         let columnText = row.string(2).flatMap { $0.isEmpty ? nil : $0 }
 
         var text = columnText
@@ -335,7 +339,8 @@ public struct MessageReader {
                 text = recovered
                 source = .attributedBody
             case .attachmentOnly:
-                source = .attachmentOnly
+                // Apple's evidence decides this, not the decoder's own output.
+                source = hasAttachment ? .attachmentOnly : .unrecoverable
             case .undecodable:
                 source = .unrecoverable
             }

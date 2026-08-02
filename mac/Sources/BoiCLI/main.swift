@@ -203,8 +203,8 @@ case "text-coverage":
         StructuredLog.emit("text.coverage", fields: coverage.logFields)
         if !coverage.meetsBar {
             StructuredLog.emit("text.coverage.below_bar", level: .warn, fields: [
-                "share_unrecoverable": coverage.unrecoverableShare,
-                "bar": TextCoverage.maximumUnrecoverableShare,
+                "share_decoder_failures": coverage.decoderFailureShare,
+                "bar": TextCoverage.maximumDecoderFailureShare,
             ])
         }
     } catch {

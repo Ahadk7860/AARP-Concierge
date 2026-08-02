@@ -7,8 +7,15 @@ import Foundation
 /// measurement: the unrecoverable share must fall from roughly 47% to under 2%.
 public struct TextCoverage: Sendable {
 
-    /// The bar prompt 03 sets.
-    public static let maximumUnrecoverableShare = 0.02
+    /// CONTRACTS.md § 10, corrected 2 Aug. The bar is on **decoder failures only**:
+    /// rows where `attributedBody` is non-null and decoding yields no text, over rows
+    /// where `attributedBody` is non-null.
+    ///
+    /// The original criterion — every row with no recoverable text, under 2% — measures
+    /// how photo-heavy a corpus is, not whether the decoder works. A perfect decoder
+    /// scored 2.26% against it on a real 94,652-message corpus. This one is the number
+    /// that says the typedstream port is correct.
+    public static let maximumDecoderFailureShare = 0.005
 
     public var total = 0
     /// Rows whose `text` column was populated.
@@ -25,6 +32,9 @@ public struct TextCoverage: Sendable {
     /// opposed to having no blob at all. A row with neither is empty at the source and
     /// no decoder can help it; a row with a blob we could not read is a decoder bug.
     public var unrecoverableWithBlob = 0
+    /// Every row carrying a non-null `attributedBody`, whatever became of it. The
+    /// denominator of the decoder bar.
+    public var rowsWithBlob = 0
 
     /// Corpus span, reported alongside coverage.
     ///
@@ -53,10 +63,18 @@ public struct TextCoverage: Sendable {
         return Double(count) / Double(total)
     }
 
-    /// EVERY row with no usable text, attachment messages included. This is the
-    /// number prompt 03's "under 2%" bar is measured against, deliberately left as the
-    /// strictest available reading — see NOTES.md.
+    /// EVERY row with no usable text, attachment messages included.
+    ///
+    /// REPORTED, NEVER BARRED. A user whose messages are mostly photos is a real
+    /// segment, and prompt 06's health check should see this number — but it is a
+    /// corpus statistic, not a decoder metric, and it must never gate a decoder.
     public var unrecoverableShare: Double { share(unrecoverable + attachmentOnly) }
+
+    /// THE DECODER BAR: blobs that yielded no text, over all blobs.
+    public var decoderFailureShare: Double {
+        guard rowsWithBlob > 0 else { return 0 }
+        return Double(unrecoverableWithBlob) / Double(rowsWithBlob)
+    }
 
     /// Text we believe exists and failed to get. The decoder-quality number.
     /// `unrecoverableShare` minus the attachment messages, which never had text.
@@ -68,10 +86,11 @@ public struct TextCoverage: Sendable {
         share(fromAttributedBody + unrecoverable + attachmentOnly)
     }
 
-    public var meetsBar: Bool { unrecoverableShare < Self.maximumUnrecoverableShare }
+    public var meetsBar: Bool { decoderFailureShare < Self.maximumDecoderFailureShare }
 
     public mutating func record(_ message: ChatMessage) {
         total += 1
+        if message.hasAttributedBody { rowsWithBlob += 1 }
         switch message.textSource {
         case .column: fromColumn += 1
         case .attributedBody: fromAttributedBody += 1
@@ -110,7 +129,10 @@ public struct TextCoverage: Sendable {
             "share_attachment_only": rounded(share(attachmentOnly)),
             "share_lost_text": rounded(lostTextShare),
             "share_unrecoverable_without_decoder": rounded(shareWithoutDecoder),
-            "meets_two_percent_bar": meetsBar,
+            "rows_with_blob": rowsWithBlob,
+            "decoder_failures": unrecoverableWithBlob,
+            "share_decoder_failures": rounded(decoderFailureShare),
+            "meets_decoder_bar": meetsBar,
             "span_days": spanDays,
             "looks_like_one_year_retention_cap": looksLikeOneYearRetentionCap,
         ]
