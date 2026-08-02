@@ -184,15 +184,61 @@ before you begin.
 
 ---
 
-## Step 4 — Between prompts
+## Step 4 — Between prompts, and how much to batch
 
-When a track reports a completed prompt:
+### The gate
 
-1. Skim the Definition of Done checklist and the evidence it pasted. **Evidence, not
-   assertions** — if it claims a test passes without pasting the output, ask for the
-   output.
-2. If it looks right, reply with the next prompt:
-   `Open prompts/track-<x>-<slug>/02-<slug>.md and execute only that prompt.`
+After **every** prompt, batched or not, the track runs:
+
+```bash
+bash scripts/gate.sh <letter>
+```
+
+Typecheck, tests, lint, fixture validation, ownership, and a check that no test suite
+silently skipped. Non-zero on any failure. **A track running a batch stops at the first
+red gate** — it does not continue, and it does not "fix it in the next prompt."
+
+The gate runs typecheck *first*, deliberately. A suite that cannot compile reports zero
+failures, which reads identically to a suite that passed. That is not hypothetical: one
+track shipped a prompt whose test file imported two symbols its own mock did not export.
+Twenty-nine tests skipped, `typecheck` was reported green, and the checklist came back
+clean. No human reading the report could have caught it. The gate can.
+
+### How much to batch
+
+Batch **prompts with no dependency edge between them.** Stop at any prompt whose output
+everything downstream consumes. The reasoning is about blast radius, not speed: a wrong
+assumption inside a batch of independent prompts stays contained, while the same
+assumption made in a prompt others build on compounds into every prompt after it.
+
+| Track | Batch | Check in after |
+|---|---|---|
+| A | `01` alone · then `02`+`03` · then `04`+`05` · then `06` · then `07` | 5 stops, not 7 |
+| B | `01` alone · then `02`+`03`+`04` · then `05` | 3 stops, not 5 |
+| C | `01` alone · then `02`+`03` · then `04` | 3 stops, not 4 |
+| D | `01` alone · then `02`+`03`+`04`+`05` · then `06` | 3 stops, not 6 |
+
+Prompt `01` is never batched in any track. It establishes the environment and the
+foundational abstraction the rest of the track builds on, so an error there is the one
+that compounds furthest.
+
+Within a batch: **one commit per prompt, and one gate run per prompt.** Batching changes
+how often *you* look, not how often the track verifies itself. A batch delivered as one
+commit has thrown away the per-prompt audit trail and should be sent back.
+
+### To start a batch
+
+```
+Run prompts 02 and 03. After each one: commit, then run `bash scripts/gate.sh <letter>`
+and paste the output. If the gate is red, stop there and report — do not start the next
+prompt. Report both prompts together when the batch is done.
+```
+
+### When a track reports
+
+1. Read the **gate output**, not the prose summary. A green checklist with no pasted
+   command output is not evidence.
+2. If it looks right, send the next batch.
 3. If something is off, say what and let it fix it in the same session — that session
    holds the context.
 4. Update the status table in `prompts/README.md`.
@@ -202,15 +248,7 @@ affects every track consuming that contract — follow the contract-amendment pr
 `prompts/WORKTREE-PROTOCOL.md` before letting anyone continue.
 
 **Reordering within a track:** read the `Depends on` column in `TRACK.md`, not the
-numbering. The real reorder opportunities in this plan:
-
-| Track | Independent of each other | What it buys |
-|---|---|---|
-| A | `02` and `03`, both depend only on `01` | if the mirror stalls, do the typedstream decoder |
-| A | `04` and `05`, both depend on `02`+`03` | digest and voice pack in either order |
-| B | `02`, `03`, `04` — all depend only on `01` | the committed fixtures decouple them completely |
-| C | `02` and `03`, both depend only on `01` | adapter and inbound in either order |
-| D | `02`, `03`, `04`, `05` — all depend only on `01` | four-way reorder after the schema |
+numbering. If `02` is blocked and `03` depends only on `01`, run `03`.
 
 ## Step 5 — When a track finishes
 
