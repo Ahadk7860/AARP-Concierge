@@ -29,7 +29,11 @@ OWN_NOTES="^prompts/track-${LETTER}-[a-z-]+/(NOTES\.md|TRACK\.md)$"
 # coding against, and nobody finds out until integration.
 FROZEN='^(contracts/|prompts/(CONTRACTS|MERGE-POLICY|TRACK-REVIEW|WORKTREE-PROTOCOL)\.md$|cloud/shared/src/|intelligence/boi_intel/(contracts\.py|providers/fake\.py)$|mac/Sources/BoiKit/Contracts\.swift$)'
 
-changed="$(git diff --name-only "$BASE"...HEAD || true)"
+if ! git rev-parse --verify --quiet "$BASE" >/dev/null; then
+  echo "cannot resolve base ref '$BASE' — refusing to report a pass I cannot justify" >&2
+  exit 2
+fi
+changed="$(git diff --name-only "$BASE"...HEAD)"
 
 frozen_hits="$(echo "$changed" | grep -E "$FROZEN" || true)"
 if [ -n "$frozen_hits" ]; then
