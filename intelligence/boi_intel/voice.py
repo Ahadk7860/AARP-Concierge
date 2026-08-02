@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from boi_intel import chatdb
+from boi_intel import env as env_module
 from boi_intel.redact import redact
 from boi_intel.register import compute_register
 
@@ -79,27 +80,8 @@ def resolve_salt(explicit: str | None = None) -> bytes:
 
 
 def _from_dotenv(key: str) -> str | None:
-    """Read one key out of the worktree's `.env`.
-
-    Deliberately not `python-dotenv`: adding a dependency is an append to a shared
-    manifest, and this is fifteen lines. Real environment variables win over the file.
-    """
-    path = pathlib.Path(__file__).resolve().parents[2] / ".env"
-    if not path.exists():
-        return None
-    for line in path.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        name, _, raw = line.partition("=")
-        if name.strip() != key:
-            continue
-        # Strip an inline comment, then surrounding quotes.
-        value = raw.split(" #", 1)[0].strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-            value = value[1:-1]
-        return value or None
-    return None
+    """Kept as a named seam because tests patch it; the logic lives in `env`."""
+    return env_module.from_dotenv(key)
 
 
 class VoicePackLeakError(RuntimeError):

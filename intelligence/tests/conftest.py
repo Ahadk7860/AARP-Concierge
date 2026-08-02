@@ -3,17 +3,49 @@
 The schema is imported from `scripts/make_synthetic_chatdb.py` rather than restated
 here. A second copy would drift, and a test that passes against a stale schema proves
 nothing about the reader that runs against the real one.
+
+This module also blocks outbound sockets for the whole suite — see `_no_network`.
 """
 
 from __future__ import annotations
 
 import importlib.util
 import pathlib
+import socket
 import sqlite3
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 APPLE_EPOCH = datetime(2001, 1, 1, tzinfo=UTC)
+
+
+class NetworkUseInTests(RuntimeError):
+    """A unit test tried to open a socket."""
+
+
+@pytest.fixture(autouse=True)
+def _no_network(monkeypatch):
+    """Make "the unit suite never touches the network" structural, not a claim.
+
+    CONTRACTS.md § 9 is explicit that live calls belong in the eval harness and that the
+    default test path is `FakeProvider`. A suite that quietly acquires a network
+    dependency does not fail loudly — it fails *randomly*, at a third of the throughput
+    with three agents on one key, and reads as flaky tests rather than as
+    misconfiguration. So the socket is taken away rather than trusted.
+
+    This binds in-process sockets only. The suite shells out to `validate_fixtures.py`
+    and `check_voice_pack_leak.py` in subprocesses; both only read local files.
+    """
+
+    def blocked(self, *args, **kwargs):
+        raise NetworkUseInTests(
+            "the unit suite must not open a socket — use FakeProvider (CONTRACTS.md section 9)"
+        )
+
+    monkeypatch.setattr(socket.socket, "connect", blocked)
+    monkeypatch.setattr(socket.socket, "connect_ex", blocked)
 
 
 def _load_schema() -> str:

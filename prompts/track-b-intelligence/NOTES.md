@@ -20,6 +20,22 @@ Format: `[prompt NN] <OPEN | RESOLVED> — <what and what you tried>`
   the worktree, flagged here because the other three tracks share the machine and one
   of them may assume a different interpreter.
 
+- `[prompt 03] OPEN — the one live Gemini call cannot be made: GEMINI_API_KEY is not
+  provisioned.` The prompt's Definition of Done asks for one live call producing a
+  valid bundle, and CONTRACTS.md § 7 records the user as the party who acquires this
+  key. `.env` carries `GEMINI_API_KEY=` (empty), inherited from `.env.example`.
+  **This is the only red item across prompts 03 and 04.**
+  How far the path was verified without it: `google-genai` is installed (the `live`
+  extra), `GeminiProvider.preflight()` passes with a key present, and with a deliberately
+  invalid key the adapter builds the request, reaches Google, and comes back
+  `ClientError 400 INVALID_ARGUMENT — API key not valid`. So request construction,
+  transport, and error propagation are all exercised; **only authentication is
+  unproven.** To finish the item: put a real key in `.env` and run
+  `BOI_MODEL_PROVIDER=gemini BOI_ALLOW_LIVE_CALLS=1 python -m boi_intel.draft
+  --voice-pack contracts/fixtures/voice_pack/maya.json --gist
+  contracts/fixtures/gist/maya_action_needed.json`. Both switches are required; either
+  one alone still refuses.
+
 - `[prompt 02] OPEN — the local gist model is not runnable in this environment.`
   Required by the prompt's evidence list, so stated plainly: **no local model was run
   and no model output exists.** `mlx_lm`, `mlx`, `llama_cpp` and `huggingface_hub` are
@@ -232,6 +248,33 @@ test fail (runs are in the report):
 - `[prompt 02]` **Reciprocity is absent from `priority` by construction**, per § 6.
   Scoring uses waiting/unanswered/recency/volume/momentum only.
 
+### Prompt 03 — drafter
+
+- `[prompt 03]` **The gist id is rendered into the suffix.** `providers/fake.py` replays
+  on `match.gist_id_contains` being present in the suffix, so without it every fixture
+  draft raises `LookupError`. It doubles as the reproducibility handle in the log.
+- `[prompt 03]` **`draft()` takes a `validate` callable, defaulting to `None`.** Prompt
+  04 fills that seam. What ships here is only the structural gates the drafter cannot
+  avoid — two candidates, non-empty, within `maxLength`, stances distinct — expressed in
+  the frozen `VALIDATOR_FAILURES` vocabulary so 04 extends rather than replaces them.
+  `validator.passed` on a bundle produced by 03 alone therefore means *structurally*
+  valid, not *semantically* validated. A test asserts the seam is called and can reject.
+- `[prompt 03]` **The unit suite cannot open a socket.** `conftest.py` has an autouse
+  fixture that replaces `socket.socket.connect`/`connect_ex` with a raise, and a test
+  asserts the guard is armed. "No network" is now a property rather than a claim. It
+  binds in-process sockets only; the suite's subprocess calls are to
+  `validate_fixtures.py` and `check_voice_pack_leak.py`, which read local files.
+- `[prompt 03]` **An unknown `BOI_MODEL_PROVIDER` raises instead of falling back to
+  `fake`.** A typo that silently yields `FakeProvider` would make an eval run in 05
+  report recorded transcripts as if they were live model output.
+- `[prompt 03]` **`boi_intel/env.py` is new**, and `voice._from_dotenv` now delegates to
+  it. Providers read `GEMINI_API_KEY`/`KIMI_API_KEY`/`BOI_ALLOW_LIVE_CALLS` through it,
+  so a key in `.env` works without exporting anything. Real environment variables still
+  win over the file. `voice._from_dotenv` kept its name because a test patches it.
+- `[prompt 03]` **Both live adapters require two independent switches** —
+  `BOI_MODEL_PROVIDER` *and* `BOI_ALLOW_LIVE_CALLS=1` — plus a key, and `preflight()` is
+  separate from `complete()` so 05 can check a whole matrix without sending anything.
+
 ## Decisions made
 
 Choices the prompt left open that you had to resolve: a library, a data structure, an
@@ -279,6 +322,20 @@ track may have chosen differently.
 Anything you noticed that the plan did not anticipate, including work that should exist
 but is not in any track's scope. This is often the most useful section at review time.
 
+- **`[prompt 03]` `contracts/fixtures/draft_bundle/maya_pass.json` has `chars` off by one
+  on both candidates.** Declared 56 and 78; the actual `len(text)` is 57 and 79. The
+  schema only requires `chars >= 1`, so `validate_fixtures.py` passes it. This
+  implementation always sets `chars = len(text)` and a test asserts it. Flagging because
+  Track D embeds `draft_bundle.v1` in `brief.v1` and may well use `chars` for layout —
+  if it does, it will be one character out on every fixture-derived draft. The fixture
+  is frozen so this track did not touch it.
+- **`[prompt 03]` My own first version of the cache-key test did not bite**, and I only
+  found out by trying to break it. It asserted against the pure `cache_key()` helper,
+  which proves the helper is correct and says nothing about what `draft()` feeds it —
+  so mixing the gist into the key inside the drafter passed the whole suite. The test
+  now reads the key back off the drafter's own log line. Worth stating plainly because
+  the prompt warned about exactly this ("prompt-cache structure is real, not nominal")
+  and I still wrote the nominal version first.
 - **`[prompt 02]` The worst bug in this prompt was over-population, not
   under-population.** `re.IGNORECASE` was being applied to the capitalised-name and
   place patterns, which turns `[A-Z][a-z]{1,20}` into "any word" — so `facts.names`
