@@ -150,6 +150,46 @@ Format: `[prompt NN] → Track <X>: <what you need and why>`
 Anywhere the implementation departs from what the prompt described, and why. A
 deviation is not a failure — an unrecorded one is.
 
+`[prompt 03] THE 2% BAR IS NOT MET AS THE METRIC IS CURRENTLY DEFINED — 2.26%. I did not
+redefine it to pass. This needs the user's decision.`
+
+Real corpus, 94,652 messages: **65.23% → 2.26%** unrecoverable. The bar is "under 2%",
+so as written this criterion is **red**.
+
+But **measured decoder failures are zero**. The 2.26% breaks down as:
+
+| bucket | rows | share | what it is |
+|---|---|---|---|
+| attachment-only | 1,642 | 1.73% | blob decodes cleanly, payload is only `U+FFFC` |
+| no text, no blob | 501 | 0.53% | nothing in the row to recover |
+| **blob present but undecodable** | **0** | **0.00%** | **would be a decoder bug — there are none** |
+
+The attachment-only classification is not my decoder's opinion of itself. Checked
+against two independent tables: **1,612 of the 1,642** carry
+`cache_has_attachments = 1` **and** a row in `message_attachment_join`. They are image
+and file messages. There is no text in them and never was.
+
+So the question is what "share of messages with no recoverable text" means. Counting an
+image message as unrecoverable measures *how much of the corpus is photos*, not whether
+the decoder works. Excluding them gives 0.53%, and excluding the 501 rows that have
+nothing to recover either gives 0.00%.
+
+**I have left `meetsBar` computed on the strictest reading, so it reports `false` and
+nothing silently passes.** `TextCoverage` now exposes `lostTextShare` alongside
+`unrecoverableShare` so both are visible, but the bar itself is untouched. Per prompt
+03's frozen-anchors block — "If a check must change for a legitimate reason, stop.
+Record it in NOTES.md and report it. Do not change it and continue" — I am stopping
+here rather than choosing the definition that turns the checklist green.
+
+`[prompt 03] Decoder: a port of crabstep's reading strategy, not a link against it.`
+Prompt 03 says port `crabstep` (extracted from `imessage-exporter`) rather than invent a
+parser, and this is a port: same signature validation, same variable-width integer
+encoding (`0x81`/`0x82`/`0x83` introducing 2/4/8-byte little-endian values), same
+approach of taking the string payload that follows the `NSString` class chain. It is a
+port rather than a call because `crabstep` is Rust — linking it means adding a Rust
+toolchain and a build plugin to a Swift package for one decoder, and `Package.swift`'s
+dependency list is foundation-owned. No new dependencies were added.
+
 `[prompt 02] CORRECTION — the trailing window was anchored only on the wall clock, which
 left a hole after any outage longer than the window.` Caught by the user in review.
 
@@ -371,6 +411,74 @@ re-scan and dedup by `guid`.
 
 Anything you noticed that the plan did not anticipate, including work that should exist
 but is not in any track's scope. This is often the most useful section at review time.
+
+`[prompt 03 → 07] Hand-executing the FDA grant surfaced four things prompt 07 has to
+engineer around.` I performed the onboarding step 07 must automate, and it did not
+behave the way I would have guessed.
+
+1. **You cannot detect Full Disk Access by looking at the file.** `ls -la` on
+   `~/Library/Messages/chat.db` succeeded and reported a 151 MB file *while access was
+   denied* — `stat` is not gated, `open` is. The failure arrives as SQLite
+   `authorization denied` at connection time. So 07's readiness poll must attempt a real
+   read-only open and discard it; anything cheaper reports success before the grant
+   exists.
+
+2. **The responsible process is the outer app bundle, not the process that made the
+   call.** The chain was
+   `zsh` ← `…/Application Support/Claude/claude-code/2.1.219/claude.app/…/claude` ←
+   `/Applications/Claude.app/Contents/Helpers/disclaimer` ←
+   `/Applications/Claude.app/Contents/MacOS/Claude`. The grant had to go to
+   `/Applications/Claude.app`. Granting the direct parent would not have worked, and 07
+   cannot compute the path to grant by walking up one level — it has to resolve the
+   responsible process.
+
+3. **That direct parent is version-numbered — `claude-code/2.1.219/` — which is
+   `CONTRACTS.md` § 11 item 10 in the wild.** If TCC ever bound to a versioned inner
+   bundle, every auto-update would silently drop the grant, and the symptom would be a
+   sync that stops with no error. Boi's own bundle must keep its privileged I/O in a
+   stable outer bundle path, and the fleet-wide heartbeat alarm should ship regardless,
+   exactly as item 10 assumes.
+
+4. **The grant does not apply to an already-running process.** After granting, the
+   identical query still returned `authorization denied`; it only worked after Claude
+   was quit and reopened. So 07's flow cannot be "deep link → poll → proceed" — a poll
+   alone waits forever on a process that can never see the grant. It must be
+   "deep link → poll → **relaunch** → verify", and the relaunch is load-bearing rather
+   than a nicety. This is the auto-relaunch step in 07's scope, and this is the reason
+   it exists.
+
+`[prompt 03] THE CORPUS SPAN IS EXACTLY 365 DAYS. That is Apple's Keep Messages ceiling,
+and prompt 06 has to detect it.` First message 2025-08-02, last 2026-08-02, span
+**365 days** on a 94,652-message corpus. This is not a user who started texting a year
+ago — it is `Settings → Messages → Keep Messages = 1 Year` quietly deleting everything
+older. `TextCoverage.looksLikeOneYearRetentionCap` flags a span of 364–366 days, and
+prompt 06's health check should treat it as `fixable` with the one-tap remedy (switch to
+Forever) rather than reporting `thin` or, worse, computing confident momentum numbers
+against a corpus with an invisible floor. Every "first contact" date in this corpus is
+suspect for the same reason: a relationship that started in 2019 reads as starting on
+2025-08-02.
+
+`[prompt 03] Real-blob test needs a local fixture and will fail on a machine without it.`
+Flagged explicitly because prompt 03 asks for it to be. The five real blobs live in
+`/tmp/boi-a/typedstream-fixtures.json` — outside the repo entirely, so they cannot be
+committed even by accident. `testRealBlobsDecodeToTheStringAppleStoredInTheTextColumn`
+**fails** rather than skipping when the fixture is absent, because a skip would hide the
+only test that exercises a real typedstream and leave the suite green while the decoder
+rotted. The failure message carries the exact regeneration command:
+
+    swift run --package-path mac boi-cli capture-typedstream-fixture \
+      --db ~/Library/Messages/chat.db
+
+A reviewer on this machine has the fixture (it is this track's assigned scratch). One on
+a fresh machine, or after `/tmp` is cleared, must run that command first. That is the
+tradeoff prompt 03 anticipated when it said to say so rather than delete the test.
+
+`[prompt 03] No message content anywhere.` The decoder ran against the real database
+read-only. Nothing was written outside `/tmp/boi-a`. Assertions on real blobs use
+`XCTAssertTrue(a == b)` rather than `XCTAssertEqual`, because `XCTAssertEqual` prints
+both values on failure and that output lands in logs and reports. The diagnostic scripts
+used to categorise the 2.26% printed counts and byte offsets only, and live in
+`/tmp/boi-a`, uncommitted.
 
 `[prompt 01] The fixture's WAL-only row belongs to no chat, which changes which count
 the WAL check can be run against.` `_write_uncheckpointed_wal_row` inserts into

@@ -24,6 +24,7 @@ func flag(_ name: String) -> Bool { arguments.contains("--" + name) }
 
 let usage = """
 usage: boi-cli scan --db <path> [options]
+       boi-cli text-coverage --db <path>
        boi-cli sync --db <path> --mirror <path> [--search <text>]
                     [--trailing-window-days <n>]
 
@@ -191,6 +192,40 @@ case "sync":
         }
     } catch {
         StructuredLog.emit("sync.failed", level: .error, fields: ["detail": "\(error)"])
+        exit(1)
+    }
+
+case "text-coverage":
+    guard let databasePath = value("db") else { fail(usage) }
+    do {
+        // Counts only. No message text is printed, logged, or written anywhere.
+        let coverage = try TextCoverage.measure(reader: try MessageReader(path: databasePath))
+        StructuredLog.emit("text.coverage", fields: coverage.logFields)
+        if !coverage.meetsBar {
+            StructuredLog.emit("text.coverage.below_bar", level: .warn, fields: [
+                "share_unrecoverable": coverage.unrecoverableShare,
+                "bar": TextCoverage.maximumUnrecoverableShare,
+            ])
+        }
+    } catch {
+        StructuredLog.emit("text.coverage.failed", level: .error, fields: ["detail": "\(error)"])
+        exit(1)
+    }
+
+case "capture-typedstream-fixture":
+    // Writes real message text to a LOCAL, GITIGNORED file under this track's scratch
+    // directory so the decoder has a regression anchor. Never committed, never logged.
+    guard let databasePath = value("db") else { fail(usage) }
+    do {
+        let out = value("out") ?? TypedStreamFixture.defaultPath
+        guard out.hasPrefix("/tmp/boi-a/") else {
+            fail("refusing to write real message data outside /tmp/boi-a")
+        }
+        let captured = try TypedStreamFixture.capture(from: try MessageReader(path: databasePath),
+                                                      to: out)
+        StructuredLog.emit("fixture.captured", fields: ["samples": captured, "path": out])
+    } catch {
+        StructuredLog.emit("fixture.failed", level: .error, fields: ["detail": "\(error)"])
         exit(1)
     }
 

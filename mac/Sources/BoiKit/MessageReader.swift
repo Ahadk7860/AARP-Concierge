@@ -4,9 +4,16 @@ import Foundation
 public struct ChatMessage: Sendable, Equatable {
     public let rowID: Int64
     public let guid: String
-    /// `nil` when the row carries its body in `attributedBody` instead. Prompt 03
-    /// decodes those; until then a NULL-text row is a row with no text.
+    /// The message body, from the `text` column **or** recovered from `attributedBody`.
+    ///
+    /// This is the single text path. Everything downstream — mirror, metrics, voice
+    /// pack — reads this and never touches `attributedBody` itself, so there is exactly
+    /// one place where "half the corpus is missing" can be introduced or fixed.
+    /// `nil` means no recoverable text, which the coverage report counts.
     public let text: String?
+    /// Where `text` came from. Carried so the coverage metric is a property of the data
+    /// rather than a separate re-scan that could drift from what the reader does.
+    public let textSource: TextSource
     public let hasAttributedBody: Bool
     public let handleRowID: Int64
     public let handle: String?
@@ -17,6 +24,22 @@ public struct ChatMessage: Sendable, Equatable {
     public let chatRowID: Int64
     public let chatIdentifier: String?
     public let chatStyle: Int
+
+    /// Where a message's text came from.
+    public enum TextSource: String, Sendable, Codable {
+        /// The `text` column was populated.
+        case column
+        /// Recovered by decoding `attributedBody`.
+        case attributedBody = "attributed_body"
+        /// The blob decoded cleanly and contained no text — only the attachment
+        /// placeholder. An image or file message. There is nothing here for a decoder
+        /// to recover and never was, so this is not a failure; it is a message that is
+        /// not made of words.
+        case attachmentOnly = "attachment_only"
+        /// No text column, and either no blob at all or a blob that would not decode.
+        /// This is the only bucket that can contain a decoder bug.
+        case unrecoverable
+    }
 }
 
 /// Which rows a scan keeps.
@@ -170,6 +193,17 @@ public struct MessageReader {
             """))
     }
 
+    /// The raw typedstream for one row. Used only to capture local test fixtures; the
+    /// reading path itself never hands a blob to a caller.
+    public func attributedBody(forROWID rowID: Int64) throws -> Data? {
+        var blob: Data?
+        try database.query("SELECT attributedBody FROM message WHERE ROWID = ?",
+                           bind: [rowID]) { row in
+            blob = row.blob(0)
+        }
+        return blob
+    }
+
     // MARK: - Scan
 
     /// One full pass. `loadMessages: false` keeps the row set out of memory when the
@@ -211,7 +245,7 @@ public struct MessageReader {
     // MARK: - SQL
 
     private static let selectClause = """
-        SELECT m.ROWID, m.guid, m.text, m.attributedBody IS NOT NULL, m.handle_id,
+        SELECT m.ROWID, m.guid, m.text, m.attributedBody, m.handle_id,
                h.id, m.service, m.date, m.is_from_me,
                coalesce(m.associated_message_type, 0), min(c.ROWID), c.chat_identifier,
                coalesce(c.style, 0)
@@ -286,11 +320,33 @@ public struct MessageReader {
     static let appleSecondsCeiling: Int64 = 100_000_000_000
 
     private static func message(from row: ChatDatabase.Row) -> ChatMessage {
-        ChatMessage(
+        // THE SINGLE TEXT PATH: `text` when the column has it, otherwise decode the
+        // typedstream. Nothing downstream reads attributedBody directly.
+        let blob = row.blob(3)
+        let columnText = row.string(2).flatMap { $0.isEmpty ? nil : $0 }
+
+        var text = columnText
+        let source: ChatMessage.TextSource
+        if columnText != nil {
+            source = .column
+        } else {
+            switch blob.map(TypedStream.decode) ?? .undecodable {
+            case .text(let recovered):
+                text = recovered
+                source = .attributedBody
+            case .attachmentOnly:
+                source = .attachmentOnly
+            case .undecodable:
+                source = .unrecoverable
+            }
+        }
+
+        return ChatMessage(
             rowID: row.int64(0),
             guid: row.string(1) ?? "",
-            text: row.string(2),
-            hasAttributedBody: row.bool(3),
+            text: text,
+            textSource: source,
+            hasAttributedBody: blob != nil,
             handleRowID: row.int64(4),
             handle: row.string(5),
             service: row.string(6),

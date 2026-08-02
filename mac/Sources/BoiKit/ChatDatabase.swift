@@ -158,6 +158,14 @@ public final class ChatDatabase {
             return String(cString: raw)
         }
 
+        /// Raw bytes, or nil when the column is NULL or empty.
+        public func blob(_ column: Int32) -> Data? {
+            guard let pointer = sqlite3_column_blob(statement, column) else { return nil }
+            let count = Int(sqlite3_column_bytes(statement, column))
+            guard count > 0 else { return nil }
+            return Data(bytes: pointer, count: count)
+        }
+
         public func isNull(_ column: Int32) -> Bool {
             sqlite3_column_type(statement, column) == SQLITE_NULL
         }
