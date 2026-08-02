@@ -22,9 +22,12 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
+import os
 import pathlib
 import re
 import sys
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from boi_intel import chatdb
@@ -37,11 +40,65 @@ MAX_EXEMPLAR_CHARS = 200
 MIN_SENT_FOR_CONTACT_PACK = 5
 GLOBAL_FALLBACK_FILENAME = "global_fallback.json"
 
-# Development default. The real salt is issued once by POST /v1/pair and lives in the
-# macOS Keychain (CONTRACTS.md section 7); it never has a default in production.
-DEFAULT_SALT = b"boi-dev-salt"
+# Tracks A and B must derive the SAME contact_id for the same handle, or every
+# integration diff is noise. CONTRACTS.md section 7 fixes one dev salt for both, in
+# `.env`. The real salt arrives from POST /v1/pair and is never this value — so there
+# is deliberately no hardcoded fallback here: an unset variable raises.
+SALT_ENV_VAR = "BOI_DEV_USER_SALT"
 
 _WS = re.compile(r"\s+")
+
+
+@dataclass(frozen=True)
+class _Exemplar:
+    """A candidate exemplar: already redacted and truncated, with its timestamp kept
+    so sampling can still spread across the time range."""
+
+    text: str
+    ts_epoch: int
+
+
+def resolve_salt(explicit: str | None = None) -> bytes:
+    """`--salt`, else `$BOI_DEV_USER_SALT`, else the same variable from `.env`.
+
+    No hardcoded default: a silent fallback would let Track A and Track B derive
+    different contact ids for the same person and the mismatch would surface as an
+    unexplainable `--compare` diff rather than as a missing-configuration error.
+    """
+    if explicit:
+        return explicit.encode("utf-8")
+    value = os.environ.get(SALT_ENV_VAR) or _from_dotenv(SALT_ENV_VAR)
+    if not value:
+        raise RuntimeError(
+            f"{SALT_ENV_VAR} is not set. Copy .env.example to .env inside this "
+            f"worktree, or pass --salt. CONTRACTS.md section 7 fixes one dev salt "
+            f"shared by Tracks A and B so contact ids agree."
+        )
+    return value.encode("utf-8")
+
+
+def _from_dotenv(key: str) -> str | None:
+    """Read one key out of the worktree's `.env`.
+
+    Deliberately not `python-dotenv`: adding a dependency is an append to a shared
+    manifest, and this is fifteen lines. Real environment variables win over the file.
+    """
+    path = pathlib.Path(__file__).resolve().parents[2] / ".env"
+    if not path.exists():
+        return None
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, _, raw = line.partition("=")
+        if name.strip() != key:
+            continue
+        # Strip an inline comment, then surrounding quotes.
+        value = raw.split(" #", 1)[0].strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        return value or None
+    return None
 
 
 class VoicePackLeakError(RuntimeError):
@@ -96,15 +153,17 @@ def _spread_order(k: int) -> list[int]:
     return out
 
 
-def _select_exemplars(candidates: list[chatdb.SentMessage]) -> list[chatdb.SentMessage]:
+def _select_exemplars(candidates: list[_Exemplar]) -> list[_Exemplar]:
     """Up to 40, sampled across the time range and across lengths.
 
-    Deduplicated first: a corpus where the user typed "ok" two hundred times would
-    otherwise produce forty identical exemplars, which teaches a drafter nothing and
-    makes the content hash hypersensitive to a single new message.
+    Deduplicated on the **final** string — after redaction and truncation, not before.
+    Two different 600-character messages that share their first 200 characters truncate
+    to the same exemplar, and two different phone numbers both redact to `[phone]`; a
+    dedup that runs on the raw text calls those distinct and ships the same string
+    twenty times inside a nominally-40-exemplar pack.
     """
     seen: set[str] = set()
-    unique: list[chatdb.SentMessage] = []
+    unique: list[_Exemplar] = []
     for m in candidates:
         key = _norm(m.text)
         if key and key not in seen:
@@ -116,9 +175,9 @@ def _select_exemplars(candidates: list[chatdb.SentMessage]) -> list[chatdb.SentM
 
     n_buckets = min(MAX_EXEMPLARS, 8)
     size = len(unique) / n_buckets
-    buckets: list[list[chatdb.SentMessage]] = []
+    buckets: list[list[_Exemplar]] = []
     for b in range(n_buckets):
-        lo, hi = int(round(b * size)), int(round((b + 1) * size))
+        lo, hi = math.floor(b * size), math.floor((b + 1) * size)
         buckets.append(unique[lo:hi])
 
     # Within each time bucket, walk the length distribution rather than the clock.
@@ -127,7 +186,7 @@ def _select_exemplars(candidates: list[chatdb.SentMessage]) -> list[chatdb.SentM
         by_len = sorted(bucket, key=lambda m: (len(m.text), m.ts_epoch, m.text))
         orders.append([by_len[i] for i in _spread_order(len(by_len))])
 
-    picked: list[chatdb.SentMessage] = []
+    picked: list[_Exemplar] = []
     depth = 0
     while len(picked) < MAX_EXEMPLARS and any(depth < len(o) for o in orders):
         for order in orders:
@@ -142,18 +201,24 @@ def _select_exemplars(candidates: list[chatdb.SentMessage]) -> list[chatdb.SentM
 
 def _content_hash(contact_id: str | None, scope: str, register: dict,
                   exemplars: list[str]) -> str:
-    """Deterministic content hash, prefixed `vp_`.
+    """Deterministic content hash, exactly as pinned by CONTRACTS.md section 6:
+    `"vp_" + sha256(canonical_json)[:8]`.
 
-    `as_of` is excluded on purpose: two builds of an unchanged corpus must produce the
-    same version, or the drafter's prompt cache is invalidated every morning for no
-    reason. Changing one exemplar, or one register statistic, changes it.
+    The payload is `{contact_id, scope, register, exemplars}` with sorted keys and no
+    whitespace. Two properties are contractual, not stylistic:
+
+    - **`as_of` is excluded.** Two builds of an unchanged corpus must produce the same
+      version, or the drafter's prompt cache is invalidated every morning for nothing.
+    - **`ensure_ascii=False`.** Emoji in `top_emoji` are hashed as the characters
+      themselves, never as `\\uXXXX` escapes. Swift has no `ensure_ascii=True`
+      equivalent, so escaping here would guarantee a mismatch with Track A's port.
     """
     payload = json.dumps(
         {"contact_id": contact_id, "scope": scope, "register": register,
          "exemplars": exemplars},
         sort_keys=True, separators=(",", ":"), ensure_ascii=False,
     )
-    return "vp_" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
+    return "vp_" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:8]
 
 
 def _serialize(messages: list[chatdb.SentMessage], contact_id: str | None,
@@ -171,9 +236,25 @@ def _serialize(messages: list[chatdb.SentMessage], contact_id: str | None,
                 "7). Fix the query; do not filter here."
             )
 
-    selected = _select_exemplars(messages)
-    exemplars = [_truncate(redact(m.text)) for m in selected]
-    exemplars = [e for e in exemplars if e.strip()]
+    # The register comes off the RAW corpus, before a single character is redacted.
+    # CONTRACTS.md sections 6 and 7 require this order and explain the failure it
+    # prevents: redacting first turns "Hey Sarah how are you" into "[name] how are
+    # you", which stops counting as a greeting and flips the leading character to
+    # lowercase, so a sentence-case writer is reported as `lowercase_no_period` with a
+    # third of their true greeting rate — while every register test still passes.
+    register = compute_register(
+        [m.text for m in messages],
+        [m.ts_epoch for m in messages],
+    )
+
+    # Redaction applies to the exemplars alone, and the pipeline order matters:
+    # redact -> truncate -> dedup -> sample. Dedup must see the final string, or
+    # forty exemplars can be twenty-one unique ones (see `_select_exemplars`).
+    candidates = [
+        _Exemplar(text=_truncate(redact(m.text)), ts_epoch=m.ts_epoch) for m in messages
+    ]
+    candidates = [c for c in candidates if c.text.strip()]
+    exemplars = [c.text for c in _select_exemplars(candidates)]
 
     if len(exemplars) > MAX_EXEMPLARS:
         raise ValueError(f"{len(exemplars)} exemplars exceeds the cap of {MAX_EXEMPLARS}")
@@ -182,11 +263,6 @@ def _serialize(messages: list[chatdb.SentMessage], contact_id: str | None,
             raise ValueError(
                 f"exemplar of {len(e)} chars exceeds the cap of {MAX_EXEMPLAR_CHARS}"
             )
-
-    register = compute_register(
-        [redact(m.text) for m in messages],
-        [m.ts_epoch for m in messages],
-    )
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -200,9 +276,14 @@ def _serialize(messages: list[chatdb.SentMessage], contact_id: str | None,
     }
 
 
-def build_packs(db_path: str, salt: bytes = DEFAULT_SALT,
+def build_packs(db_path: str, salt: bytes | None = None,
                 as_of: str | None = None) -> dict[str, dict]:
-    """Every per-contact pack plus the global fallback, keyed by output filename."""
+    """Every per-contact pack plus the global fallback, keyed by output filename.
+
+    `salt` defaults to `$BOI_DEV_USER_SALT` (see `resolve_salt`), which Track A uses
+    too, so both implementations derive identical contact ids from the same handle.
+    """
+    salt = salt if salt is not None else resolve_salt()
     as_of = as_of or datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     con = chatdb.connect(db_path)
     try:
@@ -298,7 +379,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--ignore", nargs="*", default=[], metavar="FIELD",
                     help="top-level fields to skip when comparing, e.g. as_of")
     ap.add_argument("--salt", default=None,
-                    help="user_salt for contact_id HMAC; development default otherwise")
+                    help=f"user_salt for the contact_id HMAC; ${SALT_ENV_VAR} otherwise")
     ap.add_argument("--as-of", dest="as_of", default=None,
                     help="ISO 8601 UTC timestamp to stamp on every pack")
     a = ap.parse_args(argv)
@@ -314,8 +395,7 @@ def main(argv: list[str] | None = None) -> int:
     if not a.db or not a.out:
         ap.error("--db and --out are both required unless --compare is given")
 
-    salt = a.salt.encode("utf-8") if a.salt else DEFAULT_SALT
-    packs = build_packs(a.db, salt=salt, as_of=a.as_of)
+    packs = build_packs(a.db, salt=resolve_salt(a.salt), as_of=a.as_of)
     for path in write_packs(packs, a.out):
         pack = packs[path.name]
         print(f"{path}  {pack['voice_pack_version']}  "

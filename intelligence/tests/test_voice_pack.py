@@ -13,15 +13,17 @@ import sys
 from datetime import UTC
 
 import pytest
-from boi_intel import chatdb
+from boi_intel import chatdb, voice
 from boi_intel.voice import (
     MAX_EXEMPLAR_CHARS,
     MAX_EXEMPLARS,
     MIN_SENT_FOR_CONTACT_PACK,
+    SALT_ENV_VAR,
     VoicePackLeakError,
     build_packs,
     diff_packs,
     main,
+    resolve_salt,
     write_packs,
 )
 from conftest import make_db, received, sent
@@ -418,3 +420,153 @@ def test_tapbacks_are_excluded_from_the_corpus(tmp_path):
     pack = build_packs(str(db), as_of="2026-08-01T00:00:00Z")["global_fallback.json"]
     assert len(pack["exemplars"]) == 6
     assert not any("Loved" in e for e in pack["exemplars"])
+
+
+# ------------------------------------- CONTRACTS.md sections 6 and 7, added by amendment
+
+
+def test_register_reflects_a_sentence_case_writer_who_opens_with_a_name(tmp_path):
+    """The end-to-end form of the ordering rule.
+
+    Redaction must run on exemplars only. If it runs on the corpus first, every one of
+    these "Hey Sarah ..." messages becomes "[name] ...", which stops counting as a
+    greeting and flips the leading character to lower case — reporting a sentence-case
+    writer as `lowercase_no_period` with a greeting rate of zero.
+    """
+    lines = [
+        "Hey Sarah how are you",
+        "Hey Sarah did you see that",
+        "Hey Sarah are we still on",
+        "Hey Sarah call me back",
+        "Hey Sarah what time works",
+        "Hey Sarah just checking in",
+        "That sounds good to me",
+        "Let me know either way",
+        "Sounds like a plan",
+        "I can do that",
+    ]
+    db = make_db(tmp_path / "chat.db", [sent(t) for t in lines])
+    pack = build_packs(str(db), as_of="2026-08-01T00:00:00Z")["global_fallback.json"]
+
+    assert pack["register"]["punctuation"] == "sentence_case_no_period"
+    assert pack["register"]["greeting_rate"] == 0.6
+
+    # ...and the exemplars are still redacted. Both halves of the rule, one test.
+    assert any("[name]" in e for e in pack["exemplars"])
+    assert not any("Sarah" in e for e in pack["exemplars"])
+
+
+def test_lowercase_third_party_names_do_not_reach_exemplars(tmp_path):
+    db = make_db(tmp_path / "chat.db", [
+        sent("ill ask john smith about it"),
+        sent("talked to maria garcia yesterday"),
+        sent("ok that works for me"),
+        sent("lmk when ur free"),
+        sent("im down whenever"),
+        sent("haha yeah exactly"),
+    ])
+    packs = build_packs(str(db), as_of="2026-08-01T00:00:00Z")
+
+    for name, pack in packs.items():
+        blob = _texts(pack)
+        for fragment in ("john smith", "maria garcia", "john", "smith", "garcia"):
+            assert fragment not in blob, f"{fragment!r} survived in {name}"
+    assert any("[name]" in e for e in packs["global_fallback.json"]["exemplars"])
+
+
+def test_exemplars_are_unique_after_redaction_and_truncation(tmp_path):
+    """Dedup must see the final string.
+
+    Both groups below are distinct as raw text and identical once truncated to 200
+    characters or once a phone number becomes `[phone]`. Deduplicating before those
+    steps ships the same exemplar many times inside a nominally-40-exemplar pack.
+    """
+    shared_prefix = "so anyway " * 30  # 300 chars, identical across the group
+    messages = [sent(f"{shared_prefix} tail number {i}") for i in range(60)]
+    messages += [sent(f"call me at 555-010-{i:04d} when you land") for i in range(60)]
+    db = make_db(tmp_path / "chat.db", messages, spacing_hours=1)
+
+    pack = build_packs(str(db), as_of="2026-08-01T00:00:00Z")["global_fallback.json"]
+    exemplars = pack["exemplars"]
+
+    assert len(exemplars) == len(set(exemplars)), "duplicate exemplars after truncation"
+    assert pack["n_exemplars"] == len(set(exemplars))
+
+
+def test_voice_pack_version_is_eight_hex_characters(tmp_path):
+    """CONTRACTS.md section 6 pins `"vp_" + sha256(canonical_json)[:8]`."""
+    import re
+
+    db = make_db(tmp_path / "chat.db", [sent(f"line number {i}") for i in range(8)])
+    for pack in build_packs(str(db), as_of="2026-08-01T00:00:00Z").values():
+        assert re.fullmatch(r"vp_[0-9a-f]{8}", pack["voice_pack_version"]), pack[
+            "voice_pack_version"
+        ]
+
+
+def test_hash_payload_leaves_non_ascii_unescaped():
+    """`ensure_ascii=false` is contractual. Swift has no `ensure_ascii=True` analogue,
+    so escaping emoji here would guarantee a mismatch with Track A's port."""
+    import hashlib
+
+    register = {"top_emoji": ["😭"], "median_len_chars": 4}
+    got = voice._content_hash("h_0123456789abcdef", "contact", register, ["ok 😭"])
+
+    payload_unescaped = json.dumps(
+        {"contact_id": "h_0123456789abcdef", "scope": "contact",
+         "register": register, "exemplars": ["ok 😭"]},
+        sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    )
+    payload_escaped = json.dumps(
+        {"contact_id": "h_0123456789abcdef", "scope": "contact",
+         "register": register, "exemplars": ["ok 😭"]},
+        sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+    )
+
+    expected = "vp_" + hashlib.sha256(payload_unescaped.encode()).hexdigest()[:8]
+    wrong = "vp_" + hashlib.sha256(payload_escaped.encode()).hexdigest()[:8]
+
+    assert got == expected
+    assert got != wrong, "the two encodings must actually differ, or this proves nothing"
+
+
+def test_the_hash_covers_the_register_not_just_the_exemplars():
+    a = voice._content_hash("h_01234567", "contact", {"median_len_chars": 10}, ["ok"])
+    b = voice._content_hash("h_01234567", "contact", {"median_len_chars": 11}, ["ok"])
+    assert a != b
+
+
+# --------------------------------------------------------------------------- salt
+
+
+def test_salt_comes_from_the_environment(monkeypatch, tmp_path):
+    monkeypatch.setenv(SALT_ENV_VAR, "salt-from-env")
+    assert resolve_salt() == b"salt-from-env"
+    assert resolve_salt("explicit-wins") == b"explicit-wins"
+
+
+def test_the_dev_salt_is_the_one_track_a_shares(monkeypatch):
+    """`.env` is generated from `.env.example`, which fixes one dev salt for Tracks A
+    and B so both derive identical contact ids for the same handle."""
+    monkeypatch.delenv(SALT_ENV_VAR, raising=False)
+    example = (ROOT / ".env.example").read_text()
+    assert f"{SALT_ENV_VAR}=" in example, ".env.example no longer pins the shared salt"
+    assert resolve_salt() == voice._from_dotenv(SALT_ENV_VAR).encode()
+
+
+def test_resolve_salt_refuses_to_invent_a_default(monkeypatch):
+    """No hardcoded fallback: a silent default would let Track A and Track B derive
+    different contact ids and surface as an unexplainable --compare diff."""
+    monkeypatch.delenv(SALT_ENV_VAR, raising=False)
+    monkeypatch.setattr(voice, "_from_dotenv", lambda key: None)
+    with pytest.raises(RuntimeError, match=SALT_ENV_VAR):
+        resolve_salt()
+
+
+def test_the_same_salt_yields_the_same_contact_id_across_runs(tmp_path):
+    db = make_db(tmp_path / "chat.db", [sent(f"line {i}") for i in range(8)])
+    a = build_packs(str(db), salt=b"fixed", as_of="2026-08-01T00:00:00Z")
+    b = build_packs(str(db), salt=b"fixed", as_of="2026-08-01T00:00:00Z")
+    c = build_packs(str(db), salt=b"different", as_of="2026-08-01T00:00:00Z")
+    assert list(a) == list(b)
+    assert list(a) != list(c), "a different salt must produce different contact ids"

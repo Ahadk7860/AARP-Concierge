@@ -58,23 +58,36 @@ _WORD = re.compile(r"[a-z']+")
 BURST_GAP_SECONDS = 300
 
 
-def _percentile(sorted_vals: list[int], q: float) -> int:
-    """Nearest-rank percentile. Integer in, integer out — no interpolation, so the
-    Swift port has nothing to disagree with about float rounding."""
-    if not sorted_vals:
-        return 1
-    k = max(1, min(len(sorted_vals), int(round(q * len(sorted_vals) + 0.5))))
-    return sorted_vals[k - 1]
+def _percentile(sorted_vals: list[int], p: int) -> int:
+    """Nearest-rank, half-up, exactly as pinned by CONTRACTS.md section 6.
 
+    The index is `ceil(p/100 * n) - 1`, clamped to `[0, n-1]`, with `p` an integer
+    percentile. This is pinned because the obvious implementations disagree: Python's
+    `round()` is banker's rounding and Swift's `rounded()` is half-away-from-zero, so
+    the two produce different `p90_len_chars`, therefore a different
+    `voice_pack_version`, therefore a `--compare` diff nobody can explain.
 
-def _median_int(sorted_vals: list[int]) -> int:
+    The ceiling is computed in **integer** arithmetic — `(p * n + 99) // 100` — rather
+    than as `ceil(p / 100 * n)`. `p / 100` is not exactly representable in binary
+    floating point, so the float form is one unlucky rounding away from stepping to the
+    next index, and it would do so in only one of the two languages. Integers have no
+    such case. Same rule, no representable-value footnote for Track A to trip over.
+    """
     if not sorted_vals:
         return 1
     n = len(sorted_vals)
-    mid = n // 2
-    if n % 2:
-        return sorted_vals[mid]
-    return (sorted_vals[mid - 1] + sorted_vals[mid]) // 2
+    idx = (p * n + 99) // 100 - 1
+    return sorted_vals[max(0, min(n - 1, idx))]
+
+
+def _median_int(sorted_vals: list[int]) -> int:
+    """The median is p50 under the same nearest-rank rule.
+
+    CONTRACTS.md section 6 pins percentiles but not the median specifically. Defining
+    it as p50 rather than as "average the two middle values" means Tracks A and B have
+    exactly ONE rounding rule to agree on instead of two.
+    """
+    return _percentile(sorted_vals, 50)
 
 
 def _punctuation_class(text: str) -> str | None:
@@ -116,7 +129,14 @@ def _round(x: float, places: int = 4) -> float:
 
 
 def compute_register(texts: list[str], timestamps: list[int] | None = None) -> dict:
-    """Register block for a list of REDACTED sent messages.
+    """Register block for a list of RAW, UNREDACTED sent messages.
+
+    **Raw is mandatory, not an optimisation** (CONTRACTS.md sections 6 and 7). Redacting
+    first corrupts the very statistics the pack exists to carry: "Hey Sarah how are you"
+    becomes "[name] how are you", which stops counting as a greeting and flips the first
+    character to lowercase — so a sentence-case writer who opens with a name is reported
+    as `lowercase_no_period` with a third of their true `greeting_rate`. Every register
+    test still passes and the register is wrong. Redaction applies to `exemplars` only.
 
     `timestamps` are epoch seconds, aligned with `texts`, and are used only for
     `avg_msgs_per_burst`. Omitting them yields the schema minimum of 1.0 rather than
@@ -167,7 +187,7 @@ def compute_register(texts: list[str], timestamps: list[int] | None = None) -> d
 
     return {
         "median_len_chars": max(1, _median_int(lengths)),
-        "p90_len_chars": max(1, _percentile(lengths, 0.9)),
+        "p90_len_chars": max(1, _percentile(lengths, 90)),
         "emoji_rate": _round(with_emoji / n),
         "top_emoji": _by_frequency(emoji_counter, 5),
         "punctuation": punctuation,

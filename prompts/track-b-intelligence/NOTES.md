@@ -26,8 +26,14 @@ Anything `prompts/CONTRACTS.md` does not specify, specifies wrongly, or specifie
 way that does not work in practice. You may not edit it — record it here and report.
 Every entry names the prompt where it surfaced.
 
-- `[prompt 01]` **`ruff check intelligence` cannot exit zero, and the cause is a frozen
-  file.** Prompt 01's Definition of Done requires it. At the foundation commit
+- `[prompt 01] RESOLVED by the foundation` — the two gaps below were both closed by
+  `548d125` on `main`, merged forward into this branch. `ruff check intelligence` now
+  exits zero with no suppressions, and `BOI_DEV_USER_SALT` now exists in
+  `.env.example`. Both original entries are kept verbatim underneath, because the
+  commit history is read against them.
+
+- `[prompt 01] CLOSED` **`ruff check intelligence` cannot exit zero, and the cause is a
+  frozen file.** Prompt 01's Definition of Done requires it. At the foundation commit
   (`d95d215`), before this track wrote a line, `ruff check intelligence` already
   reported **9 errors**: 8 in `intelligence/boi_intel/contracts.py` (1×`I001`,
   7×`UP045`) and 1 in `intelligence/tests/test_foundation.py` (`I001`). `contracts.py`
@@ -43,7 +49,7 @@ Every entry names the prompt where it surfaced.
   `intelligence/tests/`, so the reviewer sees an unambiguous "changed nothing outside
   my own new files" diff.
 
-- `[prompt 01]` **No `user_salt` is defined for Track B.** `voice_pack.v1.contact_id`
+- `[prompt 01] CLOSED` **No `user_salt` is defined for Track B.** `voice_pack.v1.contact_id`
   must match `^h_[0-9a-f]{8,32}$` and CONTRACTS.md § 3 defines it as
   `HMAC(user_salt, normalized_handle)` computed on the Mac, with the salt issued by
   `POST /v1/pair` and stored in the Keychain (§ 7). Track B has no pairing flow and
@@ -69,13 +75,16 @@ default — another track may pick the same one. Record it and report.
 
 Format: `[prompt NN] needed <resource> — used <what> provisionally / blocked`
 
-- `[prompt 01] needed a user_salt for the contact_id HMAC` — used a `--salt` CLI flag
-  with the module constant `DEFAULT_SALT = b"boi-dev-salt"` **provisionally**. Chose a
-  CLI flag over an env var specifically to avoid appending a name to `.env.example`
-  that Track A or Track D might later define differently. Nothing depends on the value:
-  contact ids are opaque, and Track A's Swift port will pass the real Keychain salt.
-  If the user prefers a named variable, that is a one-line change here plus an append
-  to `.env.example`.
+- `[prompt 01] RESOLVED — needed a user_salt for the contact_id HMAC.` Originally used
+  a `--salt` flag with a provisional module constant `DEFAULT_SALT = b"boi-dev-salt"`.
+  The foundation amendment added `BOI_DEV_USER_SALT` to `.env.example`, shared with
+  Track A, so `DEFAULT_SALT` is **deleted**: `resolve_salt()` now takes `--salt`, else
+  `$BOI_DEV_USER_SALT`, else the same key from this worktree's `.env`, and **raises if
+  none is set**. There is deliberately no hardcoded fallback — a silent default is
+  precisely how Tracks A and B would end up deriving different contact ids for the
+  same person, surfacing as an unexplainable `--compare` diff instead of a
+  missing-configuration error. Changing the salt changes every contact id, so the
+  per-contact filenames in `/tmp/boi-b/out/` differ from those in the first report.
 - `[prompt 01] used only assigned resources otherwise` — scratch `/tmp/boi-b`, fixture
   `/tmp/boi-b/chat.db`, output `/tmp/boi-b/out/`. No port was needed. No live model
   call was made; nothing in this prompt touches a model at all.
@@ -93,18 +102,32 @@ Format: `[prompt NN] → Track <X>: <what you need and why>`
   which reports every differing field by dotted path. Four rules are easy to
   reimplement *plausibly* and still mismatch, so they are called out explicitly:
   1. **`voice_pack_version` excludes `as_of`.** It hashes `{contact_id, scope,
-     register, exemplars}` only, as canonical JSON with sorted keys and
-     `separators=(",", ":")`, then `"vp_" + sha256(...)[:12]`. Including `as_of` would
-     change the version every morning and invalidate the drafter's prompt cache daily.
+     register, exemplars}` only, as canonical JSON with sorted keys,
+     `separators=(",", ":")`, and `ensure_ascii=False`, then `"vp_" + sha256(...)[:8]`
+     — **8 hex characters**, per the CONTRACTS.md § 6 amendment. Emoji in `top_emoji`
+     are hashed as themselves, never as `\uXXXX` escapes.
   2. **Ties in `top_emoji`, `abbreviations` and `apology_openers` break on the value
      itself**, not on insertion order (`register._by_frequency`). Insertion order is
      not reproducible across two languages.
-  3. **Percentiles are nearest-rank with no interpolation**, and the median of an even
-     count is integer floor division. Any float-interpolating percentile will disagree.
-  4. **Exemplar selection is deduplicate → 8 contiguous time buckets → within each
-     bucket walk the length distribution (shortest, longest, then bisection) →
-     round-robin across buckets → re-sort chronologically.** It is deterministic by
-     construction; there is no sampling seed to match.
+  3. **Percentiles are nearest-rank half-up, computed in integer arithmetic:**
+     `(p * n + 99) // 100 - 1`, clamped to `[0, n-1]`. The § 6 formula is
+     `ceil(p/100 * n) - 1`; the integer form is the same rule with no
+     binary-floating-point representability case, since `p / 100` is inexact and the
+     float form is one unlucky rounding from stepping to the next index in one
+     language only. **The median is p50 under this same rule**, not the average of the
+     two middle values — one rounding rule to agree on instead of two.
+  4. **Time-bucket boundaries use `floor`, not `round`**, for the same reason
+     (`voice._select_exemplars`).
+  5. **Exemplar selection is redact → truncate → deduplicate → 8 contiguous time
+     buckets → within each bucket walk the length distribution (shortest, longest,
+     then bisection) → round-robin across buckets → re-sort chronologically.** The
+     dedup runs on the **final** string, after redaction and truncation. Deterministic
+     by construction; there is no sampling seed to match.
+  6. **The register is computed on the RAW corpus, before any redaction**
+     (CONTRACTS.md §§ 6 and 7). Redaction touches `exemplars` only.
+  7. **`contact_id` uses `$BOI_DEV_USER_SALT`** from `.env`, the value § 7 fixes for
+     both tracks, over the normalized handle (`chatdb.normalize_handle`: lowercase,
+     strip non-digits except a leading `+`, add `+1` to a bare 10-digit number).
   Compare with `--ignore as_of` when the two runs are not simultaneous.
 
 ## Deviations from the plan
@@ -129,6 +152,30 @@ deviation is not a failure — an unrecorded one is.
 - `[prompt 01]` The two exemplar caps are enforced with `raise ValueError`, not
   `assert`. `python -O` strips `assert`, and a cap that silently disappears under an
   optimisation flag is not a cap.
+
+### Prompt 01 correction, after the CONTRACTS.md §§ 6 and 7 amendment
+
+Five defects the amendment named, all fixed in the follow-up commit. Each one is now
+covered by a test that was **verified to bite** by reverting the fix and watching the
+test fail (runs are in the report):
+
+1. **The register was computed on the redacted corpus.** This was the real bug — a
+   sentence-case writer who opens with a name was reported as `lowercase_no_period`
+   with a greeting rate of zero, and every register test passed anyway. `_serialize`
+   now calls `compute_register` on raw `m.text` and redacts only the exemplar strings.
+2. **`FULL_NAME` required `[A-Z]`**, so `"ill ask john smith about it"` was untouched
+   in a corpus whose own register is `lowercase_no_period`. Added a lowercase path:
+   a known given name followed by a token that is not a common English word. Given
+   names that are also ordinary words (`will`, `may`, `mark`, `grant`, `hope`, `rose`,
+   …) are deliberately excluded from the list so `"i will call you"` survives intact.
+3. **Dedup ran before truncation and redaction**, so forty exemplars could be twenty-one
+   unique strings. The pipeline is now redact → truncate → dedup → sample, and dedup
+   sees the final string.
+4. **`_percentile` used `round()`** (banker's). Now nearest-rank half-up in integer
+   arithmetic, and the median is p50 under the same rule. Bucket boundaries in
+   `_select_exemplars` moved from `round()` to `floor()` for the same reason.
+5. **The hash was `[:12]`.** Now `[:8]`, as § 6 pins. `ensure_ascii=False` was already
+   correct and is now covered by a test that fails if it ever flips.
 
 ## Decisions made
 
@@ -165,7 +212,17 @@ track may have chosen differently.
 Anything you noticed that the plan did not anticipate, including work that should exist
 but is not in any track's scope. This is often the most useful section at review time.
 
+- **`[prompt 01, correction]` The name allowlist is now a correctness surface.**
+  Lowercase name redaction fires on a closed list of ~700 given names. A name outside
+  the list leaks; a surname that happens to be a common English word is kept. This is
+  a deliberately conservative trade — over-redacting destroys the `punctuation` and
+  `greeting_rate` signals the pack exists to carry — but it is a recall/precision dial
+  someone should look at with real data, not a solved problem. A lone first name
+  (`"ill ask john about it"`) is also still untouched, because CONTRACTS.md § 7 says
+  *full* names.
 - **`scripts/check_voice_pack_leak.py` cannot detect a leak that redaction rewrote.**
+  *(Adopted into CONTRACTS.md § 7 by the amendment — "What guard three does and does
+  not do" now states this in the contract itself. Kept here for history.)*
   It classifies an exemplar as leaked only when the text is found verbatim in the
   inbound half and not in the sent half; anything matching neither is reported as
   "redacted beyond verbatim match" and passes. So an inbound message containing a phone
