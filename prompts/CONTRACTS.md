@@ -298,6 +298,15 @@ Redaction, applied on the Mac before an exemplar is ever serialized: phone numbe
 email addresses, street addresses, dollar amounts, and third-party full names. A
 redacted exemplar is just as good a style sample and carries none of the risk.
 
+**Redaction covers every free-text field in the pack, not just `exemplars`.**
+`register.apology_openers` is the one that catches people out: it holds *verbatim
+message prefixes* — the committed fixture's are `"sorry been mia"` and `"omg sorry"` —
+so a pack whose exemplars are spotless can still carry a phone number or a dollar amount
+into storage through that array. `abbreviations` and `top_emoji` are free strings too.
+Guard one (the Mac) and guard two (`POST /v1/voice-pack`, the `422`) must both scan
+`exemplars`, `register.apology_openers` and `register.abbreviations`. A guard that
+inspects one of four free-text fields is not the guard §7 claims it is.
+
 **Redact the exemplars, not the corpus.** Compute the register from the raw sent
 messages first, then redact only the strings that go into `exemplars`. Redacting first
 corrupts the very statistics the pack exists to carry: `"Hey Sarah how are you"` becomes
