@@ -485,6 +485,15 @@ track may have chosen differently.
 Anything you noticed that the plan did not anticipate, including work that should exist
 but is not in any track's scope. This is often the most useful section at review time.
 
+- **`[checked, no code change]` The 2 Aug decoder/`first_contact_at` amendment does not
+  reach a Track B artifact.** `gist.v1` has no `first_contact_at` and Track B never
+  decodes a typedstream, so the truncation trap has no Track B casualty —
+  `ThreadStats.first_ts` exists but is internal and never serialized. One second-order
+  note for whoever tunes `classify()` later: on a corpus capped by *Keep Messages = 1
+  Year*, `max_gap_days` can only ever see gaps inside the window, so the `revived` state
+  (which needs a ≥90-day prior gap) is undercounted near the boundary, and a thread
+  dormant for longer than the retention window is invisible rather than `dormant`.
+  Windowed statistics — `days_silent`, momentum, the 90-day comparison — are unaffected.
 - **`[prompt 04]` The 2× median length gate may be too tight, and the project's own
   reference drafts are the evidence.** With `maya.json`'s median of 34 the limit is 68
   characters. Of the four recorded "good" candidates across `maya_action_needed.json`
