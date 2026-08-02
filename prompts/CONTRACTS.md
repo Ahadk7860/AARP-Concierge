@@ -120,6 +120,25 @@ Track A (uploads) and Track C (webhook delivery).
 | `DELETE /v1/users/{id}` | delete everything, derived data included | `204` |
 | `POST /v1/webhooks/{provider}` | inbound from transport | `204` · `401 {"error":"bad_signature"}` |
 
+**`/v1/webhooks/{provider}` lives in `cloud/api/`, ratified 2 Aug.** It was in the frozen
+OpenAPI as Track D's surface but no prompt assigned it a path, and prompt `06`'s
+constraints named `cloud/brief/`. Track D wired it into `cloud/api/` and recorded the
+deviation, which is the right call: it belongs with the other HTTP routes, and the
+signature guard has to sit next to the auth middleware rather than in the composer.
+
+**It takes RAW BYTES.** `Channel.normalizeInbound(rawBody: Buffer | string, …)` — retyped
+from `unknown` on 2 Aug, because `unknown` let Track C (which requires bytes, since a
+signature verifies over bytes) and the foundation's `StubChannel` (which cast to an
+object and read `.id`) disagree about what the first argument of a frozen interface
+*means*, with the compiler silent. That is exactly the disagreement a type at a seam
+exists to catch, and `StubChannel` now enforces it too — so a consumer can no longer
+develop against a stub that tolerates what production rejects.
+
+Behind Fastify: register a raw-body content-type parser **before** the JSON parser and
+pass `req.rawBody`. Guard the header — `req.headers["x-boi-signature"]` is
+`string | string[] | undefined`, and a missing one must become `401 bad_signature`,
+never a 500.
+
 Shared error bodies, every endpoint:
 
 ```json
@@ -218,6 +237,15 @@ So, corrected:
 | `digest.ingested` | `{ user_id, digest_id, as_of }` | Track D | Track D (brief) |
 | `brief.due` | `{ user_id, scheduled_for }` | Track D scheduler | Track D composer |
 | `inbound.normalized` | `inbound.v1` | Track C | Track D |
+
+**`inbound.v1.reply_to_message_id` carries the PROVIDER's id** (`lmsg_...`), not Boi's
+own outbound id (`omsg_...`). Track C normalizes what the webhook gave it and cannot know
+which brief item that answers. **Track D owns the translation** — it must keep the
+`omsg_ -> lmsg_` mapping at send time, because `SendResult.message_id` is the only place
+that link ever exists. Without it a reply referencing `lmsg_01J8ZK` never joins back to
+the brief item it answers, and a user's `2` selects nothing.
+*(Corrected 2 Aug: the fixture previously carried `omsg_9001`, which no normalizer could
+produce.)*
 | `line.health_changed` | `{ line_id, from, to, at }` | Track C | Track D |
 
 ---
@@ -559,7 +587,8 @@ unresolved contract code against the placeholder and flag the dependency in `NOT
 | 9 | Does the three-click grant survive macOS 26 (Tahoe)? | MVP ships **Full Disk Access**, which works everywhere | user | before launch, not before merge |
 | 10 | Does an FDA grant survive a Sparkle auto-update? | assume it may not; ship the fleet-wide heartbeat alarm regardless | user | before shipping auto-update |
 | 11 | Can a 3–4B local model produce gists good enough to draft from? | **SQL-only gists ship first** and are the permanent fallback | Track B | prompt `02` |
-| 12 | Gemini Flash-Lite vs Kimi K2.5 on register fidelity | default `gemini-2.5-flash-lite` | Track B | prompt `05`, on the eval harness |
+| 12 | Gemini Flash-Lite vs Kimi K2.5 on register fidelity | **default `gemini-3.5-flash-lite`** (see below) | Track B | prompt `05`, on the eval harness |
+| 12b | ~~`gemini-2.5-flash-lite` as the pinned default~~ | **RESOLVED 2 Aug: retired for new API keys** — returns `404 NOT_FOUND, no longer available to new users`, while still appearing in `models.list()`, so only a real request detects it. Pinned to `gemini-3.5-flash-lite`. | — | done |
 
 **Items 4 through 7 are sales-call questions, not research questions.** Track C must be
 built so every one of those answers lands in **config**, not in code.
@@ -567,3 +596,14 @@ built so every one of those answers lands in **config**, not in code.
 **Item 12 is not a cost question.** All candidates land between $0.03 and $0.44 per user
 per month, one to two orders of magnitude inside the $2 budget. Do not spend a day
 choosing a model. Build the eval harness, run them through it, move on.
+
+**Pin a concrete version, never a moving alias.** `gemini-flash-lite-latest` shifts under
+you, and prompt `05` is a bake-off whose evidence has to still mean something next week.
+At `gemini-3.5-flash-lite`'s $0.30 / $2.50 per Mtok the workload in § 6.6 costs about
+**$0.09 per user per month** — three times the retired 2.5 and still two orders of
+magnitude inside budget. Cost remains not the deciding variable.
+
+Rows worth having in `05`'s matrix: `gemini-3.5-flash-lite` (default),
+`gemini-3.1-flash-lite` (cheaper at $0.25 / $1.50), `kimi-k2.5` if a key ever lands, and
+`fake` as the determinism control. A model that 404s is a legitimate row — report it as
+skipped with the reason, never silently omitted.
