@@ -88,24 +88,42 @@ public struct MessageReader {
         try database.scalar("SELECT coalesce(max(ROWID), 0) FROM message")
     }
 
+    /// COUNT(DISTINCT m.ROWID), NOT count(*).
+    ///
+    /// A message routinely joins more than one `chat` row on a real database — thread
+    /// merges, a contact whose handle changed from a phone number to an Apple ID, an
+    /// iMessage thread that fell back to SMS. Each of those adds a
+    /// `chat_message_join` row, so `count(*)` over the join counts one message several
+    /// times and inflates every volume metric built on it. The synthetic fixture
+    /// writes exactly one join row per message and therefore hides this entirely.
     public func count(options: ScanOptions = .oneToOne) throws -> Int {
-        Int(try database.scalar("SELECT count(*) FROM message m \(Self.joinClause) \(Self.whereClause(options))"))
+        Int(try database.scalar("""
+            SELECT count(DISTINCT m.ROWID) FROM message m \(Self.joinClause) \(Self.whereClause(options))
+            """))
     }
 
     /// Tapbacks that the 1:1 read drops — reactions attached to a non-group thread.
     public func excludedTapbackCount() throws -> Int {
         Int(try database.scalar("""
-            SELECT count(*) FROM message m \(Self.joinClause)
+            SELECT count(DISTINCT m.ROWID) FROM message m \(Self.joinClause)
             WHERE coalesce(c.style, 0) <> 43
               AND coalesce(m.associated_message_type, 0) BETWEEN 2000 AND 3999
             """))
     }
 
     /// Rows the 1:1 read drops for living in a group thread (`chat.style = 43`).
+    ///
+    /// Counted as messages that appear in *no* non-group thread, so a message living in
+    /// both a group and a 1:1 is not double-counted against the kept set.
     public func excludedGroupChatCount() throws -> Int {
         Int(try database.scalar("""
-            SELECT count(*) FROM message m \(Self.joinClause)
+            SELECT count(DISTINCT m.ROWID) FROM message m \(Self.joinClause)
             WHERE coalesce(c.style, 0) = 43
+              AND NOT EXISTS (
+                SELECT 1 FROM chat_message_join j2
+                JOIN chat c2 ON c2.ROWID = j2.chat_id
+                WHERE j2.message_id = m.ROWID AND coalesce(c2.style, 0) <> 43
+              )
             """))
     }
 
@@ -136,14 +154,14 @@ public struct MessageReader {
 
         if loadMessages {
             messages.reserveCapacity(min(options.limit ?? 4096, 4096))
-            try database.query(Self.selectClause + " \(Self.joinClause) \(Self.whereClause(options)) ORDER BY m.ROWID" + (options.limit.map { " LIMIT \($0)" } ?? "")) { row in
+            try database.query(Self.selectClause + " \(Self.joinClause) \(Self.whereClause(options)) \(Self.groupClause) ORDER BY m.ROWID" + (options.limit.map { " LIMIT \($0)" } ?? "")) { row in
                 let message = Self.message(from: row)
                 if message.text == nil { withoutText += 1 }
                 messages.append(message)
             }
         } else {
             withoutText = Int(try database.scalar("""
-                SELECT count(*) FROM message m \(Self.joinClause) \(Self.whereClause(options))
+                SELECT count(DISTINCT m.ROWID) FROM message m \(Self.joinClause) \(Self.whereClause(options))
                   AND m.text IS NULL
                 """))
         }
@@ -167,10 +185,18 @@ public struct MessageReader {
     private static let selectClause = """
         SELECT m.ROWID, m.guid, m.text, m.attributedBody IS NOT NULL, m.handle_id,
                h.id, m.service, m.date, m.is_from_me,
-               coalesce(m.associated_message_type, 0), c.ROWID, c.chat_identifier,
+               coalesce(m.associated_message_type, 0), min(c.ROWID), c.chat_identifier,
                coalesce(c.style, 0)
         FROM message m
         """
+
+    /// One row per message, not one row per (message, chat) pair — see `count`.
+    ///
+    /// `min(c.ROWID)` is not decoration. SQLite guarantees that when a query uses
+    /// exactly one `min()` or `max()` aggregate, the bare columns beside it come from
+    /// the row that produced that extreme, so `chat_identifier` and `style` are read
+    /// from the same chat whose ROWID is reported, rather than from an arbitrary one.
+    private static let groupClause = "GROUP BY m.ROWID"
 
     private static let joinClause = """
         JOIN chat_message_join j ON j.message_id = m.ROWID

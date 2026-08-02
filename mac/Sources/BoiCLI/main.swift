@@ -32,7 +32,10 @@ usage: boi-cli scan --db <path> [options]
   --interval <seconds>        poll interval (default 30 when foregrounded)
   --iterations <n>            stop after n passes (default 1; unlimited with --poll)
   --sample <n>                also print n redacted row summaries
-  --stall-alarm-seconds <n>   alarm once MAX(ROWID) has been flat this long (default 0)
+  --state <path>              watermark state, carried across runs
+                              (default /tmp/boi-a/watermark.json; "none" disables)
+  --stall-alarm-seconds <n>   alarm once MAX(ROWID) has been flat this long
+                              (default 3600)
   --include-tapbacks          keep associated_message_type 2000-3999
   --include-group-chats       keep chat.style = 43
 """
@@ -69,8 +72,16 @@ case "scan":
     let configuration = ScanPoller.Configuration(
         interval: polling ? interval : 0,
         iterations: iterations,
-        stallAlarmAfterSeconds: value("stall-alarm-seconds").flatMap(Int.init) ?? 0
+        stallAlarmAfterSeconds: value("stall-alarm-seconds").flatMap(Int.init)
+            ?? ScanPoller.defaultStallAlarmSeconds
     )
+
+    // The watermark has to outlive the process or a single-pass run can only ever
+    // report .first, and the stall alarm never fires on the default path.
+    let statePath = value("state") ?? "/tmp/boi-a/watermark.json"
+    let store = statePath == "none"
+        ? nil
+        : WatermarkStore(url: URL(fileURLWithPath: statePath))
 
     do {
         let reader = try MessageReader(path: readPath)
@@ -83,6 +94,7 @@ case "scan":
 
         try ScanPoller(configuration: configuration).run(
             options: options,
+            store: store,
             scan: { _ in
                 try reader.scan(options: options,
                                 loadMessages: sampleSize != nil,

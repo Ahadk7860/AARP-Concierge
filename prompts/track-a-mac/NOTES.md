@@ -92,6 +92,14 @@ Every append to a foundation-owned shared file: dependency manifests, lint confi
 
 Format: `[prompt NN] <file> — added <what> because <why>`
 
+`[prompt 01] scripts/wal_control_counts.py` — **REVERTED.** Deleted in the corrections
+pass. `scripts/` is not this track's to write — prompt `01`'s Constraints say
+`mac/` — and worse, having this repo produce *both* sides of the WAL comparison made
+the one load-bearing control in the prompt self-referential: it could have been wrong in
+the same direction as the reader and the test would still have passed. Both controls now
+come from `/usr/bin/sqlite3`, which this track did not write, exactly as the Definition
+of Done named. The original entry follows for the record.
+
 `[prompt 01] scripts/wal_control_counts.py` — **new file** (pure addition; nothing
 existing was reordered, reformatted, or removed). Prompt `01` requires two things at
 once: a test asserting the reader sees exactly one more row than a frozen-open
@@ -141,6 +149,59 @@ Format: `[prompt NN] → Track <X>: <what you need and why>`
 
 Anywhere the implementation departs from what the prompt described, and why. A
 deviation is not a failure — an unrecorded one is.
+
+`[prompt 01] CORRECTIONS PASS — five defects the user caught in review, all fixed.`
+Recorded because each one is a case where the checks I ran came back green while the
+thing being checked did not hold.
+
+1. **`XCTSkip` was hiding all four load-bearing tests.** `ensureChatDatabase()` threw
+   `XCTSkip` from `setUpWithError`, which skips *every* test in `MessageReaderTests` —
+   the WAL check, the tapback check, the group-chat check, the snapshot check — while
+   `swift test` still exits 0. That is a frozen-anchor violation: the prompt forbids
+   marking a test skipped. Both `XCTSkip` sites now throw `Fixture.FixtureUnavailable`,
+   a plain error, so the run goes red. Canary, pointing at an unbuildable fixture path:
+   `exit=1, 12 failures (12 unexpected)`. Before the fix the identical run exited 0.
+   The fixture generator already modelled the right instinct — it raises "INCONCLUSIVE,
+   which is not a pass" rather than returning quietly.
+
+2. **The WAL control was self-referential, and out of bounds.**
+   `scripts/wal_control_counts.py` produced *both* sides of the comparison, so the one
+   control the prompt leans on was a script from this same repo. Deleted. Both sides now
+   come from `/usr/bin/sqlite3`, the independent tool the Definition of Done named. The
+   assertion also moved from `rawMessageCount` to **`matchedCount`** — the number
+   `boi-cli scan` actually prints — now that the regenerated fixture gives the WAL-only
+   row a `chat_message_join` row: **9226 against 9225**, with the raw counts still
+   9637 against 9636 in a second test.
+
+3. **`DatabaseSnapshot` reproduced the bug it exists to prevent.** It copied `chat.db`,
+   then `-wal`, then `-shm` as three separate `copyItem` calls. Under the live writer
+   its own doc comment cites as the reason the class exists, a checkpoint landing
+   between calls one and two yields a `-wal` whose salt no longer matches the copied
+   header; SQLite treats that as a stale log, ignores the entire WAL, and raises no
+   error — the frozen corpus, arrived at through the prevention. Now a single
+   `VACUUM INTO` on the read-only connection: one read transaction, one consistent view
+   including the WAL, one fully checkpointed output file with no sidecars to lose and no
+   window to lose them in. The `sidecarLost` guard was dead code (`copyItem` had already
+   thrown) and is gone. The destination is a bound parameter, not an interpolated path.
+
+4. **`count(*)` over the chat joins inflated on real data.** A message routinely joins
+   several `chat` rows — thread merges, a handle that changed from a phone number to an
+   Apple ID, an iMessage thread that fell back to SMS. Now `COUNT(DISTINCT m.ROWID)`
+   throughout, and the row-loading scan uses `GROUP BY m.ROWID` with `min(c.ROWID)` so
+   the chat columns come from a deterministic thread. The fixture writes exactly one
+   join row per message and hides this completely, so there is a **new test that builds
+   its own two-chat database** and asserts the message counts once, not twice.
+
+5. **The `MAX(ROWID)` alarm could never fire on the default path.** `WatermarkTracker`
+   was constructed fresh inside `run()`, so a single-pass `boi-cli scan` — the default,
+   and what a LaunchAgent invokes — always returned `.first`. "Between runs" needs
+   something that outlives the run, so there is now a `WatermarkStore` persisting
+   `{last_rowid, last_advance_at}` as JSON (`--state`, default
+   `/tmp/boi-a/watermark.json`, `none` to disable). Verified across three separate
+   processes: `last_advance_at` stays pinned while `flat_for_s` grows 4 → 8.
+   `stall-alarm-seconds` also defaulted to 0, which warned on essentially every poll of
+   a quiet Mac and would have trained everyone to ignore the alarm; it now defaults to
+   3600.
 
 `[prompt 01] I changed two lines in the foundation-authored
 mac/Tests/BoiKitTests/FoundationTests.swift. Read this one.` The moment the suite could

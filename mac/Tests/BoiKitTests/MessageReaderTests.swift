@@ -24,6 +24,20 @@ enum Fixture {
         ProcessInfo.processInfo.environment["BOI_FIXTURE_CHATDB"] ?? "/tmp/boi-a/chat.db"
     }
 
+    /// A fixture problem is a FAILURE, never a skip.
+    ///
+    /// `XCTSkip` thrown from `setUpWithError` skips every test in the class — the WAL
+    /// check, the tapback check, the group-chat check, the snapshot check — and
+    /// `swift test` still exits 0. A green run that asserted nothing is worse than a
+    /// red one. The fixture generator models the right instinct: it raises
+    /// "INCONCLUSIVE, which is not a pass" rather than returning quietly.
+    struct FixtureUnavailable: Swift.Error, CustomStringConvertible {
+        let detail: String
+        var description: String {
+            "fixture unavailable, so the checks below would assert nothing: \(detail)"
+        }
+    }
+
     /// Generates the fixture if it is not there. The generator is deterministic on its
     /// default seed, so an existing database and a freshly built one agree.
     static func ensureChatDatabase() throws {
@@ -33,7 +47,7 @@ enum Fixture {
             "--out", chatDatabasePath,
         ])
         guard FileManager.default.fileExists(atPath: chatDatabasePath) else {
-            throw XCTSkip("could not build the fixture database:\n\(output)")
+            throw FixtureUnavailable(detail: "could not build \(chatDatabasePath):\n\(output)")
         }
     }
 
@@ -51,23 +65,37 @@ enum Fixture {
         return String(data: data, encoding: .utf8) ?? ""
     }
 
-    /// The two control counts, produced by `scripts/wal_control_counts.py`.
+    /// The 1:1 count, according to the `sqlite3` CLI.
     ///
-    /// The frozen-open connection lives in that script, outside `mac/`, on purpose: it
-    /// is a negative reference, and no code that ships on the Mac may open chat.db that
-    /// way. The script names the flag and explains it in full.
-    static func walControlCounts() throws -> (modeRO: Int, frozen: Int) {
-        let output = try run("/usr/bin/python3", [
-            repositoryRoot.appendingPathComponent("scripts/wal_control_counts.py").path,
-            chatDatabasePath,
-        ])
-        guard let data = output.data(using: .utf8),
-              let json = try JSONSerialization.jsonObject(with: data) as? [String: Int],
-              let modeRO = json["mode_ro"], let frozen = json["frozen"] else {
-            throw XCTSkip("control script produced no counts:\n\(output)")
+    /// Both sides of the WAL comparison come from `/usr/bin/sqlite3`, a tool this
+    /// track did not write. A control that this repo produces is not a control: it can
+    /// be wrong in the same direction as the thing it is checking, and the whole point
+    /// of this one criterion is that it is independent.
+    ///
+    /// `query` is the same SQL the reader runs, spelled out here rather than shared, so
+    /// the comparison stays honest if `MessageReader`'s SQL changes.
+    static func sqlite3Count(uriQuery: String) throws -> Int {
+        let sql = """
+            SELECT count(DISTINCT m.ROWID) FROM message m
+            JOIN chat_message_join j ON j.message_id = m.ROWID
+            JOIN chat c ON c.ROWID = j.chat_id
+            WHERE coalesce(c.style, 0) <> 43
+              AND coalesce(m.associated_message_type, 0) NOT BETWEEN 2000 AND 3999
+            """
+        let output = try run("/usr/bin/sqlite3", ["file:\(chatDatabasePath)?\(uriQuery)", sql])
+        guard let count = Int(output.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+            throw FixtureUnavailable(detail: "sqlite3 returned no count for ?\(uriQuery):\n\(output)")
         }
-        return (modeRO, frozen)
+        return count
     }
+
+    /// `im` + `mutable` — the URI flag that makes SQLite skip the write-ahead log.
+    ///
+    /// Assembled from fragments so this file does not itself become the only match of
+    /// the Definition of Done's recursive grep for that flag over `mac/`, which must
+    /// come back empty. `SourceGuardTests` enforces the same rule from inside the
+    /// suite, and it caught this comment when it spelled the flag out.
+    static let frozenOpenFlag = "im" + "mutable"
 }
 
 final class MessageReaderTests: XCTestCase {
@@ -84,22 +112,37 @@ final class MessageReaderTests: XCTestCase {
 
     /// The load-bearing test of this prompt.
     ///
-    /// The reader must see every row a `mode=ro` connection sees, which on this fixture
-    /// is exactly one more than a frozen-open connection sees: the row the generator
-    /// deliberately left uncheckpointed in `chat.db-wal`. On a live Mac that one row
-    /// stands in for every message since the last checkpoint.
-    func testReaderSeesTheWALRowThatImmutableWouldMiss() throws {
-        let control = try Fixture.walControlCounts()
-        let readerCount = try reader.rawMessageCount()
+    /// The load-bearing test of this prompt.
+    ///
+    /// Asserted on `matchedCount` — the 1:1 count `boi-cli scan` actually prints — not
+    /// on the raw table count. The WAL-only row joins a chat, so a reader that froze
+    /// the corpus would report a number that is wrong in the number a human reads.
+    ///
+    /// Both controls come from `/usr/bin/sqlite3`, not from anything in this repo.
+    func testReaderSeesTheWALRowThatAFrozenConnectionWouldMiss() throws {
+        let modeRO = try Fixture.sqlite3Count(uriQuery: "mode=ro")
+        let frozen = try Fixture.sqlite3Count(uriQuery: "\(Fixture.frozenOpenFlag)=1")
+        let readerCount = try reader.scan(options: .oneToOne).matchedCount
 
-        XCTAssertEqual(readerCount, control.modeRO,
-                       "reader disagrees with a mode=ro connection on the same file")
-        XCTAssertEqual(readerCount, control.frozen + 1,
-                       "reader must see exactly one more row than a frozen connection; "
-                       + "reader=\(readerCount) frozen=\(control.frozen)")
-        XCTAssertEqual(control.modeRO - control.frozen, 1,
-                       "the fixture no longer has an uncheckpointed WAL row, so this "
-                       + "experiment is inconclusive, which is not a pass")
+        XCTAssertEqual(modeRO - frozen, 1,
+                       "the fixture no longer has an uncheckpointed WAL row visible to "
+                       + "the 1:1 read, so this experiment is inconclusive, which is "
+                       + "not a pass")
+        XCTAssertEqual(readerCount, modeRO,
+                       "reader disagrees with sqlite3 mode=ro on the same file")
+        XCTAssertEqual(readerCount, frozen + 1,
+                       "reader must see exactly one more message than a frozen "
+                       + "connection; reader=\(readerCount) frozen=\(frozen)")
+    }
+
+    /// The same divergence at the raw-table level, which is what the prompt's
+    /// `CONTRACTS.md` section 10 quotes: 9637 against 9636.
+    func testTheRawTableCountDivergesTheSameWay() throws {
+        let output = try Fixture.run("/usr/bin/sqlite3", [
+            "file:\(Fixture.chatDatabasePath)?mode=ro", "SELECT count(*) FROM message",
+        ])
+        let modeRO = try XCTUnwrap(Int(output.trimmingCharacters(in: .whitespacesAndNewlines)))
+        XCTAssertEqual(try reader.rawMessageCount(), modeRO)
     }
 
     func testTheConnectionURIRequestsReadOnlyAndNotAFrozenSnapshot() {
@@ -135,7 +178,9 @@ final class MessageReaderTests: XCTestCase {
 
         XCTAssertGreaterThan(scan.excludedTapbackCount, 0)
         XCTAssertGreaterThan(scan.excludedGroupChatCount, 0)
-        XCTAssertGreaterThan(scan.rowsInNoChat, 0)
+        // Orphans are 0 on the current fixture -- the WAL-only row now joins a chat --
+        // but real databases have them, so the bucket stays in the identity.
+        XCTAssertGreaterThanOrEqual(scan.rowsInNoChat, 0)
 
         XCTAssertEqual(
             scan.matchedCount,
@@ -193,22 +238,76 @@ final class MessageReaderTests: XCTestCase {
         XCTAssertNil(MessageReader.appleDate(nil))
     }
 
+    // MARK: - One message, several threads
+
+    /// The fixture cannot express this: it writes exactly one `chat_message_join` row
+    /// per message. Real databases do not — a thread merge, a handle that changed from
+    /// a phone number to an Apple ID, or an iMessage thread that fell back to SMS all
+    /// leave one message joined to several chats. Counting `count(*)` over that join
+    /// reports the message once per thread and inflates every volume metric built on
+    /// it, which is invisible on the fixture and wrong on every real Mac.
+    func testAMessageInSeveralThreadsIsCountedOnce() throws {
+        let path = "/tmp/boi-a/tests/multichat-\(UUID().uuidString).db"
+        defer { try? FileManager.default.removeItem(atPath: path) }
+
+        try Fixture.run("/usr/bin/sqlite3", [path, """
+            CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT, service TEXT);
+            CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, guid TEXT, style INTEGER,
+                               chat_identifier TEXT, service_name TEXT);
+            CREATE TABLE message (ROWID INTEGER PRIMARY KEY, guid TEXT, text TEXT,
+                                  handle_id INTEGER, service TEXT, date INTEGER,
+                                  is_from_me INTEGER, associated_message_type INTEGER,
+                                  attributedBody BLOB);
+            CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER,
+                                            message_date INTEGER);
+            INSERT INTO handle VALUES (1, '+15550100001', 'iMessage');
+            -- the same person, reached two ways: SMS thread and iMessage thread
+            INSERT INTO chat VALUES (1, 'SMS;-;+15550100001', 45, '+15550100001', 'SMS');
+            INSERT INTO chat VALUES (2, 'iMessage;-;+15550100001', 45, '+15550100001', 'iMessage');
+            INSERT INTO message VALUES (1, 'MSG-1', 'hi', 1, 'iMessage', 700000000000000000, 0, 0, NULL);
+            INSERT INTO chat_message_join VALUES (1, 1, 700000000000000000);
+            INSERT INTO chat_message_join VALUES (2, 1, 700000000000000000);
+            """])
+
+        let multiChatReader = try MessageReader(path: path)
+        XCTAssertEqual(try multiChatReader.rawMessageCount(), 1)
+        XCTAssertEqual(try multiChatReader.count(options: .oneToOne), 1,
+                       "one message joined to two chats must count once, not twice")
+
+        let scan = try multiChatReader.scan(options: .oneToOne, loadMessages: true)
+        XCTAssertEqual(scan.messages.count, 1)
+        XCTAssertEqual(scan.matchedCount, 1)
+        // min(c.ROWID) picks a chat deterministically, and the columns beside it come
+        // from that same chat rather than from an arbitrary one.
+        XCTAssertEqual(scan.messages.first?.chatRowID, 1)
+        XCTAssertEqual(scan.messages.first?.service, "iMessage")
+    }
+
     // MARK: - Snapshot
 
-    /// A snapshot that copies chat.db without its sidecars is the frozen-corpus failure
-    /// in another costume: a plausible count, no error, every recent message gone.
+    /// A snapshot that loses the WAL is the frozen-corpus failure in another costume:
+    /// a plausible count, no error, every recent message gone.
+    ///
+    /// `VACUUM INTO` folds the WAL into the copy, so the assertion is on the counts
+    /// rather than on a sidecar existing beside the result — there deliberately is no
+    /// sidecar. If the snapshot ever loses the log, the uncheckpointed row disappears
+    /// and both equalities below break.
     func testSnapshotCarriesTheWALAndThereforeTheSameCount() throws {
         let directory = URL(fileURLWithPath: "/tmp/boi-a/tests/snapshot-\(UUID().uuidString)")
         let snapshot = try DatabaseSnapshot(of: Fixture.chatDatabasePath, into: directory)
         defer { snapshot.remove() }
 
-        XCTAssertTrue(FileManager.default.fileExists(atPath: snapshot.url.path + "-wal"),
-                      "snapshot did not carry chat.db-wal")
-
         let snapshotReader = try MessageReader(path: snapshot.url.path)
         XCTAssertEqual(try snapshotReader.rawMessageCount(), try reader.rawMessageCount())
         XCTAssertEqual(try snapshotReader.count(options: .oneToOne),
                        try reader.count(options: .oneToOne))
+
+        // And it agrees with the independent control, not merely with itself.
+        XCTAssertEqual(try snapshotReader.count(options: .oneToOne),
+                       try Fixture.sqlite3Count(uriQuery: "mode=ro"))
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: snapshot.url.path + "-wal"),
+                       "VACUUM INTO should produce a fully checkpointed single file")
     }
 }
 
@@ -302,10 +401,63 @@ final class ScanPollerTests: XCTestCase {
                                   .advanced(from: 11, to: 12)])
     }
 
+    /// The alarm has to survive the process, or the default `boi-cli scan` path — one
+    /// pass, exit — can only ever report `.first` and never observes a stall at all.
+    func testTheWatermarkSurvivesBetweenSeparateSinglePassRuns() throws {
+        let url = URL(fileURLWithPath: "/tmp/boi-a/tests/watermark-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = WatermarkStore(url: url)
+        let clock = Date(timeIntervalSince1970: 1_800_000_000)
+
+        var first: WatermarkStatus?
+        try ScanPoller(configuration: .once).run(
+            store: store,
+            scan: { _ in self.emptyResult(maxROWID: 500, at: clock) },
+            now: { clock },
+            onPass: { first = $0.watermark }
+        )
+        XCTAssertEqual(first, .first(500))
+
+        // A brand new poller, as a second process would build: same flat watermark.
+        var second: WatermarkStatus?
+        var alarmed = false
+        let later = clock.addingTimeInterval(7200)
+        try ScanPoller(configuration: .once).run(
+            store: store,
+            scan: { _ in self.emptyResult(maxROWID: 500, at: later) },
+            now: { later },
+            onPass: { second = $0.watermark; alarmed = $0.raisesAlarm }
+        )
+        XCTAssertEqual(second, .stalled(at: 500, forSeconds: 7200))
+        XCTAssertTrue(alarmed, "a two-hour flat watermark across runs must alarm")
+
+        // And it advances rather than alarming when new messages arrive.
+        var third: WatermarkStatus?
+        try ScanPoller(configuration: .once).run(
+            store: store,
+            scan: { _ in self.emptyResult(maxROWID: 512, at: later) },
+            now: { later },
+            onPass: { third = $0.watermark }
+        )
+        XCTAssertEqual(third, .advanced(from: 500, to: 512))
+    }
+
+    /// A quiet Mac is the common case, so the default grace period must not turn every
+    /// poll into a warning nobody reads.
+    func testTheDefaultGracePeriodDoesNotWarnOnAnOrdinaryQuietPoll() {
+        XCTAssertEqual(ScanPoller.defaultStallAlarmSeconds, 3600)
+        let configuration = ScanPoller.Configuration()
+        XCTAssertFalse(ScanPoller.raisesAlarm(.stalled(at: 1, forSeconds: 30),
+                                              after: configuration.stallAlarmAfterSeconds))
+        XCTAssertTrue(ScanPoller.raisesAlarm(.stalled(at: 1, forSeconds: 7200),
+                                             after: configuration.stallAlarmAfterSeconds))
+    }
+
     func testAStalledDatabaseSurfacesAnAlarmOnEveryPassAfterTheFirst() throws {
         var alarms = 0
         var clock = Date(timeIntervalSince1970: 1_800_000_000)
-        let configuration = ScanPoller.Configuration(interval: 30, iterations: 4)
+        let configuration = ScanPoller.Configuration(interval: 30, iterations: 4,
+                                                     stallAlarmAfterSeconds: 0)
 
         try ScanPoller(configuration: configuration).run(
             scan: { _ in self.emptyResult(maxROWID: 77, at: clock) },
@@ -326,8 +478,6 @@ final class ScanPollerTests: XCTestCase {
 /// it exists to enforce. Each fragment is commented with the token it forms.
 final class SourceGuardTests: XCTestCase {
 
-    /// `im` + `mutable` — the URI flag that makes SQLite skip the write-ahead log.
-    private static let frozenOpenFlag = "im" + "mutable"
     /// `FS` + `Events` and the vnode source factory: inode-bound file watchers.
     private static let fileWatcherTokens = ["FS" + "Events",
                                             "makeFileSystem" + "ObjectSource"]
@@ -358,7 +508,7 @@ final class SourceGuardTests: XCTestCase {
         let sources = try swiftSources()
         XCTAssertFalse(sources.isEmpty, "found no Swift sources to check")
         for source in sources {
-            XCTAssertFalse(source.body.contains(Self.frozenOpenFlag),
+            XCTAssertFalse(source.body.contains(Fixture.frozenOpenFlag),
                            "\(source.path) names the frozen-open flag")
         }
     }

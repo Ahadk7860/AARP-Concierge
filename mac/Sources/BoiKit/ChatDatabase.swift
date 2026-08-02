@@ -114,6 +114,32 @@ public final class ChatDatabase {
         return value
     }
 
+    /// Writes a single consistent, fully checkpointed copy of this database to `path`.
+    ///
+    /// Runs in a read transaction on the source, so the copy includes whatever is
+    /// sitting in the write-ahead log and cannot tear against a concurrent checkpoint.
+    /// Permitted on a read-only connection: it writes only to the destination.
+    ///
+    /// The destination is a bound parameter rather than an interpolated string. A path
+    /// containing a quote would otherwise change the statement.
+    public func vacuum(into path: String) throws {
+        let sql = "VACUUM INTO ?"
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK,
+              let statement else {
+            throw Error.queryFailed(sql: sql, message: lastErrorMessage())
+        }
+        defer { sqlite3_finalize(statement) }
+
+        let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+        guard sqlite3_bind_text(statement, 1, path, -1, transient) == SQLITE_OK else {
+            throw Error.queryFailed(sql: sql, message: lastErrorMessage())
+        }
+        guard sqlite3_step(statement) == SQLITE_DONE else {
+            throw Error.queryFailed(sql: sql, message: lastErrorMessage())
+        }
+    }
+
     private func lastErrorMessage() -> String {
         guard let handle else { return "no connection" }
         return String(cString: sqlite3_errmsg(handle))
