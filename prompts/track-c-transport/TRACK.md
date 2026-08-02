@@ -144,8 +144,8 @@ report rather than picking a default that another track may also pick.
 | # | File | Outcome | Depends on | Status |
 |---|---|---|---|---|
 | 01 | `01-mock-linq.md` | a mock Linq v3 server with fault injection | none | done — lint blocker resolved by foundation; corrected after review |
-| 02 | `02-linq-adapter.md` | LinqChannel implementing the frozen Channel interface | 01 | done |
-| 03 | `03-inbound.md` | signature verification and inbound.v1 normalization | 01 | not started |
+| 02 | `02-linq-adapter.md` | LinqChannel implementing the frozen Channel interface | 01 | done — corrected after audit |
+| 03 | `03-inbound.md` | signature verification and inbound.v1 normalization | 01 | done — 1 DoD item fails as written (fixture parity; see NOTES.md) |
 | 04 | `04-line-health.md` | sticky assignment, health tracking, automatic downgrade | 02 | not started |
 
 **Read the `Depends on` column, not the numbering.** Numbering implies a sequence and

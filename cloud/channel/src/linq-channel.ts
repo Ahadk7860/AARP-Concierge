@@ -34,6 +34,19 @@ import {
   type ProviderDiagnostic,
 } from "./errors.js";
 import { RateLimiter, RateLimitExceeded, type LimitBehaviour } from "./rate-limiter.js";
+import {
+  hmacSha256Verifier,
+  InboundParseError,
+  normalizeInbound as normalizeInboundGeneric,
+  optionalString,
+  readProtocol as readInboundProtocol,
+  requiredString,
+  isRecord as isInboundRecord,
+  type ExtractedInbound,
+  type InboundKind,
+  type SignatureVerifier,
+  type UserResolver,
+} from "./inbound.js";
 
 // ---------------------------------------------------------------------------
 // Config — LINQ_BASE_URL drives everything, so production is a one-value swap
@@ -52,6 +65,11 @@ export type LinqChannelConfig = {
    *  because a line-level ban is the failure mode that actually hurts. */
   lineId: string;
   requestTimeoutMs: number;
+  /** Signs inbound webhooks. CONTRACTS.md § 11 item 2 — the scheme is unconfirmed. */
+  webhookSecret: string;
+  /** Which `inbound.v1` provider label normalized webhooks carry. `linq` in production;
+   *  `mock` when the same normalizer is fed by the mock server. */
+  providerLabel: InboundMessage["provider"];
   rateLimit: { maxPerInterval: number; intervalMs: number; behaviour: LimitBehaviour };
   /**
    * Every one of these is a guess: the Linq subset documents no capabilities endpoint,
@@ -140,6 +158,8 @@ export function loadLinqChannelConfig(env: NodeJS.ProcessEnv = process.env): Lin
     token: env.LINQ_API_TOKEN ?? "",
     fromHandle: env.LINQ_FROM_HANDLE ?? "",
     lineId: env.LINQ_LINE_ID ?? "",
+    webhookSecret: env.LINQ_WEBHOOK_SECRET ?? "dev-secret-change-me",
+    providerLabel: "linq",
     requestTimeoutMs: parseInteger(env.CHANNEL_REQUEST_TIMEOUT_MS, 10_000, "CHANNEL_REQUEST_TIMEOUT_MS"),
     rateLimit: {
       // Conservative on purpose: 30/minute is far above one brief per user per day and
@@ -166,6 +186,11 @@ export type LinqChannelDeps = {
   resolveHandles: HandleResolver;
   limiter?: RateLimiter;
   now?: () => Date;
+  /** Swappable because the real signature scheme is unconfirmed (§ 11 item 2). */
+  verifier?: SignatureVerifier;
+  /** Pairing resolves handle -> user, and pairing is Track D's. Absent one, `user_id` is
+   *  null, which `inbound.v1` explicitly allows. */
+  resolveUser?: UserResolver;
 };
 
 // ---------------------------------------------------------------------------
@@ -285,6 +310,8 @@ export class LinqChannel implements Channel {
   private readonly resolveHandles: HandleResolver;
   private readonly limiter: RateLimiter;
   private readonly now: () => Date;
+  private readonly verifier: SignatureVerifier;
+  private readonly resolveUser: UserResolver | undefined;
   /**
    * Idempotency, held in process.
    *
@@ -300,6 +327,8 @@ export class LinqChannel implements Channel {
     this.config = config;
     this.resolveHandles = deps.resolveHandles;
     this.now = deps.now ?? (() => new Date());
+    this.verifier = deps.verifier ?? hmacSha256Verifier(config.webhookSecret);
+    this.resolveUser = deps.resolveUser;
     this.limiter =
       deps.limiter ??
       new RateLimiter({
@@ -380,12 +409,19 @@ export class LinqChannel implements Channel {
     }
   }
 
-  normalizeInbound(_rawBody: unknown, _signature: string): InboundMessage {
-    // Prompt 03 owns this. It throws rather than returning a partial message because
-    // the frozen contract says "never returns a partially-normalized message", and a
-    // plausible-looking stub is worse than an absent one: Track D would build against
-    // fabricated inbound and nobody would notice until integration.
-    throw new Error("not_implemented: inbound normalization lands in Track C prompt 03");
+  /**
+   * Verifies the raw bytes, then normalizes. Throws `SignatureError` before it looks at
+   * the contents, and `InboundParseError` if the authenticated body is not a message we
+   * understand — never a partially-normalized result.
+   */
+  normalizeInbound(rawBody: unknown, signature: string): InboundMessage {
+    return normalizeInboundGeneric(rawBody, signature, {
+      verifier: this.verifier,
+      extract: extractLinqWebhook,
+      provider: this.config.providerLabel,
+      ...(this.resolveUser === undefined ? {} : { resolveUser: this.resolveUser }),
+      now: this.now,
+    });
   }
 
   // ---- transport ---------------------------------------------------------
@@ -543,4 +579,65 @@ function toParts(blocks: OutboundBlock[], capabilities: Capabilities): LinqPart[
     }
   }
   return parts;
+}
+
+
+// ---------------------------------------------------------------------------
+// Inbound: the Linq-specific half
+// ---------------------------------------------------------------------------
+//
+// Everything provider-neutral about inbound — verification, the `inbound.v1` assembly,
+// the `user_id` rule — lives in inbound.ts. This is the part that has to know Linq's
+// field names, and it is the part most likely to be wrong: the reference body is
+// contracts/transcripts/linq/inbound_webhook.json, a reconstruction that has never
+// arrived from a live account.
+
+/**
+ * Linq's `type` to `inbound.v1`'s `kind`.
+ *
+ * Tolerant across the spellings a provider plausibly uses, and it REFUSES an unknown
+ * type rather than defaulting to `text`. Defaulting would turn a read receipt into a
+ * message with null text, and Track D would treat provider noise as something a person
+ * said — the fabrication failure, arriving through the back door.
+ */
+const KIND_BY_TYPE: Record<string, InboundKind> = {
+  message: "text",
+  text: "text",
+  sms: "text",
+  tapback: "tapback",
+  reaction: "tapback",
+  read: "read_receipt",
+  read_receipt: "read_receipt",
+  delivered: "delivery_receipt",
+  delivery_receipt: "delivery_receipt",
+  typing: "typing",
+  typing_indicator: "typing",
+};
+
+export function extractLinqWebhook(body: unknown): ExtractedInbound {
+  if (!isInboundRecord(body)) throw new InboundParseError("body is not an object");
+
+  const rawType = requiredString(body, ["type", "event", "kind"], "type");
+  const kind = KIND_BY_TYPE[rawType.trim().toLowerCase()];
+  if (kind === undefined) throw new InboundParseError(`unknown inbound type: ${rawType}`);
+
+  // A tapback arriving with type "message" is still a tapback. The reaction field is the
+  // stronger signal, so it wins over the type string.
+  const tapback = optionalString(body, ["tapback", "reaction"]);
+  const resolvedKind: InboundKind = tapback !== null && kind === "text" ? "tapback" : kind;
+
+  return {
+    providerMessageId: requiredString(body, ["id", "message_id"], "message id"),
+    lineId: requiredString(body, ["line_id", "line"], "line id"),
+    fromHandle: requiredString(body, ["from", "from_handle", "handle"], "from handle"),
+    kind: resolvedKind,
+    receivedAt: optionalString(body, ["received_at", "timestamp", "created_at"]),
+    // Only a text-bearing kind carries text. A read receipt with a text field would be
+    // provider noise, and passing it through invites Track D to read it as a reply.
+    text: resolvedKind === "text" ? optionalString(body, ["text", "body"]) : null,
+    tapback,
+    replyToMessageId: optionalString(body, ["reply_to", "reply_to_message_id", "in_reply_to"]),
+    protocol: readInboundProtocol(body["protocol"]),
+    traceId: optionalString(body, ["trace_id", "traceparent"]),
+  };
 }

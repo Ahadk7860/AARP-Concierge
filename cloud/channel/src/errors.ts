@@ -9,14 +9,17 @@
 // log-only. An earlier revision of this file passed the raw slug and `http_<status>`
 // through `code` while the README told Track D to branch on it — provider coupling
 // wearing a neutral name, which is worse than the obvious kind because it reads as safe.
+//
+// Nothing in this file names a vendor, and that is checked: the leakage grep in prompt
+// 02's Definition of Done must not match this file.
 
 /**
  * Diagnostics from the provider. **Log this; never branch on it.**
  *
  * It exists so a provider slug and status can reach an operator without reaching a
  * conditional. The moment Track D writes `if (err.diagnostic.slug === "line_degraded")`
- * the abstraction is gone — that is a Linq string in Track D's control flow, and it
- * changes when a vendor we cannot see edits a response body.
+ * the abstraction is gone — that is a vendor string in Track D's control flow, and it
+ * changes when a provider we cannot see edits a response body.
  */
 export type ProviderDiagnostic = {
   /** The provider's own error slug, verbatim, or null if it sent none. */
@@ -64,7 +67,9 @@ export type ChannelErrorCode =
   | "transport"
   | "no_recipient"
   | "unsupported_capability"
-  | "empty_message";
+  | "empty_message"
+  | "bad_signature"
+  | "malformed_inbound";
 
 /**
  * The line this user is assigned to is dead — not the platform, this line.

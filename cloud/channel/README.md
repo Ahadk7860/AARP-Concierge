@@ -15,9 +15,12 @@ adapter or crosses in a field the frozen contract already names.
 | `src/linq-channel.ts` | yes — the adapter, and the only place Linq vocabulary appears |
 | `src/errors.ts` | no — typed errors Track D branches on |
 | `src/rate-limiter.ts` | no — a sliding-window limiter that does not know who it is calling |
+| `src/inbound.ts` | no — signature verification and `inbound.v1` assembly |
 
-That split is checked, not asserted: `grep -rn 'linq' cloud/channel/src --include=*.ts -il`
-matches `linq-channel.ts` and its test, and nothing else.
+That split is checked, not asserted: of the non-test sources,
+`grep -rn 'linq' cloud/channel/src --include=*.ts -il` matches **only**
+`linq-channel.ts`. The two test files match, which is expected — they test the Linq
+adapter.
 
 ## Typed errors
 
@@ -145,6 +148,31 @@ the number lives in config and the answer lands there rather than in a diff.
 
 All of these are in `.env.example`.
 
+## Inbound
+
+`normalizeInbound(rawBody, signature)` verifies **before** it parses. An unverified body is
+attacker-controlled input, and any line that interprets it before the signature is checked
+is a line running on somebody else's data.
+
+- **Raw bytes only.** Pass exactly what arrived — a string, a `Buffer`, a `Uint8Array`. An
+  already-parsed object is refused, because re-serializing it to check a signature compares
+  against bytes that were never on the wire. Key order and whitespace normalize away, so
+  that bug passes every test written the same wrong way and fails on the first real
+  webhook.
+- **Constant-time comparison**, `crypto.timingSafeEqual`. An early-returning compare leaks
+  how much of a forged signature was right, which is enough to build a valid one a byte at
+  a time.
+- **Two distinct errors.** `SignatureError` (`bad_signature`) is a security event;
+  `InboundParseError` (`malformed_inbound`) is schema drift. Collapsing them means neither
+  gets the response it deserves.
+- **Swappable verifier.** The real scheme is unconfirmed (`CONTRACTS.md` § 11 item 2), so
+  it is an injected strategy: `new LinqChannel(config, { verifier })`.
+- **Unknown `type` is refused, never defaulted to `text`.** Defaulting would turn a read
+  receipt into a message with null text, and Track D would treat provider noise as
+  something a person said.
+- **`user_id` is null** unless a `resolveUser` resolver is injected. Pairing owns that
+  mapping and pairing is Track D's; an unknown handle is a normal state, not an error.
+
 ## Two things the caller must supply
 
 **A handle resolver.** `outbound.v1` carries `user_id` and no handle, and the schema is
@@ -157,10 +185,15 @@ new LinqChannel(loadLinqChannelConfig(), {
 });
 ```
 
-**Nothing for inbound yet.** `normalizeInbound` throws `not_implemented`; it lands in
-prompt 03. It throws rather than returning a plausible stub because the frozen contract says
-it never returns a partially-normalized message, and a stub would let Track D build against
-fabricated inbound without noticing until integration.
+**A user resolver, if you want `user_id` populated.** `normalizeInbound` sets `user_id`
+to null unless `resolveUser(handle)` is injected, which `inbound.v1` explicitly allows.
+
+```ts
+new LinqChannel(loadLinqChannelConfig(), {
+  resolveHandles: async (userId) => [await db.phoneFor(userId)],
+  resolveUser: (handle) => db.userForHandle(handle),   // optional
+});
+```
 
 ## Tests
 

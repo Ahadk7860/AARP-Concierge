@@ -618,7 +618,11 @@ describe("LinqChannel — health", () => {
 
 describe("LinqChannel — the abstraction boundary", () => {
   it("normalizeInbound refuses rather than returning a partial message", () => {
-    expect(() => channel().normalizeInbound({}, "sha256=x")).toThrow(/not_implemented/);
+    // Prompt 03 replaced the not_implemented stub with the real thing. The contract's
+    // guarantee is unchanged and still asserted here: an unverifiable input throws, and
+    // no partially-normalized message is ever returned. Full coverage in inbound.test.ts.
+    expect(() => channel().normalizeInbound({}, "sha256=x")).toThrow(/raw body required/);
+    expect(() => channel().normalizeInbound('{"id":"x"}', "sha256=wrong")).toThrow(/bad_signature/);
   });
 
   it("no Linq field survives into SendResult or ChannelHealth", async () => {

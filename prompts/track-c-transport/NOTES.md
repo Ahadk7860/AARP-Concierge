@@ -125,6 +125,32 @@ after, so a restart or a second replica finds it. Track D needs to know this; no
 `CONTRACTS.md` says it today. Also worth asking Linq whether `POST /chats` accepts an
 idempotency key at all, since that would collapse the whole problem.
 
+`[prompt 03]` **`contracts/fixtures/inbound/draft_choice_2.json` cannot be produced from
+`contracts/transcripts/linq/inbound_webhook.json`.** Prompt 03's DoD says the normalized
+reference body "matches `draft_choice_2.json` in every field except `provider_message_id`
+and timestamps." Three more fields differ. Two I resolved without weakening anything; the
+third is irreducible.
+
+| Field | Fixture | From the webhook | Resolution |
+|---|---|---|---|
+| `provider` | `"mock"` | `"linq"` | `providerLabel` is config; the test sets it and the field matches |
+| `user_id` | `"usr_demo0001"` | unknown handle → `null` | `resolveUser` is injectable; the test supplies one |
+| `reply_to_message_id` | `"omsg_9001"` | `"lmsg_01J8ZK"` | **irreducible** |
+
+The third is the real one. The fixture expects **Boi's own outbound message id**; the
+webhook carries the **provider's** id for the message being replied to. Translating one to
+the other requires a `provider_message_id -> omsg_*` lookup over messages we sent, which is
+storage Track C does not own. So either:
+
+- Track D performs that translation after normalization, and `inbound.v1`'s
+  `reply_to_message_id` is documented as *provider-scoped* on arrival; or
+- the fixture is wrong and should carry `lmsg_01J8ZK`.
+
+I did not weaken the assertion to hide this. The test compares every field except the
+three, and then **pins all three explicitly**, including asserting the fixture still says
+`omsg_9001` — so if anyone changes either side, the test fails and this note gets revisited.
+The DoD item is reported as failing as written.
+
 No other gap. Every contract prompts 01 and 02 needed was present and sufficient.
 
 ## Shared file changes
@@ -209,6 +235,11 @@ an append. Documented in `cloud/mock-linq/README.md` instead.
 `new LinqChannel(config, { resolveHandles })`, where `resolveHandles(user_id)` returns the
 recipient handles for that user. `outbound.v1` cannot carry them. Nothing in `CONTRACTS.md`
 tells Track D this yet — see `## Contract gaps`.
+
+`[prompt 03] → Track D: reply_to_message_id arrives provider-scoped.` A normalized
+`inbound.v1` carries the provider's id for the replied-to message (`lmsg_...`), not Boi's
+own (`omsg_...`). See `## Contract gaps`. Also: inject `resolveUser` if you want `user_id`
+populated — pairing is yours, and without a resolver it is null, which the schema allows.
 
 `[prompt 02] → Track D: durable idempotency is yours.` See `## Contract gaps`. The
 adapter's cache is in-process and cannot survive a restart or span replicas.
@@ -470,6 +501,60 @@ No outbound block produces them, nothing reads them. They exist because the froz
 until something uses them. Stated in the README and asserted by a test that flips all three
 and shows the wire payload is byte-identical, so the criterion cannot keep looking green on
 their behalf.
+
+## Prompt 03 — inbound
+
+Verify first, then parse. An unverified body is attacker-controlled input, so nothing
+interprets the contents until the bytes are authenticated. Asserted by a mutation: deleting
+the verify call fails four tests.
+
+### The split
+
+`inbound.ts` is provider-neutral — verification strategies, `inbound.v1` assembly, the
+`user_id` rule, the timestamp rule. The Linq-specific part (which key holds the id, what
+the type strings are) is `extractLinqWebhook` in `linq-channel.ts`. A second provider is a
+new extractor, not a change to the normalizer, and there is a test that drives `normalize`
+with a Twilio-shaped extractor to prove the seam is real rather than asserted.
+
+**This regressed prompt 02's leakage grep and I fixed it rather than restating the
+criterion.** My first draft of `inbound.ts` and `errors.ts` named the vendor in comments, so
+`grep -rn 'linq' cloud/channel/src --include=*.ts -il` matched four files instead of one.
+The comments now say "the provider". Of the non-test sources only `linq-channel.ts` matches;
+the two test files match, which is expected since they test the Linq adapter. Worth noting
+because the criterion caught something a human reviewer would likely have waved through —
+comments are exactly where vendor knowledge leaks back in.
+
+### Decisions
+
+- **An unknown `type` is refused, never defaulted to `text`.** Defaulting would turn a read
+  receipt into a message with null text, and Track D would treat provider noise as
+  something a person said. That is the fabrication failure arriving through the back door.
+- **Text is only carried on a text-bearing kind.** A read receipt with a stray `text` field
+  normalizes to `text: null`.
+- **A `reaction` field beats a `type` of `message`.** The stronger signal wins, so a
+  tapback delivered as a generic message event is still a tapback.
+- **A parsed object is refused outright.** Re-serializing to verify would compare against
+  bytes that were never on the wire. The refusal has its own message telling the caller to
+  pass raw bytes.
+- **An invalid or absent provider timestamp falls back to our own receipt time**, not null:
+  the schema requires `received_at`, and "we received it now" is a true statement. A
+  malformed one is not silently trusted.
+- **`trace_id` is validated as a W3C traceparent** and dropped if it is not one. Passing
+  through an arbitrary string would put unvalidated provider data in an observability field.
+- **`SignatureError` and `InboundParseError` are separate classes with separate codes.** One
+  is a security event worth alerting on, the other is schema drift worth a bug report.
+
+### Mutation testing
+
+Five mutations, all caught: inverting verify/parse order (4 tests), replacing
+`timingSafeEqual` with `===` (1), re-serializing before verifying (2), defaulting an unknown
+type to `text` (1), and collapsing the two error codes into one (1).
+
+The constant-time assertion is a source-text check on
+`return timingSafeEqual(expected, actual);`. That is a weaker kind of test than the rest —
+it asserts the implementation rather than the behaviour — but timing behaviour cannot be
+asserted reliably in a unit test, and the alternative is no check at all. Flagging the
+weakness rather than letting it read as equivalent to the others.
 
 ## Decisions made
 
