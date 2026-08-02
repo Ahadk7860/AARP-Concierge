@@ -214,19 +214,53 @@ numbering. The real reorder opportunities in this plan:
 
 ## Step 5 — When a track finishes
 
-Do not let the working session review itself. Open a **new** session in that same worktree
-and paste the review block **copied verbatim from `prompts/TRACK-REVIEW.md`**. Prefix it
-with:
+The working session does **not** review itself, and the review is not one reader. Three
+passes, three different readers, because the three questions worth asking need opposite
+things: one needs a machine that can execute the suite, one needs maximum ignorance, one
+needs maximum context. Full procedure: `prompts/TRACK-REVIEW.md`.
 
+### 5a — Evidence (you, in the worktree, 30 seconds)
+
+```bash
+cd /Users/skylerluk/Dev/boi-imessage-track-<letter>
+bash scripts/review-capture.sh <letter>
 ```
-You are a fresh reviewer for Track <X>, in the worktree at
-/Users/skylerluk/Dev/boi-imessage-track-<x>. You did not do this work and you have not
-seen the conversation that produced it.
+
+Re-runs that track's tests, lint, ownership check and fixture validation from a clean
+state and writes `review-capture-<letter>.md` in the worktree. A failing command is the
+finding — do not fix it and re-run.
+
+This step lives on your Mac because it has to: the planning session runs in a Linux
+container with no Swift, no Xcode and no local Postgres, so it cannot execute Track A's
+suite or Track D's migrations. Execution happens where it can; only the output travels.
+
+### 5b and 5c — Hand it to the planning session
+
+Say **"Track \<letter\> is done"** in the planning conversation and attach
+`review-capture-<letter>.md`. It runs the remaining two passes:
+
+- **Pass 2, diff audit** — a fresh subagent it spawns, with no memory of the plan and no
+  access to the conversation, told to try to fail the track on five questions plus one
+  only it can ask: *was the criterion worth satisfying?* The planning session wrote every
+  Definition of Done before any code existed, so it cannot judge its own criteria — a
+  badly specified check looks correct to whoever specified it. That is why this pass has
+  no memory, and it is the reason the review is not collapsed into one seat.
+- **Pass 3, alignment** — the planning session itself. The question no track can ask
+  about itself: does this contradict another track, is the contract still right, does it
+  hold the product line, and what did this track learn that changes the plan. It may make
+  surgical edits to `prompts/` and `contracts/` through the amendment procedure in
+  `WORKTREE-PROTOCOL.md`. It does not edit track code and it does not merge.
+
+You get back a merge recommendation and a list of what changed in the plan.
+
+### 5d — You merge
+
+Nothing merges on its own and no pass may skip a step. If Pass 3 amended a contract,
+forward-merge it into every affected track **before** anyone resumes:
+
+```bash
+git merge main    # inside each affected worktree. Never rebase.
 ```
-
-then the full text of `prompts/TRACK-REVIEW.md`.
-
-Then you review the findings, and you decide the merge. Nothing merges on its own.
 
 ## Step 6 — What is deliberately not in this round
 
