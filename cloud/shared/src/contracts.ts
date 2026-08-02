@@ -155,6 +155,22 @@ export interface Channel {
   send(msg: OutboundMessage): Promise<SendResult>;
   capabilities(): Promise<Capabilities>;
   health(): Promise<ChannelHealth>;
-  /** Throws on signature failure. Never returns a partially-normalized message. */
-  normalizeInbound(rawBody: unknown, signature: string): InboundMessage;
+  /**
+   * Throws on signature failure. Never returns a partially-normalized message.
+   *
+   * `rawBody` is the RAW REQUEST BYTES, before any JSON parsing. Not the parsed
+   * object. A signature is computed over bytes, so re-serializing and re-signing a
+   * parsed object verifies a different document than the one that arrived — key
+   * order alone breaks it.
+   *
+   * This was typed `unknown` until 2 Aug, which let the transport implementation and
+   * the foundation stub disagree about what the argument means without the compiler
+   * noticing. That is precisely the disagreement a type at this seam exists to catch.
+   *
+   * Callers behind Fastify: register a raw-body content-type parser BEFORE the JSON
+   * parser and pass `req.rawBody`. And guard the header — `req.headers[...]` is
+   * `string | string[] | undefined`, and a missing signature must become
+   * `401 bad_signature`, never a 500.
+   */
+  normalizeInbound(rawBody: Buffer | string, signature: string): InboundMessage;
 }

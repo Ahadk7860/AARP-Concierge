@@ -38,9 +38,21 @@ export class StubChannel implements Channel {
     return { status: this.mode, line_id: this.lineId, checked_at: new Date().toISOString() };
   }
 
-  normalizeInbound(rawBody: unknown, signature: string): InboundMessage {
+  normalizeInbound(rawBody: Buffer | string, signature: string): InboundMessage {
     if (signature !== "stub-signature") throw new Error("bad_signature");
-    const b = rawBody as Record<string, unknown>;
+    // Raw bytes, exactly like the real adapter. Accepting a parsed object here would
+    // let a consumer develop against a stub that tolerates what production rejects,
+    // and the failure would surface as a signature bug on the first live webhook.
+    if (typeof rawBody !== "string" && !Buffer.isBuffer(rawBody)) {
+      throw new Error("raw_body_required");
+    }
+    const text = Buffer.isBuffer(rawBody) ? rawBody.toString("utf8") : rawBody;
+    let b: Record<string, unknown>;
+    try {
+      b = JSON.parse(text) as Record<string, unknown>;
+    } catch {
+      throw new Error("malformed_inbound");
+    }
     return {
       schema_version: "inbound.v1",
       provider: "mock",
