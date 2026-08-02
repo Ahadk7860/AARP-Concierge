@@ -385,45 +385,74 @@ describe("automatic downgrade — green and late beats blue and never", () => {
 });
 
 describe("rotation — the re-introduction", () => {
-  it("leads with 'new number' on the first message from a line, and only the first", async () => {
-    const { routed, fallback: _f, registry } = harness();
-    await routed.send(message("usr_rot", "rot-1"));
+  it("does NOT introduce on a user's first ever message — there was no previous number", async () => {
+    // The preamble says "same conversation, new bubbles". For a brand-new user that is a
+    // false statement about their own history, in the product's voice. Track D also sends
+    // a genuine first-contact message with a contact card; this would land on top of it.
+    const { routed, registry } = harness();
+    await routed.send(message("usr_brand_new", "new-1"));
 
-    const first = mock.recorder.last();
-    const firstParts = (first?.body as { message: { parts: { type: string; text: string }[] } }).message.parts;
-    expect(firstParts[0]?.text).toBe(DEFAULT_INTRODUCTION);
+    const parts = (mock.recorder.last()?.body as { message: { parts: { type: string; text: string }[] } }).message.parts;
+    expect(parts, "a first-ever send must carry only the caller's blocks").toHaveLength(1);
+    expect(parts[0]?.text).toBe("3 people are waiting on you.");
+    expect(routed.routes.at(-1)?.introduced).toBe(false);
+    expect(registry.needsIntroduction("usr_brand_new", "line_a1")).toBe(false);
+  });
+
+  it("leads with 'new number' after a rotation, and only on the first message from it", async () => {
+    const { routed, registry } = harness();
+
+    // Place the user first, then rotate. This is the shape that actually produces the
+    // preamble: an existing user whose number changed.
+    await routed.send(message("usr_rot", "rot-0"));
+    const before = registry.lineFor("usr_rot");
+    registry.migrate("usr_rot", "rotation");
+    const after = registry.lineFor("usr_rot");
+    expect(after).not.toBe(before);
+
+    mock.recorder.clear();
+    await routed.send(message("usr_rot", "rot-1"));
+    const firstParts = (mock.recorder.last()?.body as { message: { parts: { type: string; text: string }[] } }).message.parts;
     expect(firstParts).toHaveLength(2);
+    expect(firstParts[0]?.text).toBe(DEFAULT_INTRODUCTION);
     expect(routed.routes.at(-1)?.introduced).toBe(true);
 
     mock.recorder.clear();
     await routed.send(message("usr_rot", "rot-2"));
-    const second = mock.recorder.last();
-    const secondParts = (second?.body as { message: { parts: { type: string }[] } }).message.parts;
-    expect(secondParts).toHaveLength(1);
+    const secondParts = (mock.recorder.last()?.body as { message: { parts: { type: string }[] } }).message.parts;
+    expect(secondParts, "only the first message from the new line").toHaveLength(1);
     expect(routed.routes.at(-1)?.introduced).toBe(false);
+  });
 
-    // And again after a migration: a NEW line means a new introduction.
-    registry.migrate("usr_rot", "rotation");
+  it("a health migration also introduces — the user's number changed either way", async () => {
+    const { routed, registry } = harness();
+    await routed.send(message("usr_health", "health-0"));
+    registry.migrate("usr_health", "health");
+
     mock.recorder.clear();
-    await routed.send(message("usr_rot", "rot-3"));
-    const third = mock.recorder.last();
-    const thirdParts = (third?.body as { message: { parts: { type: string; text: string }[] } }).message.parts;
-    expect(thirdParts).toHaveLength(2);
-    expect(thirdParts[0]?.text).toBe(DEFAULT_INTRODUCTION);
+    await routed.send(message("usr_health", "health-1"));
+    const parts = (mock.recorder.last()?.body as { message: { parts: { text: string }[] } }).message.parts;
+    expect(parts[0]?.text).toBe(DEFAULT_INTRODUCTION);
   });
 
   it("a failed send does not burn the introduction", async () => {
     // Marking before the send succeeds would leave a user permanently un-introduced —
     // they would silently receive messages from an unknown number forever.
-    mock.config.mode = "ratelimited";
     const { routed, registry } = harness();
-    registry.assign("usr_burn");
+    // Place then rotate, so an introduction is genuinely due — a first-ever assignment
+    // owes no introduction at all.
+    await routed.send(message("usr_burn", "burn-0"));
+    registry.migrate("usr_burn", "rotation");
+    const line = registry.lineFor("usr_burn") ?? "";
+    expect(registry.needsIntroduction("usr_burn", line)).toBe(true);
+
+    mock.config.mode = "ratelimited";
     await expect(routed.send(message("usr_burn", "burn-1"))).rejects.toThrow();
-    expect(registry.needsIntroduction("usr_burn", "line_a1")).toBe(true);
+    expect(registry.needsIntroduction("usr_burn", line), "a failed send must not consume it").toBe(true);
 
     mock.config.mode = "up";
     await routed.send(message("usr_burn", "burn-2"));
-    expect(registry.needsIntroduction("usr_burn", "line_a1")).toBe(false);
+    expect(registry.needsIntroduction("usr_burn", line)).toBe(false);
   });
 
   it("migration is recorded as an event with a reason, not a silent reassignment", () => {
@@ -441,6 +470,65 @@ describe("rotation — the re-introduction", () => {
     expect(loadRoutedChannelConfig({ LINE_INTRODUCTION_TEXT: "hi, new number" } as NodeJS.ProcessEnv).introductionText).toBe(
       "hi, new number",
     );
+  });
+});
+
+describe("idempotency holds at the layer the caller actually holds", () => {
+  it("a retry after the line goes banned does not text the user twice", async () => {
+    // The exact path the review found. The primary adapter has its own cache, but a
+    // degradeOn line routes straight to the fallback without consulting it — so without
+    // keying HERE, send(K), ban, retry(K) texts a real person twice, in one process,
+    // with no restart involved.
+    const { routed, registry, fallback } = harness();
+    const msg = message("usr_dbl", "double-text-K");
+
+    const first = await routed.send(msg);
+    expect(mock.recorder.all()).toHaveLength(1);
+    expect(fallback.sent).toHaveLength(0);
+
+    registry.setStatus(registry.lineFor("usr_dbl") ?? "", "banned");
+
+    const second = await routed.send(msg);
+    expect(second, "same key must return the first result").toEqual(first);
+    expect(fallback.sent, "the fallback must not have been used at all").toHaveLength(0);
+    expect(mock.recorder.all(), "and no second request went anywhere").toHaveLength(1);
+  });
+
+  it("the same key on the fallback path is also served once", async () => {
+    const { routed, registry, fallback } = harness();
+    registry.assign("usr_fb");
+    registry.setStatus("line_a1", "banned");
+    const msg = message("usr_fb", "fallback-K");
+
+    const first = await routed.send(msg);
+    const second = await routed.send(msg);
+    expect(fallback.sent).toHaveLength(1);
+    expect(second).toEqual(first);
+  });
+
+  it("concurrent sends with one key collapse to a single delivery", async () => {
+    const { routed, fallback } = harness();
+    const msg = message("usr_conc", "concurrent-K");
+    const [a, b, c] = await Promise.all([routed.send(msg), routed.send(msg), routed.send(msg)]);
+    expect(mock.recorder.all()).toHaveLength(1);
+    expect(fallback.sent).toHaveLength(0);
+    expect(a).toEqual(b);
+    expect(b).toEqual(c);
+  });
+
+  it("a DIFFERENT key still sends, and a FAILED send is not cached", async () => {
+    const { routed } = harness();
+    await routed.send(message("usr_k", "key-1"));
+    await routed.send(message("usr_k", "key-2"));
+    expect(mock.recorder.all()).toHaveLength(2);
+
+    mock.config.mode = "ratelimited";
+    await expect(routed.send(message("usr_k", "key-3"))).rejects.toThrow();
+    mock.config.mode = "up";
+    // Not cached, so the retry is allowed through — a request that failed must stay
+    // retryable.
+    await routed.send(message("usr_k", "key-3"));
+    expect(mock.recorder.all()).toHaveLength(4);
   });
 });
 

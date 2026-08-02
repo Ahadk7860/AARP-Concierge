@@ -107,7 +107,12 @@ failure the product rules forbid. Same for unreachable: not healthy, and not pro
 `SendResult` without a second request, and concurrent sends with one key collapse to a
 single request. A **failed** send is not cached, so the retry is allowed through.
 
-**Two limits worth knowing, both of which can double-text a user.** The DoD this satisfies
+`RoutedChannel` keys **independently**, and must: routing to the fallback on a `degradeOn`
+line never consults the primary's cache at all, so without keying at the routing layer,
+`send(K)` → line goes banned → retry `K` texts the user twice, in one process, with no
+restart involved. Track D holds `RoutedChannel`, so that is the layer that has to be right.
+
+**Three limits worth knowing, all of which can double-text a user.** The DoD this satisfies
 is "one request reached the mock"; it is not "the user was not texted twice".
 
 1. **The cache is an in-memory `Map` on the instance.** It dies with the process and is not
@@ -119,9 +124,16 @@ is "one request reached the mock"; it is not "the user was not texted twice".
    retryable. But a timeout cannot distinguish those two cases, so a caller that retries
    double-texts.
 
-Neither is fixable inside this track: the Linq subset documents no idempotency header, and
-inventing one would be inventing wire format. Durable idempotency belongs to Track D, and
-this is recorded as a contract gap in `NOTES.md`.
+3. **Nothing above `RoutedChannel` is covered.** Both caches are in-process maps. Two
+   replicas, or a queue worker that restarts mid-brief, still double-send.
+
+Neither of the first two is fixable inside this track: the Linq subset documents no
+idempotency header, and inventing one would be inventing wire format.
+
+> **Track D: durable idempotency belongs ABOVE `RoutedChannel`.** A persisted
+> `(user_id, idempotency_key) → message_id` written before the send and settled after is
+> the only thing that survives a restart or spans replicas. The in-process caches here are
+> a floor, not the guarantee.
 
 ## Rate limiting
 
@@ -238,8 +250,13 @@ to hide a signal we need. Asserted class by class.
 A known-banned line gets **no** doomed attempt first, because retrying a banned line is what
 deepens the ban.
 
-**Re-introduction on rotation.** The first message from a new line leads with "this is Boi,
-texting from a new number", exactly once per (user, line). Arriving from a new number and
+**Re-introduction on rotation — and never on first contact.** The first message from a
+*new* line leads with "this is Boi, texting from a new number", exactly once per
+(user, line). A **first-ever** assignment is marked introduced immediately and gets no
+preamble: there was no previous conversation and no previous number, so saying "same
+conversation, new bubbles" would be a false statement about the user's own history in the
+product's voice — and Track D already sends a genuine first-contact message with a contact
+card, which this would land on top of. Arriving from a new number and
 resuming mid-conversation reads as a stranger who somehow knows you. The mark is committed
 **after** a successful send — marking before would let a failed send burn the introduction
 and leave a user permanently un-introduced.

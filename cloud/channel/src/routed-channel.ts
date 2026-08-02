@@ -89,6 +89,20 @@ export class RoutedChannel implements Channel {
   private readonly now: () => Date;
   /** Every send's route. Bounded by the caller's usage; Track D persists what it needs. */
   readonly routes: RouteRecord[] = [];
+  /**
+   * Idempotency AT THIS LAYER, not only in the primary.
+   *
+   * The primary adapter has its own cache, but routing can bypass it entirely: a
+   * `degradeOn` line goes straight to the fallback without the primary ever being
+   * consulted. So `send(K)` on a healthy line, line goes banned, caller retries `K` —
+   * without this map the user is texted twice, in one process, with no restart involved.
+   *
+   * The criterion prompt 02 satisfied was "one request reached the mock". The property
+   * that matters is "the user is not texted twice", and it has to hold at whatever layer
+   * the caller actually holds — which for Track D is this one.
+   */
+  private readonly sent = new Map<string, SendResult>();
+  private readonly inFlight = new Map<string, Promise<SendResult>>();
 
   constructor(config: RoutedChannelConfig, deps: RoutedChannelDeps) {
     this.config = config;
@@ -100,6 +114,23 @@ export class RoutedChannel implements Channel {
   }
 
   async send(msg: OutboundMessage): Promise<SendResult> {
+    const cached = this.sent.get(msg.idempotency_key);
+    if (cached !== undefined) return cached;
+    const pending = this.inFlight.get(msg.idempotency_key);
+    if (pending !== undefined) return pending;
+
+    const attempt = this.route(msg);
+    this.inFlight.set(msg.idempotency_key, attempt);
+    try {
+      const result = await attempt;
+      this.sent.set(msg.idempotency_key, result);
+      return result;
+    } finally {
+      this.inFlight.delete(msg.idempotency_key);
+    }
+  }
+
+  private async route(msg: OutboundMessage): Promise<SendResult> {
     // Sticky: this returns the existing assignment untouched, so calling it on every send
     // is what enforces stickiness rather than merely intending it.
     const lineId = this.registry.assign(msg.user_id);

@@ -694,6 +694,105 @@ storm across many users on one line will serialize behind the limiter. That is t
 trade, but it means throughput is bounded per line, and **capacity planning is lines, not
 workers**.
 
+## Pass 2 corrections — two blockers, three follow-ups
+
+### BLOCKER 1 — the preamble fired on a user's first ever message
+
+`needsIntroduction(user, line)` was true for any unseen pair, including initial
+assignment, so a brand-new user was told **"same conversation, new bubbles"** when there
+was no previous conversation and no previous number.
+
+**That is a fabrication about the user's own history, in the product's voice** — the one
+rule this codebase repeats most and I crossed it in the one place the user actually reads.
+And it collided with Track D: their prompt 03 sends the genuine first-contact message with
+a contact card, which my preamble would have landed on top of.
+
+Fixed in `LineRegistry.place()`: `reason === "initial"` marks the pair introduced
+immediately, so `needsIntroduction` now means *"your number changed"*, never *"we have not
+met"*. The reason was already being computed and thrown away.
+
+**My test asserted the wrong behaviour.** `line-health.test.ts` used a never-before-assigned
+user and checked that the preamble appeared — pinning the bug as if it were the spec.
+Rewritten to place the user, then rotate, which is the shape that genuinely produces a
+preamble. Added a test that a first-ever send carries only the caller's blocks, and one
+that a `health` migration introduces too.
+
+Worth naming the failure mode: I mutation-tested prompt 04 seven ways and every mutation
+passed *against my own test*, because the test encoded my misunderstanding. **Mutation
+testing proves a test can fail; it cannot tell you the test is asking the right question.**
+That needed a reader who knew what the product should say.
+
+### BLOCKER 2 — idempotency did not hold at the layer Track D holds
+
+Keying lived in `LinqChannel`. But `RoutedChannel` routes to the fallback on a `degradeOn`
+line **without consulting the primary at all**, so `send(K)` → line goes banned → retry `K`
+went out twice. One process, no restart, a real person texted twice.
+
+The criterion said "one request reached the mock". The property was "the user is not texted
+twice", and those came apart the moment a second layer existed.
+
+`RoutedChannel` now keys independently, covering the primary path, the fallback path and
+concurrent duplicates; failed sends stay uncached so a retry is still allowed through.
+Four new tests, including the exact ban-then-retry sequence.
+
+Both fixes mutation-tested in both directions: reverting the introduction gate fails 1 test,
+introducing *never* fails 3, removing the routing cache fails 2, and caching failures fails
+1.
+
+### Follow-ups — recorded, not fixed, per the review
+
+These do not block the merge and I did not touch them, so the merge diff stays the two
+blockers.
+
+1. **`LINE_STICKY` parses and does nothing.** Both branches of the `if` in
+   `LineRegistry.assign()` return `existing.lineId`, so `sticky: false` behaves identically
+   to `sticky: true`. `assumeRotationNotice` and `banCoveredBySla` on `LineRegistryConfig`
+   are never read either — `banCoveredBySla` is read only from `RoutedChannelConfig`.
+   **Three inert config values**, the same defect I already documented for
+   `tapbacks` / `richlinks` / `typing` and did not spot in my own new code. Either wire them
+   or mark them inert in the config comment the way the capability flags are.
+
+2. **`LINE_BAN_COVERED_BY_SLA` has two parsers with different semantics.**
+   `routed-channel.ts` accepts `"true"` or `"1"` and treats everything else as false;
+   `line-registry.ts` uses the strict `parseBool` that throws on an unrecognized value. Same
+   variable, two readings, and the strict one is the dead one. The lax parser is what is
+   live, so `LINE_BAN_COVERED_BY_SLA=yes` silently means false. Should be the strict parser
+   in both.
+
+3. **`hmacSha256Verifier` throws `TypeError` on an undefined signature.**
+   `Buffer.from(undefined)` throws before any comparison. Fastify hands a header as
+   `string | string[] | undefined`, so a webhook with no `X-Boi-Signature` becomes a **500
+   where `CONTRACTS.md` § 2 requires `401 {"error":"bad_signature"}`**. The mock server's own
+   `verifySignature` already guards this (`if (header === undefined) return false`); the
+   channel's verifier does not. Fix is one guard in `hmacSha256Verifier.verify`, plus
+   widening the signature parameter to `string | string[] | undefined`.
+
+   This one is a real correctness defect with a contract implication, not just tidiness. I
+   have left it per the instruction that the three do not block, and I would rather fix it
+   before the first live webhook than after.
+
+### Prompt 03's red item is NOT closed — the fixture is unchanged
+
+The review said `draft_choice_2.json` now carries `lmsg_01J8ZK` on `main`. It does not, on
+any ref reachable from here:
+
+```
+$ git log --all --oneline -- contracts/fixtures/inbound/draft_choice_2.json
+d95d215 foundation: contracts, stubs, fixtures, harness, and track prompts
+
+$ grep -rn "lmsg_01J8ZK" contracts/fixtures/
+(no match)
+
+$ git show origin/main:contracts/fixtures/inbound/draft_choice_2.json | grep reply_to
+  "reply_to_message_id": "omsg_9001",
+```
+
+`main` is an ancestor of HEAD, and the fixture has been touched by exactly one commit — the
+foundation. So the DoD item stays red and the test still pins both sides, including
+`expect(DRAFT_CHOICE_2.reply_to_message_id).toBe("omsg_9001")`. **The moment the fixture
+does change, that assertion fails loudly** and the exclusion can be removed — which is the
+behaviour I wanted from pinning rather than merely ignoring the field.
+
 ## Decisions made
 
 Choices the prompt left open that you had to resolve: a library, a data structure, an

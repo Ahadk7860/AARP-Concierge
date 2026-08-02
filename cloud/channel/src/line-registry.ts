@@ -196,6 +196,15 @@ export class LineRegistry {
       this.members.set(target, set);
     }
     set.add(userId);
+
+    // A FIRST-EVER assignment is not a rotation, and must not produce the "new number"
+    // preamble. Telling a brand-new user "same conversation, new bubbles" is a false
+    // statement about their own history in the product's voice — degrade-never-fabricate,
+    // crossed — and it would land on top of Track D's genuine first-contact message.
+    // Marking them introduced here is what makes `needsIntroduction` mean "your number
+    // changed", not "we have not met".
+    if (reason === "initial") this.markIntroduced(userId, target);
+
     return { user_id: userId, from: previous, to: target, at, reason };
   }
 
@@ -224,11 +233,16 @@ export class LineRegistry {
   }
 
   /**
-   * True the first time this user is messaged from this line, false forever after.
+   * True when this user needs telling that their NUMBER CHANGED — never on first contact.
    *
    * The product rule it serves: arriving from a new number and resuming mid-conversation
    * reads as a stranger who somehow knows you. Leading with "this is Boi, new number" is
    * the difference between a migration and a cold, slightly alarming contact.
+   *
+   * But the inverse is just as wrong. On a first-ever assignment there was no previous
+   * conversation and no previous number, so the preamble would be a fabrication — and
+   * Track D already sends a real first-contact message with a contact card. Initial
+   * placement therefore marks the pair introduced immediately; see `place()`.
    */
   needsIntroduction(userId: string, lineId: LineId): boolean {
     return !this.introduced.has(`${userId} ${lineId}`);
