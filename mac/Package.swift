@@ -14,9 +14,11 @@ let package = Package(
     platforms: [.macOS(.v13)],
     products: [
         .library(name: "BoiKit", targets: ["BoiKit"]),
+        .executable(name: "boi-cli", targets: ["BoiCLI"]),
     ],
     targets: [
         .target(name: "BoiKit"),
+        .executableTarget(name: "BoiCLI", dependencies: ["BoiKit"]),
         .testTarget(name: "BoiKitTests", dependencies: ["BoiKit"]),
     ]
 )
