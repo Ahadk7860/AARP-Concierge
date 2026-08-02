@@ -17,6 +17,14 @@ public enum StructuredLog {
         return formatter.string(from: date)
     }
 
+    /// Inverse of `timestamp`. Returns nil on anything this file did not write.
+    public static func date(from string: String) -> Date? {
+        let formatter = ISO8601DateFormatter()
+        formatter.timeZone = TimeZone(identifier: "UTC")
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: string)
+    }
+
     public static func line(_ event: String,
                             level: Level = .info,
                             at date: Date = Date(),

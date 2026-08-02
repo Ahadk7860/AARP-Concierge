@@ -150,6 +150,33 @@ Format: `[prompt NN] → Track <X>: <what you need and why>`
 Anywhere the implementation departs from what the prompt described, and why. A
 deviation is not a failure — an unrecorded one is.
 
+`[prompt 02] CORRECTION — the trailing window was anchored only on the wall clock, which
+left a hole after any outage longer than the window.` Caught by the user in review.
+
+`last_sync_at` was written on every run and never read, so the window was always
+`[now-30d, now]`. A Mac shut for two months resumed scanning the last 30 days and never
+looked at the 60 it missed. Rows that landed in that gap were then covered by the ROWID
+half of the watermark alone — so any row arriving *below* the high-water mark was lost
+permanently, which is precisely the case the trailing re-scan exists to cover: restores,
+iCloud renumbering, out-of-order commits. "The Mac is allowed to be asleep" is an
+architectural premise in `CONTRACTS.md` § 0, and a campus beachhead means summer breaks.
+
+Now `cutoff = min(now - window, last_sync_at - window)`, so the window always reaches
+back at least to one full window before the previous run. Overlapping the previous run
+is the point: a gap is unrecoverable, an overlap is just dedup, and dedup is by `guid`
+and already free. `MirrorSync.Stats` now carries `windowStart` and `previousSyncAt`, and
+the CLI logs both, so the window a run actually used is visible rather than inferred.
+
+`trailingWindowDays` is now overridable on `MirrorSync` and via
+`boi-cli sync --trailing-window-days <n>`. Fixed at 30 there was no way to reach further
+back after a long outage.
+
+Three new tests, canary-verified: reverting to the clock-only anchor turns 18 passing
+mirror tests into **3 failures**. They cover the outage case, a floor (a run an hour
+after the last still reaches a full window back from *now*, so the window can never
+shrink on a healthy machine), and the override reaching a 200-day-old row below the
+watermark.
+
 `[prompt 02] The Definition of Done's backfill test does not discriminate, so I added
 one that does.` The criterion is: insert a message with a *new* ROWID and a 60-day-old
 date, re-sync, assert it lands. It says "a ROWID-only watermark fails this test" — but a

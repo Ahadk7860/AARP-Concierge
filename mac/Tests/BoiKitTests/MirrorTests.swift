@@ -30,15 +30,17 @@ enum ChatDBBuilder {
     }
 
     static func insert(rowID: Int64, guid: String, text: String, daysAgo: Int,
-                       isFromMe: Int = 0, join: Bool = true) -> String {
+                       isFromMe: Int = 0, join: Bool = true,
+                       from now: Date = Date()) -> String {
+        let date = appleNanos(daysAgo: daysAgo, from: now)
         var sql = """
             INSERT INTO message (ROWID, guid, text, handle_id, service, date, is_from_me,
                                  associated_message_type, attributedBody)
             VALUES (\(rowID), '\(guid)', '\(text)', 1, 'iMessage',
-                    \(appleNanos(daysAgo: daysAgo)), \(isFromMe), 0, NULL);
+                    \(date), \(isFromMe), 0, NULL);
             """
         if join {
-            sql += "\nINSERT INTO chat_message_join VALUES (1, \(rowID), \(appleNanos(daysAgo: daysAgo)));"
+            sql += "\nINSERT INTO chat_message_join VALUES (1, \(rowID), \(date));"
         }
         return sql
     }
@@ -187,6 +189,86 @@ final class MirrorTests: XCTestCase {
                        + "the watermark and older than the window is not recoverable "
                        + "incrementally. iMessage's own queue depth is 30 days, so a "
                        + "source in this state has usually lost the message too.")
+    }
+
+    // MARK: - The window after a long outage
+
+    /// A Mac shut for two months must not resume with a hole behind it.
+    ///
+    /// Anchored only on the clock, the window is always `[now-30d, now]`, so a machine
+    /// that slept for 60 days never looks at the 60 days it missed. Rows that landed in
+    /// that gap are then covered by the ROWID half alone — and any row arriving *below*
+    /// the high-water mark is lost permanently. Those are exactly the rows the trailing
+    /// re-scan exists for. "The Mac is allowed to be asleep" is an architectural
+    /// premise, and a campus beachhead means summer breaks.
+    func testTheWindowReachesBackToTheLastSyncAfterALongOutage() throws {
+        let start = Date(timeIntervalSince1970: 1_800_000_000)
+        let chat = try ChatDBBuilder.make(
+            ChatDBBuilder.insert(rowID: 1, guid: "A", text: "one", daysAgo: 1, from: start)
+            + ChatDBBuilder.insert(rowID: 10, guid: "B", text: "ten", daysAgo: 1, from: start),
+            label: "outage")
+
+        let first = try sync(chat, now: start)
+        XCTAssertEqual(first.watermarkAfter, 10)
+
+        // The Mac sleeps for 60 days. While it is away a row lands below the watermark,
+        // dated one day after the last sync -- long outside [resume-30d, resume].
+        try ChatDBBuilder.apply(
+            ChatDBBuilder.insert(rowID: 5, guid: "DURING_OUTAGE", text: "landed while away",
+                                 daysAgo: 59, from: start.addingTimeInterval(60 * 86_400)),
+            to: chat)
+
+        let resume = start.addingTimeInterval(60 * 86_400)
+        let second = try sync(chat, now: resume)
+
+        XCTAssertEqual(second.previousSyncAt, start, "last_sync_at is written but unread")
+        let windowStart = try XCTUnwrap(second.windowStart)
+        XCTAssertLessThan(windowStart, start,
+                          "the window must reach back past the last sync, not to resume-30d")
+        XCTAssertEqual(second.inserted, 1)
+        XCTAssertTrue(try MirrorDatabase(path: mirrorPath).contains(guid: "DURING_OUTAGE"))
+    }
+
+    /// The window must not *shrink* on a machine that syncs regularly: a run one hour
+    /// after the last one still reaches a full window back from now.
+    func testTheWindowIsNeverShorterThanOneWindowFromNow() throws {
+        let start = Date(timeIntervalSince1970: 1_800_000_000)
+        let chat = try ChatDBBuilder.make(
+            ChatDBBuilder.insert(rowID: 10, guid: "A", text: "one", daysAgo: 1, from: start),
+            label: "window-floor")
+        _ = try sync(chat, now: start)
+
+        let soon = start.addingTimeInterval(3600)
+        let second = try sync(chat, now: soon)
+        let windowStart = try XCTUnwrap(second.windowStart)
+        XCTAssertLessThanOrEqual(windowStart,
+                                 soon.addingTimeInterval(-Double(MirrorSync.defaultTrailingWindowDays) * 86_400))
+    }
+
+    /// After a long outage there has to be a way to reach further back than 30 days.
+    func testTheTrailingWindowIsOverridable() throws {
+        let start = Date(timeIntervalSince1970: 1_800_000_000)
+        let chat = try ChatDBBuilder.make(
+            ChatDBBuilder.insert(rowID: 10, guid: "A", text: "one", daysAgo: 1, from: start),
+            label: "window-override")
+        _ = try sync(chat, now: start)
+
+        // 200 days old and below the watermark: outside the default window entirely.
+        try ChatDBBuilder.apply(
+            ChatDBBuilder.insert(rowID: 5, guid: "OLD", text: "long ago", daysAgo: 200,
+                                 from: start),
+            to: chat)
+
+        let narrow = try sync(chat, now: start)
+        XCTAssertEqual(narrow.inserted, 0, "default window should not reach this row")
+
+        let reader = try MessageReader(path: chat)
+        let mirror = try MirrorDatabase(path: mirrorPath)
+        let wide = try MirrorSync(reader: reader, mirror: mirror,
+                                  trailingWindowDays: 365).run(now: start)
+        XCTAssertEqual(wide.trailingWindowDays, 365)
+        XCTAssertEqual(wide.inserted, 1)
+        XCTAssertTrue(try MirrorDatabase(path: mirrorPath).contains(guid: "OLD"))
     }
 
     // MARK: - Durability

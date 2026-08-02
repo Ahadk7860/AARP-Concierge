@@ -25,6 +25,7 @@ func flag(_ name: String) -> Bool { arguments.contains("--" + name) }
 let usage = """
 usage: boi-cli scan --db <path> [options]
        boi-cli sync --db <path> --mirror <path> [--search <text>]
+                    [--trailing-window-days <n>]
 
   --db <path>                 chat.db to read. Opened file:<path>?mode=ro, always.
   --snapshot                  copy the db and both sidecars first, then read the copy
@@ -159,7 +160,10 @@ case "sync":
         let reader = try MessageReader(path: databasePath)
         let mirror = try MirrorDatabase(path: mirrorPath)
         let before = try mirror.messageCount()
-        let stats = try MirrorSync(reader: reader, mirror: mirror).run()
+        let window = value("trailing-window-days").flatMap(Int.init)
+            ?? MirrorSync.defaultTrailingWindowDays
+        let stats = try MirrorSync(reader: reader, mirror: mirror,
+                                   trailingWindowDays: window).run()
 
         StructuredLog.emit("sync.complete", at: stats.startedAt, fields: [
             "db": databasePath,
@@ -173,6 +177,8 @@ case "sync":
             "watermark_before": stats.watermarkBefore,
             "watermark_after": stats.watermarkAfter,
             "trailing_window_days": stats.trailingWindowDays,
+            "window_start": stats.windowStart.map(StructuredLog.timestamp) ?? "all",
+            "previous_sync_at": stats.previousSyncAt.map(StructuredLog.timestamp) ?? "never",
             "mirror_schema_version": MirrorDatabase.schemaVersion,
         ])
 

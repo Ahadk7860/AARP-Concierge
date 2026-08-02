@@ -21,7 +21,11 @@ import Foundation
 public struct MirrorSync {
 
     /// iMessage's server-side queue depth.
-    public static let trailingWindowDays = 30
+    public static let defaultTrailingWindowDays = 30
+
+    /// Widen it after a long outage, or when a restore is known to have renumbered the
+    /// source. Fixed at 30 there was no way to reach further back at all.
+    public let trailingWindowDays: Int
 
     public struct Stats: Sendable {
         public var scanned = 0
@@ -32,16 +36,23 @@ public struct MirrorSync {
         public var duplicatesSkipped = 0
         public var watermarkBefore: Int64 = 0
         public var watermarkAfter: Int64 = 0
-        public var trailingWindowDays = MirrorSync.trailingWindowDays
+        public var trailingWindowDays = MirrorSync.defaultTrailingWindowDays
+        /// The date the window actually started at, which is not always `now - window`.
+        public var windowStart: Date?
+        /// `last_sync_at` as read at the top of this run, before it was overwritten.
+        public var previousSyncAt: Date?
         public var startedAt = Date()
     }
 
     private let reader: MessageReader
     private let mirror: MirrorDatabase
 
-    public init(reader: MessageReader, mirror: MirrorDatabase) {
+    public init(reader: MessageReader,
+                mirror: MirrorDatabase,
+                trailingWindowDays: Int = MirrorSync.defaultTrailingWindowDays) {
         self.reader = reader
         self.mirror = mirror
+        self.trailingWindowDays = max(0, trailingWindowDays)
     }
 
     /// One ingest pass.
@@ -51,11 +62,27 @@ public struct MirrorSync {
     public func run(now: Date = Date()) throws -> Stats {
         var stats = Stats()
         stats.startedAt = now
+        stats.trailingWindowDays = trailingWindowDays
         stats.watermarkBefore = try mirror.watermarkROWID()
+        stats.previousSyncAt = try mirror.meta("last_sync_at").flatMap(StructuredLog.date(from:))
 
-        let cutoff = Calendar(identifier: .gregorian)
-            .date(byAdding: .day, value: -Self.trailingWindowDays, to: now)
-            ?? now.addingTimeInterval(-Double(Self.trailingWindowDays) * 86_400)
+        // ANCHOR THE WINDOW ON THE LAST SYNC, NOT ONLY ON THE CLOCK.
+        //
+        // `now - 30d` alone leaves a hole whenever the Mac was away longer than the
+        // window. Shut for two months, it resumes scanning [now-30d, now] and never
+        // looks at the two months in between -- so a row that landed during the outage
+        // is covered only by the ROWID half of the watermark, and any row that arrives
+        // below the high-water mark is lost permanently. Those are precisely the rows
+        // the trailing re-scan exists for: restores, iCloud renumbering, out-of-order
+        // commits. The architecture's premise is that the Mac is allowed to be asleep,
+        // and a campus beachhead means summer breaks.
+        //
+        // So the window starts at whichever is earlier: one window before now, or one
+        // window before the last successful sync. Overlapping the previous run by a
+        // full window is the point -- gaps are unrecoverable, overlap is just dedup.
+        let cutoff = min(windowStart(before: now),
+                         stats.previousSyncAt.map(windowStart(before:)) ?? windowStart(before: now))
+        stats.windowStart = cutoff
 
         // Everything, not just 1:1: the mirror is the durable record, so tapbacks,
         // group threads and rows joined to no chat all belong in it. Filtering is a
@@ -81,10 +108,17 @@ public struct MirrorSync {
             // drag the watermark back and cause the whole corpus to be re-read as new.
             stats.watermarkAfter = max(stats.watermarkBefore, scan.maxROWID)
             try mirror.setWatermarkROWID(stats.watermarkAfter)
+            // Written last, and now actually read at the top of the next run.
             try mirror.setMeta("last_sync_at", StructuredLog.timestamp(now))
-            try mirror.setMeta("trailing_window_days", String(Self.trailingWindowDays))
+            try mirror.setMeta("trailing_window_days", String(trailingWindowDays))
         }
 
         return stats
+    }
+
+    private func windowStart(before date: Date) -> Date {
+        Calendar(identifier: .gregorian)
+            .date(byAdding: .day, value: -trailingWindowDays, to: date)
+            ?? date.addingTimeInterval(-Double(trailingWindowDays) * 86_400)
     }
 }
