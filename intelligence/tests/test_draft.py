@@ -82,46 +82,26 @@ class Scripted:
 
 
 def test_maya_fixture_yields_two_stance_distinct_candidates():
-    """The drafter's own behaviour, isolated from the semantic gates.
+    """Through the real validator, no isolation.
 
-    `validate=None` runs only the structural checks the drafter cannot avoid. This is
-    deliberate isolation, not a bypass: with the default validator these recorded
-    transcripts degrade to zero candidates because they contain an em dash, which is in
-    the frozen `FORBIDDEN_PHRASES`. That is a conflict between frozen artifacts, pinned
-    in `test_validator.py::test_maya_pass_fixture_fails_two_gates_CONTRACT_GAP` and
-    below in `test_the_happy_path_transcripts_degrade_CONTRACT_GAP`.
+    This briefly needed `validate=None` while the reference transcripts carried an em
+    dash the frozen `FORBIDDEN_PHRASES` forbade. That conflict is resolved upstream, so
+    the happy path runs end to end through every gate again — which is the assertion
+    prompt 03 actually asked for.
     """
-    bundle = draft(
-        MAYA_PACK, MAYA_GIST, provider=FakeProvider(), as_of="2026-08-01T00:00:00Z", validate=None
-    )
+    bundle = draft(MAYA_PACK, MAYA_GIST, provider=FakeProvider(), as_of="2026-08-01T00:00:00Z")
+    assert bundle.validator.passed is True
+    assert bundle.validator.failures == []
     assert len(bundle.candidates) == 2
     assert {c.stance for c in bundle.candidates} == {"answer", "defer"}
     assert bundle.candidates[0].stance != bundle.candidates[1].stance
 
 
 def test_yu_fixture_yields_two_stance_distinct_candidates():
-    bundle = draft(
-        GLOBAL_PACK, YU_GIST, provider=FakeProvider(), as_of="2026-08-01T00:00:00Z", validate=None
-    )
+    bundle = draft(GLOBAL_PACK, YU_GIST, provider=FakeProvider(), as_of="2026-08-01T00:00:00Z")
+    assert bundle.validator.passed is True
     assert len(bundle.candidates) == 2
     assert {c.stance for c in bundle.candidates} == {"answer", "defer"}
-
-
-def test_the_happy_path_transcripts_degrade_CONTRACT_GAP():
-    """**The observable consequence of the frozen-artifact conflict.**
-
-    Prompt 03's checklist item "the CLI prints two candidates for the Maya fixture" was
-    green when 03 was committed, because 03 shipped only structural gates. Wiring the
-    real validator in 04 turns it red: every recorded good transcript contains U+2014,
-    the frozen `FORBIDDEN_PHRASES` forbids U+2014, so the drafter correctly refuses and
-    ships zero.
-
-    Nothing here is worked around. Delete this test when the user resolves the gap.
-    """
-    bundle = draft(MAYA_PACK, MAYA_GIST, provider=FakeProvider(), as_of="2026-08-01T00:00:00Z")
-    assert bundle.candidates == []
-    assert bundle.validator.passed is False
-    assert "forbidden_phrase" in bundle.validator.failures
 
 
 def test_chars_matches_the_text_length():
@@ -168,11 +148,9 @@ def test_the_cli_prints_two_candidates(capsys):
     )
     assert rc == 0
     out = json.loads(capsys.readouterr().out.split("\n", 1)[1])
-    # Zero, not two, until the frozen-artifact conflict is resolved — see
-    # test_the_happy_path_transcripts_degrade_CONTRACT_GAP. The CLI still emits a
-    # schema-valid bundle, which is the degraded outcome working as designed.
-    assert out["candidates"] == []
-    assert out["validator"]["passed"] is False
+    assert len(out["candidates"]) == 2
+    assert {c["stance"] for c in out["candidates"]} == {"answer", "defer"}
+    assert out["validator"]["passed"] is True
 
 
 # ---------------------------------------------------------- the prompt cache split

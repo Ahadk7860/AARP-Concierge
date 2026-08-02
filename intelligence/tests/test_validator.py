@@ -22,11 +22,12 @@ from boi_intel.draft import draft
 from boi_intel.prompts import parse_candidates, retry_note
 from boi_intel.validator import (
     ALL_FORBIDDEN_PHRASES,
+    APOLOGY_OPENER_ALLOWANCE,
     EMOJI_RATE_FLOOR,
     EXTRA_FORBIDDEN_PHRASES,
-    LENGTH_MULTIPLE,
     explain,
     fabricated_specifics,
+    length_limit,
     validate_candidates,
 )
 
@@ -86,22 +87,46 @@ def test_the_assistant_speak_transcript_trips_the_phrases_it_was_built_from():
 # ------------------------------------------------------------------- length gate
 
 
-def test_a_draft_at_2_1x_the_median_is_rejected():
-    over = "x" * int(MEDIAN * 2.1)
-    assert "length_gate" in validate_candidates(_pair(over, "ok"), MAYA_GIST, MAYA_PACK)
+def test_the_length_limit_follows_the_amended_formula():
+    """`max(median * avg_msgs_per_burst, p90) + 30`. For the Maya pack that is
+    max(34 * 2.3, 88) + 30 = 118."""
+    assert length_limit(MAYA_PACK["register"]) == 118
+    assert APOLOGY_OPENER_ALLOWANCE == 30
 
 
-def test_a_draft_at_1_9x_the_median_passes_the_length_gate():
-    under = "x" * int(MEDIAN * 1.9)
-    assert "length_gate" not in validate_candidates(_pair(under, "ok"), MAYA_GIST, MAYA_PACK)
+def test_a_draft_at_the_limit_passes_and_one_character_over_fails():
+    limit = int(length_limit(MAYA_PACK["register"]))
+    assert "length_gate" not in validate_candidates(_pair("x" * limit, "ok"), MAYA_GIST, MAYA_PACK)
+    assert "length_gate" in validate_candidates(
+        _pair("x" * (limit + 1), "ok"), MAYA_GIST, MAYA_PACK
+    )
 
 
-def test_the_length_limit_is_two_times_the_median():
-    assert LENGTH_MULTIPLE == 2.0
-    at_limit = "x" * (MEDIAN * 2)
-    just_over = "x" * (MEDIAN * 2 + 1)
-    assert "length_gate" not in validate_candidates(_pair(at_limit, "ok"), MAYA_GIST, MAYA_PACK)
-    assert "length_gate" in validate_candidates(_pair(just_over, "ok"), MAYA_GIST, MAYA_PACK)
+def test_the_paragraph_the_gate_exists_to_catch_still_fails_by_a_wide_margin():
+    """The tell was never 2x; it was closer to 9x. A 300-character paragraph from
+    somebody who writes 34 characters must still be refused."""
+    paragraph = "so anyway " * 30  # 300 chars
+    assert len(paragraph) == 300
+    assert "length_gate" in validate_candidates(_pair(paragraph, "ok"), MAYA_GIST, MAYA_PACK)
+
+
+def test_the_reference_defer_draft_of_79_chars_passes():
+    """The regression that forced the amendment: this is the project's own reference
+    draft, and the old 2x median limit of 68 rejected it."""
+    bundle = json.loads((FIXTURES / "draft_bundle" / "maya_pass.json").read_text())
+    defer = next(c for c in bundle["candidates"] if c["stance"] == "defer")
+    assert len(defer["text"]) == 79
+    assert "length_gate" not in validate_candidates(bundle["candidates"], MAYA_GIST, MAYA_PACK)
+
+
+def test_a_burstier_writer_gets_a_larger_allowance():
+    """The gate adapts to the writer: somebody who fires off four fragments is
+    legitimately longer in one draft than somebody who sends one considered message."""
+    calm = json.loads(json.dumps(MAYA_PACK))
+    calm["register"]["avg_msgs_per_burst"] = 1.0
+    bursty = json.loads(json.dumps(MAYA_PACK))
+    bursty["register"]["avg_msgs_per_burst"] = 4.0
+    assert length_limit(bursty["register"]) > length_limit(calm["register"])
 
 
 # ----------------------------------------------------------------- register gate
@@ -393,47 +418,31 @@ def test_a_model_that_recovers_on_the_retry_passes():
     assert len(bundle.candidates) == 2
 
 
-# ---------------------------------------------------------------- the contract gap
+# ------------------------------------------------ the reference bundle, post-fix
 
 
-def test_maya_pass_fixture_fails_two_gates_CONTRACT_GAP():
-    """**This test documents a conflict between two frozen artifacts, not a bug here.**
+def test_maya_pass_fixture_passes_every_gate():
+    """The conflict this file used to document is resolved.
 
-    Prompt 04 requires `contracts/fixtures/draft_bundle/maya_pass.json` to pass every
-    gate, and that fixture declares `validator.passed = true`. It does not pass, for two
-    independent reasons, and both come from implementing the prompt exactly as written:
-
-    1. `forbidden_phrase` — its `answer` candidate contains U+2014 EM DASH, and the
-       frozen `contracts.FORBIDDEN_PHRASES` lists the em dash. Prompt 04 says to extend
-       that list and never shorten it, so the em dash cannot be dropped here.
-    2. `length_gate` — its `defer` candidate is 79 characters against a limit of
-       2 x 34 = 68, where 34 is `maya.json`'s own `median_len_chars`.
-
-    Softening either gate to make the fixture green is exactly what prompt 04 forbids:
-    "If a gate is wrong, that is a finding for NOTES.md, not an edit."
-
-    **Delete this test once the user resolves the gap** — it will start failing the
-    moment either artifact is corrected, which is the intended prompt to remove it.
+    Two frozen artifacts disagreed: the fixture carried an em dash that the frozen
+    `FORBIDDEN_PHRASES` forbids, and its defer candidate was 79 chars against the old
+    2x34=68 limit. Both were fixed upstream — the em dash removed from the fixture and
+    the transcripts, and the length gate respecified in CONTRACTS.md as
+    `max(median * avg_msgs_per_burst, p90) + 30`. The two CONTRACT_GAP tests that
+    guarded the gap were deleted when it closed, which is what they were for.
     """
     bundle = json.loads((FIXTURES / "draft_bundle" / "maya_pass.json").read_text())
-    failures = validate_candidates(bundle["candidates"], MAYA_GIST, MAYA_PACK)
-
-    assert failures == ["length_gate", "forbidden_phrase"], failures
-    assert bundle["validator"]["passed"] is True, "the fixture claims it passed"
-
-    report = explain(bundle["candidates"], MAYA_GIST, MAYA_PACK)
-    assert report["candidates"][0]["forbidden_phrases"] == ["—"]
-    assert report["candidates"][1]["over_length"] is True
+    assert validate_candidates(bundle["candidates"], MAYA_GIST, MAYA_PACK) == []
+    assert bundle["validator"]["passed"] is True
 
 
-def test_the_recorded_good_transcripts_also_carry_an_em_dash():
-    """The same conflict, one layer down: the `maya_action_needed` and `yu_fading`
-    transcripts are the recorded *good* model output, and both contain an em dash. So
-    the drafter's happy path degrades to zero candidates under a literal reading of the
-    frozen phrase list. Reported, not worked around."""
+def test_no_reference_artifact_carries_an_em_dash():
+    """The em dash is the single most reliable machine tell, and the reference drafts
+    are what everyone copies. Guards against it creeping back in."""
     for name in ("maya_action_needed", "yu_fading"):
-        text = " ".join(c["text"] for c in _transcript(name))
-        assert "—" in text, name
+        assert "\u2014" not in " ".join(c["text"] for c in _transcript(name)), name
+    bundle = json.loads((FIXTURES / "draft_bundle" / "maya_pass.json").read_text())
+    assert "\u2014" not in " ".join(c["text"] for c in bundle["candidates"])
 
 
 # ---------------------------------------------------------------------------- CLI

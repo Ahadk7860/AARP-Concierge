@@ -20,8 +20,35 @@ Format: `[prompt NN] <OPEN | RESOLVED> — <what and what you tried>`
   the worktree, flagged here because the other three tracks share the machine and one
   of them may assume a different interpreter.
 
-- `[prompt 03] OPEN — the one live Gemini call cannot be made: GEMINI_API_KEY is not
-  provisioned.` The prompt's Definition of Done asks for one live call producing a
+- `[prompt 03] RESOLVED — the live Gemini call succeeded once the user added the key.`
+  Bundle pasted in the report and written to `/tmp/boi-b/out/draft_live_gemini.json`;
+  it validates against `draft_bundle.v1`, passed every gate on the first attempt
+  (`attempts: 1`, `failures: []`), took 1024 ms, and produced two stance-distinct
+  candidates in register. **One live call was made, and only one** — the DoD's limit.
+  It surfaced a new gap, below.
+
+- `[prompt 03] OPEN — the pinned default model no longer exists for new API keys.`
+  `.env.example` and CONTRACTS.md § 11 item 12 both pin `gemini-2.5-flash-lite`. With a
+  fresh key that model returns:
+
+  ```
+  404 NOT_FOUND — This model models/gemini-2.5-flash-lite is no longer available to
+  new users. Please update your code to use a newer model.
+  ```
+
+  It still appears in `models.list()`, so a capability check would not catch this; only
+  a real request does. The live call was therefore made with
+  **`gemini-3.5-flash-lite`**, passed as an environment override — `.env.example` is a
+  shared file and CONTRACTS.md is frozen, so **this track changed neither**.
+  For the user: the current flash-lite family is `gemini-2.0-flash-lite`,
+  `gemini-3.1-flash-lite`, `gemini-3.5-flash-lite`, plus the moving alias
+  `gemini-flash-lite-latest`. Recommend pinning a **concrete version** rather than the
+  alias — prompt 05 is a model bake-off, and an alias that moves under it makes the
+  evidence unreproducible a week later. Whatever is chosen wants updating in both
+  `.env.example` and § 11 item 12, and it becomes one row of 05's matrix rather than a
+  decision to make now.
+
+- `[prompt 03] CLOSED — GEMINI_API_KEY was not provisioned.` The prompt's Definition of Done asks for one live call producing a
   valid bundle, and CONTRACTS.md § 7 records the user as the party who acquires this
   key. `.env` carries `GEMINI_API_KEY=` (empty), inherited from `.env.example`.
   **This is the only red item across prompts 03 and 04.**
@@ -351,6 +378,32 @@ real leaks** — the second was latent and had nothing to do with the amendment:
    three of them against the old implementation.
 
 Both fixes verified to bite by reverting them and watching the new tests fail.
+
+### Prompt 04 correction — the contract gap closed, and the live call landed
+
+Both halves of the frozen-artifact conflict were resolved upstream while this batch was
+in flight (`7a13857`), and the branch merged it forward:
+
+- The em dash was removed from `maya_pass.json` and from both reference transcripts.
+- The length gate was respecified in CONTRACTS.md as
+  `max(median_len_chars * avg_msgs_per_burst, p90_len_chars) + 30`, replacing
+  "within 2× the median". For the Maya pack that is `max(78.2, 88) + 30 = 118`.
+
+Applied here:
+
+- `validator.length_limit()` implements the new formula; `LENGTH_MULTIPLE` is gone and
+  `APOLOGY_OPENER_ALLOWANCE = 30` replaces it. **This supersedes prompt 04's literal
+  checklist wording** ("a draft at 2.1× the register median is rejected; one at 1.9×
+  passes") — under the amended rule both of those pass, because the tell was never 2×.
+  The replacement tests assert the limit is exactly 118 for the Maya pack, that one
+  character over fails, that the 300-character paragraph the gate exists to catch still
+  fails by a wide margin, and that a burstier writer gets a larger allowance.
+- The three `CONTRACT_GAP` tests were **deleted**, which is what they were written to
+  prompt. Two replacements took their place: `maya_pass` now passes every gate, and a
+  guard asserts no reference artifact carries an em dash again.
+- Prompt 03's three tests that had been isolated with `validate=None` are back to
+  running the **full** pipeline through every gate, which is what prompt 03 asked for.
+  The CLI prints two candidates again.
 
 ### Prompt 04 — validator
 

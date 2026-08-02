@@ -10,7 +10,7 @@ on Tuesday as it did on Monday and a reviewer can work out why by reading it.
 Six gates, and the vocabulary is frozen (`contracts.VALIDATOR_FAILURES`):
 
 - `empty` — nothing usable came back.
-- `length_gate` — more than 2× the user's median message length.
+- `length_gate` — longer than `max(median * avg_msgs_per_burst, p90) + 30`.
 - `register_gate` — capitalised when they never capitalise, a terminal full stop when
   they never use one, an emoji when they effectively never use one.
 - `fabrication_gate` — **the highest-severity one.** A date, time, place, amount or
@@ -73,8 +73,21 @@ EXTRA_FORBIDDEN_PHRASES = (
 
 ALL_FORBIDDEN_PHRASES = tuple(FORBIDDEN_PHRASES) + EXTRA_FORBIDDEN_PHRASES
 
-# Prompt 04: "within 2× the user's median message length for that contact."
-LENGTH_MULTIPLE = 2.0
+# CONTRACTS.md § "The length gate, corrected 2 Aug".
+#
+#     limit = max(median_len_chars * avg_msgs_per_burst, p90_len_chars) + 30
+#
+# Prompt 04 originally said "within 2× the median", and that was too tight: it rejected
+# the project's own reference drafts. The median is computed over every sent message
+# including "ok" and "lol"; a draft has to acknowledge the silence *and* answer, which is
+# structurally two clauses; and the register already records how many messages this user
+# sends at a time, so a single draft standing in for a burst is legitimately longer.
+# The `+ 30` is the apology opener, which costs about that much before the answer starts.
+#
+# For the Maya pack (median 34, p90 88, burst 2.3) this is 118 — a 79-character defer
+# passes and the 300-character paragraph the gate exists to catch still fails by a wide
+# margin. The tell was never 2×; it was closer to 9×.
+APOLOGY_OPENER_ALLOWANCE = 30
 
 # Prompt 04: "no emoji if their rate is under 2%."
 EMOJI_RATE_FLOOR = 0.02
@@ -92,14 +105,27 @@ def _normalise(value: str) -> str:
 # ---------------------------------------------------------------------- the gates
 
 
+def length_limit(register: dict) -> float:
+    """`max(median * avg_msgs_per_burst, p90) + 30`, per CONTRACTS.md.
+
+    Every term is already in the register, so the gate adapts to the writer rather than
+    to a constant: somebody who fires off four fragments gets a larger allowance than
+    somebody who sends one considered message, which is the actual difference the gate
+    is trying to respect.
+    """
+    median = register.get("median_len_chars") or 1
+    burst = register.get("avg_msgs_per_burst") or 1.0
+    p90 = register.get("p90_len_chars") or median
+    return max(median * burst, p90) + APOLOGY_OPENER_ALLOWANCE
+
+
 def length_failures(candidates: list[dict], register: dict) -> bool:
-    """True if any candidate is more than 2× the user's median.
+    """True if any candidate is longer than `length_limit`.
 
     A 300-character paragraph from somebody who writes 34 characters is the single most
     obvious tell that a machine wrote it.
     """
-    median = register.get("median_len_chars") or 1
-    limit = median * LENGTH_MULTIPLE
+    limit = length_limit(register)
     return any(len(c["text"]) > limit for c in candidates)
 
 
@@ -207,7 +233,7 @@ def explain(candidates: list[dict], gist: dict, voice_pack: dict) -> dict:
     Carries candidate text, so it is a developer tool — never a log line.
     """
     register = voice_pack.get("register", {})
-    median = register.get("median_len_chars") or 1
+    limit = length_limit(register)
     detail = []
     for c in candidates:
         text = c.get("text", "")
@@ -215,8 +241,8 @@ def explain(candidates: list[dict], gist: dict, voice_pack: dict) -> dict:
             {
                 "stance": c.get("stance"),
                 "chars": len(text),
-                "length_limit": median * LENGTH_MULTIPLE,
-                "over_length": len(text) > median * LENGTH_MULTIPLE,
+                "length_limit": limit,
+                "over_length": len(text) > limit,
                 "forbidden_phrases": forbidden_phrases_in(text),
                 "unlicensed_specifics": fabricated_specifics(text, gist.get("facts", {})),
             }
