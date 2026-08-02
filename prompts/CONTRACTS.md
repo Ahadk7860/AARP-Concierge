@@ -469,6 +469,54 @@ Definition of Done.
 **Every consuming track must be able to reach a green Definition of Done without
 running another track's code.** If that stops being true, it is a contract gap.
 
+### The decoder metric, corrected 2 Aug — and a truncation trap it exposed
+
+The original criterion was "the share of messages with no recoverable text falls from
+~47% to under 2%." **That measures how photo-heavy someone's corpus is, not whether the
+decoder works,** and it conflates the two. Measured on a real 94,652-message corpus:
+
+```
+BEFORE (no decoder)   65.23%  unrecoverable
+AFTER                  2.26%  = 2,143 rows
+  attachment-only      1.73%  = 1,642   no text by nature
+  no text, no blob     0.53%  =   501   nothing to recover
+  blob undecodable     0.00%  =     0   <- actual decoder failures
+```
+
+A perfect decoder scores 2.26% against a 2% bar. So:
+
+- **The bar is on decoder failures only:** rows where `attributedBody` is non-null and
+  decoding yields no text, over rows where `attributedBody` is non-null. **Under 0.5%.**
+  This is the number that says the typedstream port is correct.
+- **`unrecoverableShare` stays reported, with no bar.** It is a genuine corpus statistic —
+  a user whose messages are mostly photos is a real segment — and prompt `06`'s health
+  check should see it. It is not a decoder metric and must never gate one.
+
+Classify attachment-only rows from `cache_has_attachments` and `message_attachment_join`,
+never from the decoder's own output. A decoder grading its own failures as "that one was
+just a photo" is the exact self-exoneration this split exists to prevent.
+
+### `first_contact_at` is a lie whenever the corpus is retention-capped
+
+The same run found the span is **exactly 365 days**, floored at the boundary — Apple's
+*Keep Messages = 1 Year* deleting everything older. So **every** `first_contact_at` in
+that digest reads as the boundary date. A friendship that began in 2019 reports as
+beginning a year ago.
+
+That is not a rounding error, it is a false claim about someone's life, and the card is
+built on being checkable against the user's own memory. Wrapped flopped precisely when
+people started doubting the numbers.
+
+**Required, Track A at digest time:** when `corpus.retention_boundary` is set and a
+relationship's earliest message falls within a day of that boundary, emit
+`first_contact_at: null`. The schema already permits null. Never emit the boundary date
+as a first-contact date, and never let the card render "you met in August 2025" from a
+truncated corpus.
+
+Momentum, initiation ratio and the 90-day comparison are all unaffected — they are
+windowed and never reach back past the boundary. `first_contact_at` and anything derived
+from it are the only casualties.
+
 ### The one thing the fixtures cannot give you
 
 `scripts/make_synthetic_chatdb.py` cannot produce real `attributedBody` **typedstream**
