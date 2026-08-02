@@ -279,6 +279,112 @@ Format: `[prompt NN] → Track <X>: <what you need and why>`
 
 None. Nothing in this prompt required another track's code, per `CONTRACTS.md` § 10.
 
+## Pass 2 findings — three blockers, all fixed
+
+`[pass 2] FIXED — the bounded retry could never retry.` `run.ts` inserted the brief row
+before calling the channel, nothing was transactional, and the row survived the throw.
+The next attempt found it, returned `already_sent`, and stopped. `briefs.delivered_at`
+existed and nothing wrote it. A 503 `line_banned` at 08:00 — the case Track C built the
+adapter for — meant no brief that morning, silently, forever, for the product that IS
+retention.
+
+My Definition of Done passed because the suite tested `nextRetry` as a pure function and
+asserted one failure called the channel once. **Neither drives attempt 2.** I reproduced
+it before fixing: attempt 1 `failed`, attempt 2 `already_sent`, **zero messages sent**.
+
+Fixed by migration `008` (`briefs.delivery_status`, `attempts`, `last_error`, plus a
+CHECK that `sent` cannot exist without `delivered_at`) and three changes in `run.ts`:
+only a TERMINAL status short-circuits, a resumed attempt reuses the existing row rather
+than inserting a second, and `deliverBrief` now records each send via an `onSent`
+callback **as it returns** rather than after the loop — so a throw on message three
+leaves one and two recorded, which is exactly what the resume reads. Three new tests:
+attempt 2 delivers, a partial failure resumes without re-sending, and a skipped brief
+stays terminal.
+
+`[pass 2] FIXED — the card was illegible on its own reference fixture.` The layout test
+recomputed production's estimate using the same function production used, and
+`fitToWidth` guaranteed the inequality — the test could not fail. Meanwhile
+"the one you keep waiting" is 24 bold characters, leaving 99px, so the flagship card
+rendered `Ma… — the one you keep waiting`. Half the archetype rows unreadable, and
+"renders without breaking the layout" green.
+
+Two fixes. `measure.ts` rasterises a probe with resvg and measures the ink — real
+measurement in the real font at the real weight, because resvg exposes no metrics API
+(`getBBox()` returns `{}`) but `render().pixels` is the real RGBA buffer. And the row is
+**stacked**: the name gets the full content width with the archetype beneath it, so
+nothing competes for space.
+
+The measurements show how wrong the estimate was in both directions:
+
+| text | measured | old estimate |
+|---|---|---|
+| `the one you keep waiting` (bold 52) | 615 | 749 |
+| `田中さんとの会話` (52) | 414 | 216 |
+| `MARGARET-ANNE` (52) | 451 | 352 |
+
+CJK was out by 2×, so it overflowed silently rather than truncating — the third point in
+the finding. `model.headline` is now bounded too; it was drawn at size 300 with no budget
+at all. New tests assert measured widths, assert **no name is truncated on
+`healthy.json`**, assert a 40-character name keeps more than 20 characters, and assert
+the measurement is not secretly proportional to length.
+
+`[pass 2] FIXED — signup and pairing did not connect.` The code left the building only
+as an `x-boi-pairing-code` response header, on a page the user is not reading. The frozen
+welcome says "text me your pairing code"; a user who did that hit `parseSelection`,
+matched nothing, and got "reply 1 or 2 to pick a draft". Re-signup minted nothing, so
+after ten minutes that account could never pair.
+
+Now: the code is **texted** as a second message (separate from the welcome, so
+`first_contact_card.json` conformance is untouched); a **texted six-digit code is
+ingested** and bound, which makes the frozen instruction true and lets the Mac's
+`POST /v1/pair` resolve it; **re-signup re-issues** and re-texts. Rebinding a code
+another account holds is refused — the advisory lock in `issuePairingCode` is what stops
+an attacker pointing a victim's Mac at their own account, and there is a test for it.
+
+`POST /v1/pair` now has a fixed-window limiter, ten per minute per source. It is
+unauthenticated, six digits, and returns a `device_token` AND the `user_salt` — which is
+issued once and never rotated.
+
+## Pass 2 follow-ups
+
+`[pass 2] FIXED` — **NaN guards on the env vars.** `Number("24h")` is NaN and every
+comparison against NaN is false, so a one-character typo in `.env` silently disabled the
+staleness warning AND the hard skip, and briefs would have gone out calling week-old
+facts this morning's. `positiveEnv` falls back and writes a structured warning. Same
+guard on `BOI_BRIEF_MAX_ITEMS`, where a NaN would have removed the cap.
+
+`[pass 2] OPEN` — **`briefs.card_url` deletion.** CONTRACTS § 3 says derived data outside
+Postgres counts and a rendered card is derived data. No prompt encoded it, nothing writes
+`card_url` yet, and `deleteUser` reaches only rows. Needs a decision before the card is
+ever persisted somewhere with a URL: either the renderer stays stateless and `card_url`
+is always null, or deletion grows an object-store step and the residue check has to cover
+something it cannot currently see.
+
+`[pass 2] OPEN` — **Three undocumented statuses.** `POST /v1/heartbeat` returns `400` on
+a malformed body, and `/v1/webhooks/{provider}` returns `400` for an unknown provider and
+`500` if the raw-body parser is missing. None is in the OpenAPI document. The `500` is
+arguably right — it is a wiring bug in this service, not a bad request — but it should be
+written down. Related: `webhook.test.ts` asserts `[400, 404]` for a malformed `/v1/pair`
+body, which is a two-valued assertion papering over the § 2 gap that `/v1/pair` documents
+no `400`. Both want one answer.
+
+`[pass 2] OPEN` — **`/render` has no auth and no rate limit.** It is CPU-bound,
+unauthenticated, and takes a body up to 8 MB. It is also the only endpoint whose cost per
+request is measured in hundreds of milliseconds. Not exploited by anything today because
+nothing links to it, but it is the obvious denial-of-service target the moment it is
+public.
+
+`[pass 2] OPEN` — **`inbound.user_id` is trusted when present.** `resolveUser` takes the
+transport's word and only falls back to `from_handle`. A transport bug — or a transport
+compromise — that sets the wrong `user_id` reads and writes the wrong account. Cross-
+checking it against `from_handle` and refusing on disagreement is cheap; I did not do it
+because it changes behaviour Track C may be relying on, and it wants a contract decision
+rather than a unilateral one.
+
+`[pass 2] NOTED` — **the limiter is per-process and in memory.** Behind two instances an
+attacker gets two windows. Correct shape for one dev process, wrong shape for production,
+where it belongs in Redis or at the edge.
+
 ## Deviations from the plan
 
 Anywhere the implementation departs from what the prompt described, and why. A

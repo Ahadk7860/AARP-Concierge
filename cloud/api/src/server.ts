@@ -9,6 +9,7 @@ import { send, validation } from "./errors.js";
 import { registerIngestRoutes } from "./routes/ingest.js";
 import { registerSignupRoutes, type Clock } from "./routes/signup.js";
 import { registerWebhookRoutes } from "./routes/webhook.js";
+import type { FixedWindowLimiter } from "./limiter.js";
 
 export type BuildOptions = {
   /** Pass a pino destination to capture log output — see the no-user-content test. */
@@ -20,6 +21,8 @@ export type BuildOptions = {
   channel?: Channel;
   /** Injected so pairing expiry is tested by moving the clock, not by sleeping. */
   now?: Clock;
+  /** Shared so a test can construct one with a known window. Per-process; see NOTES. */
+  pairLimiter?: FixedWindowLimiter;
 };
 
 export function buildServer(options: BuildOptions = {}): FastifyInstance {
@@ -89,7 +92,7 @@ export function buildServer(options: BuildOptions = {}): FastifyInstance {
   );
 
   registerIngestRoutes(app, log);
-  registerSignupRoutes(app, log, { channel, now });
+  registerSignupRoutes(app, log, { channel, now, ...(options.pairLimiter !== undefined ? { pairLimiter: options.pairLimiter } : {}) });
   registerWebhookRoutes(app, log, { channel });
   return app;
 }

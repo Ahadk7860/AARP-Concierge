@@ -7,17 +7,18 @@ import type { FastifyInstance } from "fastify";
 import type { Digest } from "../../shared/src/index.js";
 import { buildCardServer } from "./server.js";
 import {
+  CAPTION_SIZE,
   CARD_HEIGHT,
   CARD_WIDTH,
   CONTENT_WIDTH,
-  ROW_GAP,
-  ROW_SIZE,
+  LABEL_SIZE,
+  LINE_SIZE,
+  NAME_SIZE,
   cardSvg,
-  estimateWidth,
-  fitToWidth,
+  fitHeadline,
   renderCard,
-  wrapByWidth,
 } from "./render.js";
+import { fitToMeasuredWidth, measureTextWidth, wrapMeasured } from "./measure.js";
 import { buildCardModel, MAX_NAME_CHARS, truncateName } from "./model.js";
 import { allCopyStrings, ARCHETYPE_LABEL, ARCHETYPE_LINE } from "./copy.js";
 
@@ -247,36 +248,121 @@ describe("name overflow", () => {
     }
   });
 
-  it("never lets a name collide with its archetype label", () => {
-    // MAX_NAME_CHARS alone is not enough: "the one you keep waiting" is 24 characters,
-    // and an 18-character name beside it needs more than the row has. The first render
-    // of a 40-character name drew the name straight through the label.
-    for (const name of ["A".repeat(40), "Bartholomew Ferdinand Wickersham III", "Z", "Mom"]) {
+  it("draws every line inside the margins — MEASURED, not estimated", () => {
+    // The test this replaces recomputed production's own estimate and asserted the
+    // result fit the budget that estimate produced. `fitToWidth` guaranteed the
+    // inequality, so it could not fail — and it stayed green while the reference card
+    // rendered `Ma… — the one you keep waiting`.
+    //
+    // This measures the rendered ink instead, with the same rasteriser and font the
+    // card uses, so a layout that overflows fails here.
+    for (const name of [
+      "Maya",
+      "Z",
+      "A".repeat(40),
+      "Bartholomew Ferdinand Wickersham III",
+      "MARGARET-ANNE",
+      "田中さんとの会話です",          // CJK: the estimate was out by 2x
+      "ÀÉÎÕÜ ÑÇ ŒÆ",
+    ]) {
       const d = digest("healthy");
       d.relationships = d.relationships.map((r) => ({ ...r, display: name }));
       const model = buildCardModel(d);
       if (model.kind !== "card") throw new Error("expected a card");
 
       for (const a of model.archetypes) {
-        const labelWidth = estimateWidth(a.label, ROW_SIZE, 700);
-        const budget = CONTENT_WIDTH - labelWidth - ROW_GAP;
-        const shown = fitToWidth(a.display, ROW_SIZE, Math.max(budget, ROW_SIZE));
-        const total = labelWidth + ROW_GAP + estimateWidth(shown, ROW_SIZE);
-        expect(total, `${a.label} + ${shown} overflows the row`).toBeLessThanOrEqual(
-          CONTENT_WIDTH + 1,
-        );
+        const shownName = fitToMeasuredWidth(a.display, NAME_SIZE, CONTENT_WIDTH, 700);
+        expect(
+          measureTextWidth(shownName, NAME_SIZE, 700),
+          `name "${shownName}" overflows`,
+        ).toBeLessThanOrEqual(CONTENT_WIDTH);
+
+        expect(
+          measureTextWidth(fitToMeasuredWidth(a.label, LABEL_SIZE, CONTENT_WIDTH), LABEL_SIZE),
+          `label "${a.label}" overflows`,
+        ).toBeLessThanOrEqual(CONTENT_WIDTH);
+
+        expect(
+          measureTextWidth(fitToMeasuredWidth(a.line, LINE_SIZE, CONTENT_WIDTH), LINE_SIZE),
+          `line "${a.line}" overflows`,
+        ).toBeLessThanOrEqual(CONTENT_WIDTH);
       }
     }
-  });
+  }, 60_000);
 
-  it("keeps every wrapped line inside the margins", () => {
+  it("keeps the reference card LEGIBLE — no name truncated on healthy.json", () => {
+    // The criterion the old test could not express. On the flagship fixture every name
+    // must render in full: a card that says "Ma…" is not one anybody screenshots, and
+    // if nobody screenshots it nothing downstream matters.
+    const model = buildCardModel(digest("healthy"));
+    if (model.kind !== "card") throw new Error("expected a card");
+
+    for (const a of model.archetypes) {
+      const shown = fitToMeasuredWidth(a.display, NAME_SIZE, CONTENT_WIDTH, 700);
+      expect(shown, `${a.display} was truncated on the reference card`).toBe(a.display);
+      expect(shown).not.toContain("…");
+
+      // And the archetype label, which is the other half of what people post.
+      const label = fitToMeasuredWidth(a.label, LABEL_SIZE, CONTENT_WIDTH);
+      expect(label, `${a.label} was truncated`).toBe(a.label);
+    }
+  }, 60_000);
+
+  it("leaves a 40-character name readable rather than reduced to a stub", () => {
+    // Truncation is fine; two characters and an ellipsis is not. With the row stacked,
+    // a name has the full content width and keeps most of itself.
+    const shown = fitToMeasuredWidth("A".repeat(40), NAME_SIZE, CONTENT_WIDTH, 700);
+    expect(shown.endsWith("…")).toBe(true);
+    expect(shown.length, `only ${shown.length} characters survived`).toBeGreaterThan(20);
+    expect(measureTextWidth(shown, NAME_SIZE, 700)).toBeLessThanOrEqual(CONTENT_WIDTH);
+  }, 60_000);
+
+  it("bounds the headline, which used to be drawn at 300 with no budget", () => {
+    for (const value of ["0%", "40%", "100%"]) {
+      const fitted = fitHeadline(value);
+      expect(measureTextWidth(fitted.content, fitted.size, 700)).toBeLessThanOrEqual(
+        CONTENT_WIDTH,
+      );
+    }
+    // A hypothetical wider headline steps the size down rather than running off.
+    const wide = fitHeadline("1000000%");
+    expect(measureTextWidth(wide.content, wide.size, 700)).toBeLessThanOrEqual(CONTENT_WIDTH);
+    expect(wide.size).toBeLessThan(300);
+  }, 60_000);
+
+  it("truncates a grapheme rather than splitting one", () => {
+    // Slicing by UTF-16 unit would cut a surrogate pair in half and render a tofu box.
+    const shown = fitToMeasuredWidth("👩‍🚀".repeat(40), NAME_SIZE, CONTENT_WIDTH, 700);
+    expect(shown).not.toContain("\uFFFD");
+    expect(measureTextWidth(shown, NAME_SIZE, 700)).toBeLessThanOrEqual(CONTENT_WIDTH);
+  }, 60_000);
+
+  it("keeps every wrapped caption line inside the margins, measured", () => {
     const model = buildCardModel(digest("healthy"));
     if (model.kind !== "card") throw new Error("expected a card");
     // The caption used to run off the right edge: "…went quiet this yea".
-    for (const line of wrapByWidth(model.caption, 46, CONTENT_WIDTH)) {
-      expect(estimateWidth(line, 46)).toBeLessThanOrEqual(CONTENT_WIDTH);
+    const lines = wrapMeasured(model.caption, CAPTION_SIZE, CONTENT_WIDTH);
+    expect(lines.length).toBeGreaterThan(0);
+    for (const line of lines) {
+      expect(measureTextWidth(line, CAPTION_SIZE)).toBeLessThanOrEqual(CONTENT_WIDTH);
     }
-  });
+    // Nothing dropped by the wrap.
+    expect(lines.join(" ")).toBe(model.caption);
+  }, 60_000);
+
+  it("the measurement is real — it disagrees with length x constant", () => {
+    // If `measureTextWidth` were secretly proportional to length, this whole file would
+    // be back to asserting an estimate against itself. CJK is the proof it is not: one
+    // glyph is roughly twice a Latin character, and the old constant said otherwise.
+    const latin = measureTextWidth("aaaaaaaa", NAME_SIZE);
+    const cjk = measureTextWidth("八八八八八八八八", NAME_SIZE);
+    expect(cjk).toBeGreaterThan(latin * 1.4);
+    // And bold is wider than regular at the same size, which the old estimate only
+    // learned after a render came out wrong.
+    expect(measureTextWidth("the fade", NAME_SIZE, 700)).toBeGreaterThan(
+      measureTextWidth("the fade", NAME_SIZE, 400),
+    );
+  }, 60_000);
 
   it("survives a display name made entirely of XML metacharacters", () => {
     const d = digest("healthy");

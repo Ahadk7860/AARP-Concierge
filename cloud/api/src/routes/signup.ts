@@ -28,7 +28,8 @@ import {
 } from "../../../db/src/index.js";
 import { invalidCode, send, validation } from "../errors.js";
 import { logEvent } from "../logging.js";
-import { boiHandle, smsDeepLink, welcomeMessage } from "../welcome.js";
+import { boiHandle, pairingCodeMessage, smsDeepLink, welcomeMessage } from "../welcome.js";
+import { FixedWindowLimiter, PAIR_LIMIT } from "../limiter.js";
 
 /** Ten minutes. `contracts/openapi/boi-api.v1.yaml`: "Single use, 10 minute expiry". */
 export const PAIRING_TTL_SECONDS = 600;
@@ -57,6 +58,8 @@ export type SignupDeps = {
   channel: Channel;
   /** Injected so expiry can be tested by moving the clock, not by sleeping. */
   now: Clock;
+  /** Shared so a test can reset it; per-process, which is a real limitation. */
+  pairLimiter?: FixedWindowLimiter;
 };
 
 function escapeHtml(s: string): string {
@@ -148,9 +151,19 @@ export function registerSignupRoutes(
     const existing = await findUserIdByPhone(input.phone_e164);
     if (existing !== null) {
       const user = await getUser(existing);
-      logEvent(log, { msg: "signup.existing", route: "/signup", user_id: existing.user_id });
+      // RE-ISSUE. Signing up again is what somebody does when the first code expired,
+      // and returning the same page without a fresh code left that account permanently
+      // unpairable after ten minutes.
+      const reissued = await mintUniqueCode(existing, deps.now());
+      await sendPairingCode(deps.channel, existing, reissued, log);
+      logEvent(log, {
+        msg: "signup.reissued",
+        route: "/signup",
+        user_id: existing.user_id,
+      });
       return reply
         .type("text/html; charset=utf-8")
+        .header("x-boi-pairing-code", reissued)
         .send(confirmationPage({ handle: boiHandle(), status: user?.handle_status ?? "unknown" }));
     }
 
@@ -198,8 +211,12 @@ export function registerSignupRoutes(
 
     await setHandleStatus(scope, status);
 
-    // The pairing code is minted here so it exists the moment the Mac app asks for one.
+    // The pairing code is minted here so it exists the moment the Mac app asks for one,
+    // and TEXTED, because a response header is not a path to the user. The welcome
+    // message tells them to text their pairing code; until this existed, nothing had
+    // ever given them one.
     const code = await mintUniqueCode(scope, deps.now());
+    await sendPairingCode(deps.channel, scope, code, log);
 
     logEvent(log, {
       msg: "signup.created",
@@ -215,7 +232,21 @@ export function registerSignupRoutes(
   });
 
   // -------------------------------------------------------------------------
+  const pairLimiter = deps.pairLimiter ?? new FixedWindowLimiter(PAIR_LIMIT);
+
   app.post("/v1/pair", async (req, reply) => {
+    // UNAUTHENTICATED, six digits, and it returns a device_token AND the user_salt.
+    // A million codes with a ten-minute window is minutes of brute force unthrottled.
+    const source = req.ip ?? "unknown";
+    const decision = pairLimiter.check(`pair:${source}`, deps.now());
+    if (!decision.allowed) {
+      logEvent(log, { msg: "pair.rate_limited", route: "/v1/pair", status: 429 });
+      return reply
+        .code(429)
+        .header("retry-after", String(decision.retry_after_seconds))
+        .send({ error: "rate_limited" });
+    }
+
     const parsed = pairSchema.safeParse(req.body);
     if (!parsed.success) {
       // The document gives /v1/pair a 404 for a bad code and no 400. A malformed body
@@ -271,6 +302,25 @@ export function registerSignupRoutes(
  * live elsewhere; with a ten-minute window and a million codes a collision is rare, and
  * retrying is cheaper than widening the code.
  */
+/** Text the code. A failure here is logged, not fatal — the account still exists. */
+async function sendPairingCode(
+  channel: Channel,
+  scope: UserScope,
+  code: string,
+  log: Logger,
+): Promise<void> {
+  try {
+    await channel.send(pairingCodeMessage(scope.user_id, code));
+  } catch (err) {
+    logEvent(log, {
+      msg: "signup.code_send_failed",
+      route: "/signup",
+      user_id: scope.user_id,
+      violations: err instanceof Error ? err.message : "unknown",
+    });
+  }
+}
+
 async function mintUniqueCode(scope: UserScope, now: Date): Promise<string> {
   for (let attempt = 0; attempt < 10; attempt += 1) {
     const code = newPairingCode();

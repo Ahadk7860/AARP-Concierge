@@ -11,8 +11,12 @@ export const DEFAULT_MAX_ITEMS = 3;
 
 /** `brief.v1.json` sets `maxItems: 3`. The env var can only lower it, never raise it. */
 export function maxItems(): number {
-  const configured = Number(process.env["BOI_BRIEF_MAX_ITEMS"] ?? DEFAULT_MAX_ITEMS);
-  return Math.min(Number.isFinite(configured) ? configured : DEFAULT_MAX_ITEMS, DEFAULT_MAX_ITEMS);
+  const raw = process.env["BOI_BRIEF_MAX_ITEMS"];
+  const configured = raw === undefined || raw.trim() === "" ? DEFAULT_MAX_ITEMS : Number(raw);
+  // A NaN here would make every comparison false and the cap vanish. Same class of bug
+  // as the staleness vars: a typo must not silently disable a guard.
+  if (!Number.isFinite(configured) || configured < 1) return DEFAULT_MAX_ITEMS;
+  return Math.min(Math.floor(configured), DEFAULT_MAX_ITEMS);
 }
 
 const HEADLINE_MAX = 120;

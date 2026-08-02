@@ -68,3 +68,36 @@ export function welcomeMessage(userId: string): OutboundMessage {
 export function smsDeepLink(handle: string): string {
   return `sms:${handle}`;
 }
+
+/**
+ * The pairing code, as a SECOND message.
+ *
+ * Separate from the welcome on purpose: `first_contact_card.json` is a frozen fixture
+ * and the welcome must keep matching it exactly. A code appended to that text would
+ * break conformance for a cosmetic reason.
+ *
+ * This exists because the code previously left the building only as an
+ * `x-boi-pairing-code` HTTP response header — a header on a page the user is not
+ * looking at, on a request their browser made. The frozen welcome tells them to text
+ * their pairing code; nothing had ever given them one. That is § 4.1's failure mode
+ * from the other direction: the product appearing broken at the moment it is supposed
+ * to feel like magic.
+ */
+export function pairingCodeMessage(userId: string, code: string): OutboundMessage {
+  return {
+    schema_version: "outbound.v1",
+    user_id: userId,
+    // Keyed on the code, so re-issuing sends a new message and a retry of the same
+    // issue does not.
+    idempotency_key: `paircode-${userId}-${code}`,
+    blocks: [
+      {
+        type: "text",
+        text:
+          `your pairing code is ${code} — type it into the Mac app, ` +
+          `or text it back to me once the app is set up. it expires in 10 minutes.`,
+      },
+    ],
+    reply_to_message_id: null,
+  };
+}

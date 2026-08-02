@@ -73,6 +73,9 @@ export type VoicePackRow = {
   received_at: Date;
 };
 
+/** 'pending' is retryable. 'sent', 'skipped' and 'exhausted' are terminal. */
+export type DeliveryStatus = "pending" | "sent" | "skipped" | "exhausted";
+
 export type BriefRow = {
   user_id: string;
   brief_id: string;
@@ -85,6 +88,9 @@ export type BriefRow = {
   card_url: string | null;
   created_at: Date;
   delivered_at: Date | null;
+  delivery_status: DeliveryStatus;
+  attempts: number;
+  last_error: string | null;
 };
 
 export type MessageOutRow = {
@@ -525,6 +531,53 @@ export async function voicePackFor(
 // Briefs and outbound messages
 // ---------------------------------------------------------------------------
 
+/**
+ * Record what happened to a brief.
+ *
+ * `delivered_at` is written here and nowhere else, and the schema refuses `sent`
+ * without it — the pair used to be able to disagree, and did.
+ */
+export async function markBriefDelivery(
+  scope: UserScope,
+  briefId: string,
+  input: { status: DeliveryStatus; delivered_at?: Date | null; error?: string | null },
+  db: Queryable = getPool(),
+): Promise<void> {
+  await scopedQuery(
+    db,
+    scope,
+    `update briefs
+        set delivery_status = $3,
+            delivered_at = coalesce($4, delivered_at),
+            attempts = attempts + 1,
+            last_error = $5
+      where user_id = $1 and brief_id = $2`,
+    [
+      scope.user_id,
+      briefId,
+      input.status,
+      input.status === "sent" ? (input.delivered_at ?? new Date()).toISOString() : null,
+      input.error ?? null,
+    ],
+  );
+}
+
+/** Which of this brief's messages already reached the transport. Retry skips these. */
+export async function sentIdempotencyKeys(
+  scope: UserScope,
+  briefId: string,
+  db: Queryable = getPool(),
+): Promise<Set<string>> {
+  const res = await scopedQuery<{ idempotency_key: string }>(
+    db,
+    scope,
+    `select idempotency_key from messages_out
+      where user_id = $1 and brief_id = $2 and status = 'sent'`,
+    [scope.user_id, briefId],
+  );
+  return new Set(res.rows.map((r) => r.idempotency_key));
+}
+
 export async function insertBrief(
   scope: UserScope,
   input: { brief_id: string; brief: Brief },
@@ -561,7 +614,8 @@ export async function listBriefs(
     db,
     scope,
     `select user_id, brief_id, scheduled_for, payload, digest_as_of, hours_stale, warn,
-            item_count, card_url, created_at, delivered_at
+            item_count, card_url, created_at, delivered_at,
+            delivery_status, attempts, last_error
        from briefs where user_id = $1 order by scheduled_for desc`,
     [scope.user_id],
   );
@@ -641,7 +695,8 @@ export async function latestBrief(
     db,
     scope,
     `select user_id, brief_id, scheduled_for, payload, digest_as_of, hours_stale, warn,
-            item_count, card_url, created_at, delivered_at
+            item_count, card_url, created_at, delivered_at,
+            delivery_status, attempts, last_error
        from briefs where user_id = $1 order by scheduled_for desc limit 1`,
     [scope.user_id],
   );
@@ -658,7 +713,8 @@ export async function briefForSlot(
     db,
     scope,
     `select user_id, brief_id, scheduled_for, payload, digest_as_of, hours_stale, warn,
-            item_count, card_url, created_at, delivered_at
+            item_count, card_url, created_at, delivered_at,
+            delivery_status, attempts, last_error
        from briefs where user_id = $1 and scheduled_for = $2`,
     [scope.user_id, scheduledFor.toISOString()],
   );

@@ -108,6 +108,24 @@ export type DeliverInput = {
   channel: Channel;
   skip?: { skip: boolean; skip_reason: "digest_too_stale" | null };
   log?: (event: Record<string, unknown>) => void;
+  /**
+   * Idempotency keys already delivered on a previous attempt. Those sends are skipped.
+   *
+   * Without this a retry after a partial failure re-sends everything that DID work, so
+   * a user whose third message failed gets the first two twice.
+   */
+  alreadySent?: ReadonlySet<string>;
+  /**
+   * Called after EACH successful send, before the next one is attempted.
+   *
+   * The provider id has to be persisted per message rather than after the loop: if
+   * message three throws, messages one and two are already out in the world and the
+   * mapping for them must survive the throw. Recording them afterwards loses exactly
+   * the ones a retry needs to know about.
+   */
+  onSent?: (sent: SentMessage) => Promise<void>;
+  /** The lead's provider id from an earlier attempt, when resuming after a failure. */
+  leadProviderMessageId?: string | null;
 };
 
 /**
@@ -143,6 +161,25 @@ export async function deliverBrief(input: DeliverInput): Promise<DeliveryResult>
   const threaded = capabilities.threading === true;
   const messages: OutboundMessage[] = [];
   const delivered: SentMessage[] = [];
+  const alreadySent = input.alreadySent ?? new Set<string>();
+  const onSent = input.onSent ?? (async () => {});
+
+  /** Send unless a previous attempt already did, recording it before returning. */
+  async function dispatch(
+    message: OutboundMessage,
+    itemIndex: number | null,
+  ): Promise<SendResult | null> {
+    messages.push(message);
+    if (alreadySent.has(message.idempotency_key)) {
+      log({ msg: "brief.resend_skipped", user_id: brief.user_id, key: message.idempotency_key });
+      return null;
+    }
+    const result = await channel.send(message);
+    const sent: SentMessage = { message, result, item_index: itemIndex };
+    delivered.push(sent);
+    await onSent(sent);
+    return result;
+  }
 
   const lead: OutboundMessage = {
     schema_version: "outbound.v1",
@@ -155,23 +192,22 @@ export async function deliverBrief(input: DeliverInput): Promise<DeliveryResult>
     ...(threaded ? { requested_capabilities: ["threading"] } : {}),
   };
 
-  const leadResult = await channel.send(lead);
-  messages.push(lead);
-  delivered.push({ message: lead, result: leadResult, item_index: null });
+  const leadResult = await dispatch(lead, null);
 
   if (threaded) {
+    // A resumed attempt has no fresh lead result. The lead's provider id is already in
+    // `messages_out` from the attempt that sent it, so thread to the recorded one.
+    const leadProviderId = leadResult?.message_id ?? input.leadProviderMessageId ?? null;
     for (const [index, item] of brief.items.entries()) {
       const message: OutboundMessage = {
         schema_version: "outbound.v1",
         user_id: brief.user_id,
         idempotency_key: briefIdempotencyKey(brief, `-item-${index}`),
         blocks: itemBlocks(item),
-        reply_to_message_id: leadResult.message_id,
+        reply_to_message_id: leadProviderId,
         requested_capabilities: ["threading"],
       };
-      const result = await channel.send(message);
-      messages.push(message);
-      delivered.push({ message, result, item_index: index });
+      await dispatch(message, index);
     }
   }
 

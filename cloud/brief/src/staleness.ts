@@ -21,12 +21,39 @@ export const DEFAULT_WARN_HOURS = 24;
  */
 export const DEFAULT_SKIP_HOURS = 168;
 
+/**
+ * Read a positive number from the environment, or fall back.
+ *
+ * `Number("24 ")` is 24 but `Number("24h")` is NaN, and every comparison against NaN is
+ * false — so a one-character typo in `.env` silently disabled BOTH the staleness
+ * warning and the hard skip, and briefs went out claiming week-old facts were this
+ * morning's. A bad value falls back loudly rather than turning the guard off.
+ */
+function positiveEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    process.stderr.write(
+      `${JSON.stringify({
+        level: "warn",
+        msg: "invalid_env",
+        name,
+        detail: "not a positive number; using the default",
+        fallback,
+      })}\n`,
+    );
+    return fallback;
+  }
+  return parsed;
+}
+
 export function warnHours(): number {
-  return Number(process.env["BOI_STALENESS_WARN_HOURS"] ?? DEFAULT_WARN_HOURS);
+  return positiveEnv("BOI_STALENESS_WARN_HOURS", DEFAULT_WARN_HOURS);
 }
 
 export function skipHours(): number {
-  return Number(process.env["BOI_STALENESS_SKIP_HOURS"] ?? DEFAULT_SKIP_HOURS);
+  return positiveEnv("BOI_STALENESS_SKIP_HOURS", DEFAULT_SKIP_HOURS);
 }
 
 export type Staleness = {

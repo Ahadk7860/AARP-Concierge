@@ -21,16 +21,25 @@ import {
   findOutboundByProviderMessageId,
   findUserIdByPhone,
   getPool,
+  issuePairingCode,
   latestBrief,
   unsafeScopeFromUserId,
   type UserScope,
 } from "../../db/src/index.js";
+
+/** Six digits, alone. The other thing a user might reasonably text. */
+export function parsePairingCode(text: string | null): string | null {
+  if (text === null) return null;
+  const match = /^\s*([0-9]{6})\s*[.!]?\s*$/.exec(text);
+  return match?.[1] ?? null;
+}
 
 export type Selection =
   | { kind: "selected"; item_index: number; candidate_index: number; candidate: Candidate; brief_id: string }
   | { kind: "ambiguous"; brief_id: string; item_count: number }
   | { kind: "no_brief" }
   | { kind: "no_drafts"; item_index: number; brief_id: string }
+  | { kind: "pairing_code"; code: string; bound: boolean }
   | { kind: "not_a_selection" }
   | { kind: "unknown_user" };
 
@@ -63,7 +72,10 @@ export async function resolveUser(inbound: InboundMessage): Promise<UserScope | 
   return findUserIdByPhone(inbound.from_handle);
 }
 
-export type ResolveDeps = { db?: Parameters<typeof latestBrief>[1] };
+export type ResolveDeps = { db?: Parameters<typeof latestBrief>[1]; now?: Date };
+
+/** Ten minutes, matching `contracts/openapi/boi-api.v1.yaml`. */
+export const PAIRING_TTL_SECONDS = 600;
 
 /**
  * Which draft the user picked, if any.
@@ -79,6 +91,29 @@ export async function resolveSelection(
   deps: ResolveDeps = {},
 ): Promise<Selection> {
   const db = deps.db ?? getPool();
+
+  // A TEXTED PAIRING CODE, before anything else.
+  //
+  // The frozen welcome message says "when the Mac app is set up, text me your pairing
+  // code", and until now a user who did exactly that hit `parseSelection`, matched
+  // nothing, and got back "reply 1 or 2 to pick a draft". Binding it here makes the
+  // instruction true, and the Mac's subsequent POST /v1/pair resolves it.
+  //
+  // Six digits cannot collide with a draft selection: `parseSelection` takes only a
+  // bare 1 or 2.
+  const code = parsePairingCode(inbound.text);
+  if (code !== null) {
+    try {
+      await issuePairingCode(scope, { code, ttl_seconds: PAIRING_TTL_SECONDS, now: deps.now });
+      return { kind: "pairing_code", code, bound: true };
+    } catch {
+      // Another account is holding it. `issuePairingCode` guarantees global uniqueness
+      // of a live code under an advisory lock, so refusing is the only safe answer —
+      // rebinding would hand this user's Mac somebody else's account.
+      return { kind: "pairing_code", code, bound: false };
+    }
+  }
+
   const candidateIndex = parseSelection(inbound.text);
   if (candidateIndex === null) return { kind: "not_a_selection" };
 
@@ -164,6 +199,15 @@ export function replyBlocks(selection: Selection, display?: string): OutboundMes
       ];
     case "no_brief":
       return [{ type: "text", text: "can't find that one. i'll be back tomorrow morning." }];
+    case "pairing_code":
+      return [
+        {
+          type: "text",
+          text: selection.bound
+            ? "got it — that code is live for the next 10 minutes. finish setup on your Mac."
+            : "that code is already in use. hit sign up again and i'll text you a fresh one.",
+        },
+      ];
     case "not_a_selection":
       return [{ type: "text", text: "reply 1 or 2 to pick a draft." }];
     case "unknown_user":
@@ -181,6 +225,7 @@ export async function handleInbound(input: {
   inbound: InboundMessage;
   channel: Channel;
   db?: ResolveDeps["db"];
+  now?: Date;
   log?: (event: Record<string, unknown>) => void;
 }): Promise<HandleInboundResult> {
   const log = input.log ?? (() => {});
@@ -193,7 +238,10 @@ export async function handleInbound(input: {
     return { selection: { kind: "unknown_user" }, sent: [] };
   }
 
-  const selection = await resolveSelection(input.inbound, scope, { db: input.db });
+  const selection = await resolveSelection(input.inbound, scope, {
+    db: input.db,
+    now: input.now,
+  });
 
   let display: string | undefined;
   if (selection.kind === "no_drafts" || selection.kind === "selected") {

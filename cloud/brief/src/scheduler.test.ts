@@ -338,6 +338,112 @@ describe("retry is bounded and is not a loop", () => {
     expect(times[0]!).toBeGreaterThan(now.getTime());
   });
 
+  it("ACTUALLY RETRIES: a second attempt after a failure delivers the brief", async () => {
+    // The test the Definition of Done was missing. The old suite tested `nextRetry` as a
+    // pure function and asserted one failure called the channel once — neither drives
+    // attempt 2, and attempt 2 was broken: the brief row was written before the send,
+    // survived the throw, and the next tick found it and returned `already_sent`. A 503
+    // at 08:00 meant no brief that morning, silently, forever.
+    const now = new Date("2026-08-03T15:02:00Z");
+    const scope = await seededUser("America/Los_Angeles", new Date(now.getTime() - 3_600_000));
+    const schedule = { user_id: scope.user_id, timezone: "America/Los_Angeles" };
+
+    let failing = true;
+    const flaky = channelWith({ threading: true });
+    const realSend = flaky.send.bind(flaky);
+    flaky.send = async (msg) => {
+      if (failing) throw new Error("line_banned");
+      return realSend(msg);
+    };
+
+    const first = await runForUserWithRetry(schedule, deps({ now, channel: flaky }));
+    expect(first.status).toBe("failed");
+    expect(flaky.sent).toHaveLength(0);
+
+    // The row is still pending, not settled — that is what lets the retry happen.
+    const pending = await latestBrief(scope);
+    expect(pending?.delivery_status).toBe("pending");
+    expect(pending?.delivered_at).toBeNull();
+
+    // The line comes back. Second attempt, a few minutes later, same window.
+    failing = false;
+    const second = await runForUserWithRetry(
+      schedule,
+      deps({ now: new Date("2026-08-03T15:07:00Z"), channel: flaky, attempt: 1 }),
+    );
+
+    expect(second.status, JSON.stringify(second)).toBe("sent");
+    expect(flaky.sent.length).toBeGreaterThan(0);
+
+    const settled = await latestBrief(scope);
+    expect(settled?.delivery_status).toBe("sent");
+    expect(settled?.delivered_at).not.toBeNull();
+    // Same brief, not a second one: reusing the row is what keeps
+    // unique (user_id, scheduled_for) satisfiable across attempts.
+    expect(settled?.brief_id).toBe(pending?.brief_id);
+    expect((await residueByTable(scope.user_id, pool))["briefs"]).toBe(1);
+
+    // And a third tick now short-circuits, because the state is finally terminal.
+    const third = await runForUser(schedule, deps({ now, channel: flaky }));
+    expect(third.status).toBe("already_sent");
+  }, 60_000);
+
+  it("resumes a PARTIAL failure without re-sending what already went out", async () => {
+    // Lead sends, first item sends, second item throws. The retry must send only the
+    // second item — re-sending the first two would give the user the same brief twice.
+    const now = new Date("2026-08-03T15:02:00Z");
+    const scope = await seededUser("America/Los_Angeles", new Date(now.getTime() - 3_600_000));
+    const schedule = { user_id: scope.user_id, timezone: "America/Los_Angeles" };
+
+    const partial = channelWith({ threading: true });
+    const realSend = partial.send.bind(partial);
+    let budget = 2; // lead + one item, then fail
+    partial.send = async (msg) => {
+      if (budget <= 0) throw new Error("line_degraded");
+      budget -= 1;
+      return realSend(msg);
+    };
+
+    const first = await runForUserWithRetry(schedule, deps({ now, channel: partial }));
+    expect(first.status).toBe("failed");
+    const afterFirst = partial.sent.map((m) => m.idempotency_key);
+    expect(afterFirst).toHaveLength(2);
+
+    budget = 99;
+    const second = await runForUserWithRetry(
+      schedule,
+      deps({ now: new Date("2026-08-03T15:06:00Z"), channel: partial, attempt: 1 }),
+    );
+    expect(second.status).toBe("sent");
+
+    // Every key exactly once across BOTH attempts.
+    const keys = partial.sent.map((m) => m.idempotency_key);
+    expect(new Set(keys).size).toBe(keys.length);
+    // And the two that succeeded first time were not sent again.
+    for (const key of afterFirst) {
+      expect(keys.filter((k) => k === key)).toHaveLength(1);
+    }
+  }, 60_000);
+
+  it("a skipped brief is terminal — a retry does not resurrect it", async () => {
+    const now = new Date("2026-08-03T15:02:00Z");
+    const scope = await seededUser(
+      "America/Los_Angeles",
+      new Date(now.getTime() - (DEFAULT_SKIP_HOURS + 2) * 3_600_000),
+    );
+    const schedule = { user_id: scope.user_id, timezone: "America/Los_Angeles" };
+    const channel = channelWith();
+
+    const first = await runForUser(schedule, deps({ now, channel }));
+    expect(first.status).toBe("skipped");
+    expect((await latestBrief(scope))?.delivery_status).toBe("skipped");
+
+    // Too stale does not become less stale by trying again.
+    const second = await runForUser(schedule, deps({ now, channel }));
+    expect(second.status === "skipped" && second.reason).toBe("already_settled");
+    expect(channel.sent).toHaveLength(0);
+  }, 60_000);
+
   it("returns a failed outcome with a next attempt, and calls the channel once", async () => {
     const now = new Date("2026-08-03T15:02:00Z");
     const scope = await seededUser("America/Los_Angeles", new Date(now.getTime() - 3_600_000));

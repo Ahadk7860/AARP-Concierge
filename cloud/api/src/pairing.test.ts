@@ -27,6 +27,9 @@ import { makeLogger } from "./logging.js";
 import { checkResponse } from "./openapi.js";
 import { boiHandle, welcomeMessage, WELCOME_TEXT } from "./welcome.js";
 import { PAIRING_TTL_SECONDS } from "./routes/signup.js";
+import { FixedWindowLimiter, PAIR_LIMIT } from "./limiter.js";
+import { handleInbound, parsePairingCode } from "../../brief/src/inbound.js";
+import type { InboundMessage } from "../../shared/src/index.js";
 
 const pool = getPool();
 
@@ -105,10 +108,14 @@ describe("signup sends first, because the alternative fails silently", () => {
     const out = await signup(h, nextPhone());
     cleanup.push(out.userId);
 
-    // By the time the confirmation page is in hand, the message already exists. The
+    // By the time the confirmation page is in hand, the messages already exist. The
     // page tells the user to go look at a text; if the send were queued, that sentence
     // would be a lie for however long the queue took.
-    expect(h.channel.sent).toHaveLength(1);
+    //
+    // Two now: the welcome, then the pairing code. The code used to leave only as an
+    // HTTP header, which is not a path to the user — see the pairing tests below.
+    expect(h.channel.sent).toHaveLength(2);
+    expect(h.channel.sent[0]?.blocks.map((b) => b.type)).toEqual(["text", "contact_card"]);
     expect(out.status).toBe(200);
     await h.app.close();
   });
@@ -474,5 +481,220 @@ describe("pairing codes are unguessable", () => {
     // two checks above.
     expect(new Set(codes.map((c) => c[0])).size).toBeGreaterThan(5);
     expect(codes.some((c) => c.startsWith("0"))).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe("the pairing code actually reaches the user", () => {
+  it("is TEXTED at signup, not just returned as an HTTP header", async () => {
+    // The bug: the code left the building only as `x-boi-pairing-code`, a header on a
+    // page the user is not reading, on a request their browser made. The frozen welcome
+    // tells them to text their pairing code and nothing had ever given them one.
+    const h = harness();
+    await h.app.ready();
+    const out = await signup(h, nextPhone());
+    cleanup.push(out.userId);
+
+    // Two messages: the welcome, then the code.
+    expect(h.channel.sent).toHaveLength(2);
+    const codeMessage = h.channel.sent[1]!;
+    const text = codeMessage.blocks.map((b) => (b.type === "text" ? b.text : "")).join(" ");
+    expect(text).toContain(out.code);
+    expect(text).toMatch(/10 minutes/);
+
+    // The welcome itself is untouched — it still matches the frozen fixture.
+    const welcome = h.channel.sent[0]!;
+    expect(welcome.blocks.map((b) => b.type)).toEqual(["text", "contact_card"]);
+    expect(welcome.blocks.some((b) => b.type === "text" && b.text.includes(out.code))).toBe(false);
+
+    await h.app.close();
+  }, 60_000);
+
+  it("RE-ISSUES on re-signup, so an expired code is not a dead end", async () => {
+    // Signing up again is what somebody does when the first code expired. Returning the
+    // same page without a fresh one left that account permanently unpairable.
+    const start = new Date("2026-08-01T09:00:00Z");
+    const h = harness({ at: start });
+    await h.app.ready();
+    const phone = nextPhone();
+
+    const first = await signup(h, phone);
+    cleanup.push(first.userId);
+
+    h.advance(PAIRING_TTL_SECONDS + 60); // the first code is now dead
+    const dead = await h.app.inject({
+      method: "POST",
+      url: "/v1/pair",
+      payload: { code: first.code, device_id: "dev_expired000001" },
+    });
+    expect(dead.statusCode).toBe(404);
+
+    const again = await signup(h, phone);
+    expect(again.userId).toBe(first.userId);
+    expect(again.code).not.toBe(first.code);
+
+    // The new one is texted too, and it works.
+    const texts = h.channel.sent.map((m) =>
+      m.blocks.map((b) => (b.type === "text" ? b.text : "")).join(" "),
+    );
+    expect(texts.some((t) => t.includes(again.code))).toBe(true);
+
+    const ok = await h.app.inject({
+      method: "POST",
+      url: "/v1/pair",
+      payload: { code: again.code, device_id: "dev_reissued00001" },
+    });
+    expect(ok.statusCode, ok.body).toBe(200);
+    await h.app.close();
+  }, 60_000);
+
+  it("understands a texted six-digit code instead of answering 'reply 1 or 2'", async () => {
+    // What a user who follows the welcome message literally actually does. Before this,
+    // they hit `parseSelection`, matched nothing, and were told to reply 1 or 2.
+    expect(parsePairingCode("410100")).toBe("410100");
+    expect(parsePairingCode(" 410100 ")).toBe("410100");
+    expect(parsePairingCode("2")).toBeNull();
+    expect(parsePairingCode("41010")).toBeNull();
+    expect(parsePairingCode("hello")).toBeNull();
+
+    const h = harness();
+    await h.app.ready();
+    const phone = nextPhone();
+    const out = await signup(h, phone);
+    cleanup.push(out.userId);
+
+    // The Mac shows a code; the user texts it.
+    const macCode = "778812";
+    const inbound: InboundMessage = {
+      schema_version: "inbound.v1",
+      provider: "mock",
+      provider_message_id: "mmsg_pair_1",
+      line_id: "line_a1",
+      from_handle: phone,
+      user_id: null, // resolved from the handle
+      received_at: new Date().toISOString(),
+      kind: "text",
+      text: macCode,
+      reply_to_message_id: null,
+      protocol: "imessage",
+      trace_id: null,
+    };
+
+    const result = await handleInbound({ inbound, channel: h.channel });
+    expect(result.selection.kind).toBe("pairing_code");
+    const reply = h.channel.sent.at(-1)!;
+    const replyText = reply.blocks.map((b) => (b.type === "text" ? b.text : "")).join(" ");
+    expect(replyText).not.toContain("reply 1 or 2");
+    expect(replyText).toContain("got it");
+
+    // And the Mac can now pair with the code the user texted.
+    const paired = await h.app.inject({
+      method: "POST",
+      url: "/v1/pair",
+      payload: { code: macCode, device_id: "dev_texted0000001" },
+    });
+    expect(paired.statusCode, paired.body).toBe(200);
+    expect((paired.json() as { user_id: string }).user_id).toBe(out.userId);
+    await h.app.close();
+  }, 60_000);
+
+  it("refuses to rebind a code another account is holding", async () => {
+    const h = harness();
+    await h.app.ready();
+    const victimPhone = nextPhone();
+    const attackerPhone = nextPhone();
+    const victim = await signup(h, victimPhone);
+    const attacker = await signup(h, attackerPhone);
+    cleanup.push(victim.userId, attacker.userId);
+
+    // The attacker texts the victim's live code. Rebinding would point the victim's Mac
+    // at the attacker's account — the advisory lock in issuePairingCode is what stops it.
+    const inbound: InboundMessage = {
+      schema_version: "inbound.v1",
+      provider: "mock",
+      provider_message_id: "mmsg_pair_attack",
+      line_id: "line_a1",
+      from_handle: attackerPhone,
+      user_id: null,
+      received_at: new Date().toISOString(),
+      kind: "text",
+      text: victim.code,
+      reply_to_message_id: null,
+      protocol: "imessage",
+      trace_id: null,
+    };
+    const result = await handleInbound({ inbound, channel: h.channel });
+    expect(result.selection.kind === "pairing_code" && result.selection.bound).toBe(false);
+
+    // The victim's code still resolves to the victim.
+    const paired = await h.app.inject({
+      method: "POST",
+      url: "/v1/pair",
+      payload: { code: victim.code, device_id: "dev_victim0000001" },
+    });
+    expect((paired.json() as { user_id: string }).user_id).toBe(victim.userId);
+    await h.app.close();
+  }, 60_000);
+});
+
+describe("/v1/pair is rate limited", () => {
+  it("stops a brute-force sweep of the six-digit space", async () => {
+    // Unauthenticated, a million codes, ten-minute windows, and a hit returns the
+    // user_salt — which is issued once and never rotated.
+    const limiter = new FixedWindowLimiter(PAIR_LIMIT);
+    const at = new Date("2026-08-03T09:00:00Z");
+    const app = buildServer({
+      channel: new StubChannel(),
+      now: () => at,
+      logger: makeLogger(new PassThrough()),
+      pairLimiter: limiter,
+    });
+    await app.ready();
+    try {
+      const codes = Array.from({ length: PAIR_LIMIT.limit }, (_, i) =>
+        String(100000 + i),
+      );
+      for (const code of codes) {
+        const res = await app.inject({
+          method: "POST",
+          url: "/v1/pair",
+          payload: { code, device_id: "dev_sweep00000001" },
+        });
+        expect(res.statusCode, `code ${code}`).toBe(404);
+      }
+
+      // One past the limit.
+      const blocked = await app.inject({
+        method: "POST",
+        url: "/v1/pair",
+        payload: { code: "999999", device_id: "dev_sweep00000001" },
+      });
+      expect(blocked.statusCode).toBe(429);
+      expect(blocked.json()).toEqual({ error: "rate_limited" });
+      expect(blocked.headers["retry-after"]).toBeDefined();
+    } finally {
+      await app.close();
+    }
+  }, 60_000);
+
+  it("opens a fresh window once the old one passes — clock, not sleep", () => {
+    const limiter = new FixedWindowLimiter({ limit: 2, windowSeconds: 60 });
+    const t0 = new Date("2026-08-03T09:00:00Z");
+    expect(limiter.check("ip", t0).allowed).toBe(true);
+    expect(limiter.check("ip", t0).allowed).toBe(true);
+    expect(limiter.check("ip", t0).allowed).toBe(false);
+
+    const t1 = new Date(t0.getTime() + 61_000);
+    expect(limiter.check("ip", t1).allowed).toBe(true);
+  });
+
+  it("counts each source separately", () => {
+    const limiter = new FixedWindowLimiter({ limit: 1, windowSeconds: 60 });
+    const t0 = new Date("2026-08-03T09:00:00Z");
+    expect(limiter.check("a", t0).allowed).toBe(true);
+    expect(limiter.check("a", t0).allowed).toBe(false);
+    // A different caller is not punished for the first one's spraying.
+    expect(limiter.check("b", t0).allowed).toBe(true);
   });
 });

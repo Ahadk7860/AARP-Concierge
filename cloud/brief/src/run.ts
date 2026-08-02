@@ -14,10 +14,13 @@ import {
   insertBrief,
   insertOutboundMessage,
   latestDigest,
+  listOutboundMessages,
   listRelationships,
+  markBriefDelivery,
   markOutboundSent,
   newBriefId,
   newOutboundMessageId,
+  sentIdempotencyKeys,
   unsafeScopeFromUserId,
   type UserScope,
 } from "../../db/src/index.js";
@@ -28,7 +31,11 @@ import { nextRetry, slotFor, type UserSchedule } from "./scheduler.js";
 export type TickOutcome =
   | { user_id: string; status: "sent"; brief_id: string; items: number; messages: number }
   | { user_id: string; status: "already_sent"; brief_id: string }
-  | { user_id: string; status: "skipped"; reason: "digest_too_stale" | "nothing_to_say" | "no_digest" }
+  | {
+      user_id: string;
+      status: "skipped";
+      reason: "digest_too_stale" | "nothing_to_say" | "no_digest" | "already_settled";
+    }
   | { user_id: string; status: "failed"; attempt: number; next_attempt_at: string | null };
 
 export type TickDeps = {
@@ -49,12 +56,34 @@ export async function runForUser(
   const scope = unsafeScopeFromUserId(schedule.user_id);
   const scheduledFor = slotFor(deps.now, schedule.timezone);
 
-  // THE IDEMPOTENCY CHECK. Before any work, and keyed on the canonical slot rather than
-  // on `now`, so a second tick inside the same window sees the first tick's row.
+  // THE IDEMPOTENCY CHECK, gated on WHAT HAPPENED rather than on the row existing.
+  //
+  // This used to short-circuit on the row alone. The row is written before the send and
+  // survives a throw, so a failed morning looked identical to a delivered one and the
+  // bounded retry could never fire — a 503 at 08:00 meant no brief that day, silently.
+  // Only a terminal state stops a retry now; `pending` means the send did not finish
+  // and this attempt resumes it.
   const existing = await briefForSlot(scope, scheduledFor);
-  if (existing !== null) {
-    log({ msg: "brief.already_sent", user_id: scope.user_id, brief_id: existing.brief_id });
-    return { user_id: scope.user_id, status: "already_sent", brief_id: existing.brief_id };
+  if (existing !== null && existing.delivery_status !== "pending") {
+    log({
+      msg: "brief.already_settled",
+      user_id: scope.user_id,
+      brief_id: existing.brief_id,
+      delivery_status: existing.delivery_status,
+    });
+    return existing.delivery_status === "sent"
+      ? { user_id: scope.user_id, status: "already_sent", brief_id: existing.brief_id }
+      : { user_id: scope.user_id, status: "skipped", reason: "already_settled" };
+  }
+  const resuming = existing !== null;
+
+  if (resuming) {
+    log({
+      msg: "brief.resuming",
+      user_id: scope.user_id,
+      brief_id: existing.brief_id,
+      attempts: existing.attempts,
+    });
   }
 
   const digest = await latestDigest(scope);
@@ -79,21 +108,65 @@ export async function runForUser(
     drafts: await deps.draftsFor(scope),
   });
 
-  const briefId = newBriefId();
+  // Reuse the row on a resumed attempt: `unique (user_id, scheduled_for)` would reject
+  // a second insert, and a second brief_id would orphan the messages already sent.
+  const briefId = existing?.brief_id ?? newBriefId();
 
   // Persisted BEFORE the send, including when it will be skipped. The skip is a record,
   // not just a log line: a user asking "why didn't I get one" deserves an answer that
   // outlives the log retention window.
-  await insertBrief(scope, { brief_id: briefId, brief });
+  if (!resuming) await insertBrief(scope, { brief_id: briefId, brief });
 
-  const result = await deliverBrief({
-    brief,
-    channel: deps.channel,
-    skip: decision,
-    log,
-  });
+  // What already went out on a previous attempt, so a resume does not re-send it.
+  const alreadySent = resuming ? await sentIdempotencyKeys(scope, briefId) : new Set<string>();
+  const leadKey = `brief-${brief.user_id}-${brief.scheduled_for}-lead`;
+  let leadProviderMessageId: string | null = null;
+  if (alreadySent.has(leadKey)) {
+    const rows = await listOutboundMessages(scope);
+    leadProviderMessageId =
+      rows.find((r) => r.idempotency_key === leadKey)?.provider_message_id ?? null;
+  }
+
+  let result;
+  try {
+    result = await deliverBrief({
+      brief,
+      channel: deps.channel,
+      skip: decision,
+      log,
+      alreadySent,
+      leadProviderMessageId,
+      // THE MAPPING, written per send rather than after the loop. If message three
+      // throws, one and two are already out in the world and their provider ids must
+      // survive the throw — that is what a resume reads.
+      onSent: async ({ message, result: sendResult, item_index }) => {
+        await insertOutboundMessage(scope, {
+          message_id: newOutboundMessageId(),
+          idempotency_key: message.idempotency_key,
+          brief_id: briefId,
+          item_index,
+          blocks: message.blocks,
+        });
+        await markOutboundSent(scope, message.idempotency_key, {
+          protocol: sendResult.protocol,
+          provider: sendResult.provider,
+          provider_message_id: sendResult.message_id,
+          line_id: sendResult.line_id,
+        });
+      },
+    });
+  } catch (err) {
+    // Leave the row `pending` so the next attempt resumes rather than reporting success.
+    await markBriefDelivery(scope, briefId, {
+      status: "pending",
+      error: err instanceof Error ? err.message : "unknown",
+    });
+    throw err;
+  }
 
   if (!result.sent) {
+    // Terminal: too stale or nothing to say. Neither improves by trying again.
+    await markBriefDelivery(scope, briefId, { status: "skipped", error: result.reason });
     log({
       msg: "brief.not_sent",
       user_id: scope.user_id,
@@ -104,28 +177,7 @@ export async function runForUser(
     return { user_id: scope.user_id, status: "skipped", reason: result.reason };
   }
 
-  // THE MAPPING, written down at the only moment it exists.
-  //
-  // `SendResult.message_id` is the provider's id for the message just sent, and
-  // `inbound.v1.reply_to_message_id` will carry it back when the user replies "2". It
-  // appears once, here, and cannot be reconstructed afterwards — so both halves go into
-  // the same row: our `omsg_` and their id, plus the brief item it rendered.
-  for (const { message, result: sendResult, item_index } of result.delivered) {
-    const messageId = newOutboundMessageId();
-    await insertOutboundMessage(scope, {
-      message_id: messageId,
-      idempotency_key: message.idempotency_key,
-      brief_id: briefId,
-      item_index,
-      blocks: message.blocks,
-    });
-    await markOutboundSent(scope, message.idempotency_key, {
-      protocol: sendResult.protocol,
-      provider: sendResult.provider,
-      provider_message_id: sendResult.message_id,
-      line_id: sendResult.line_id,
-    });
-  }
+  await markBriefDelivery(scope, briefId, { status: "sent", delivered_at: deps.now });
 
   return {
     user_id: scope.user_id,
