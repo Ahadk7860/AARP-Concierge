@@ -87,6 +87,29 @@ told about. Collapsing it into the documented `404` also stops the endpoint bein
 oracle that distinguishes "malformed" from "wrong". Flagging because it is a real
 deviation from how every other endpoint in this API reports a bad body.
 
+`[prompt 05] OPEN` — **`contracts/fixtures/brief/stale_warning.json` disagrees with
+itself.** Its `hours_stale` is `98.8`, but its own two timestamps are 122.8 hours apart:
+
+```
+digest_as_of  2026-07-28T09:14:00Z   (a Tuesday)
+scheduled_for 2026-08-02T12:00:00Z
+difference    122.8 hours, not 98.8
+```
+
+98.8 hours before that `scheduled_for` is Wednesday the 29th, while the fixture's
+message says *Tuesday* — so the message agrees with `digest_as_of` and `hours_stale`
+agrees with neither. `contracts/**` is frozen, so I could not fix it.
+
+The Definition of Done says a 98-hour digest must warn "matching
+`stale_warning.json`'s shape", and shape is what I matched: same keys, same types, same
+sentence. `hours_stale` I compute from the timestamps, and there is a test asserting the
+invariant the fixture violates — the number emitted always equals the difference between
+the two timestamps emitted, across six spans. Asserting the fixture's `98.8` would have
+meant hard-coding a value that contradicts its own inputs.
+
+Likely fix: `digest_as_of` should be `2026-07-29T09:12:00Z` and the message *Wednesday*,
+or `hours_stale` should be `122.8`. Track A and Track B may both read this fixture.
+
 `[prompt 01] OPEN` — **`brf_` and `dig_` are not in CONTRACTS.md § 6's prefix list.**
 § 6 fixes `usr_`, `dev_`, `h_`, `g_`, `vp_`, `omsg_` and `lmsg_`, and nothing else. But
 § 4 names `digest_id` in the `digest.ingested` payload, so a digest id has to exist and
@@ -137,6 +160,12 @@ Every append to a foundation-owned shared file: dependency manifests, lint confi
 `.env.example`. One line each, so the user can anticipate merge conflicts.
 
 Format: `[prompt NN] <file> — added <what> because <why>`
+
+`[prompt 05] .env.example` — appended `BOI_STALENESS_SKIP_HOURS=168` because prompt 05
+requires a hard threshold beyond which the morning send is skipped entirely, and the
+file had only `BOI_STALENESS_WARN_HOURS`. 168 hours is a week; it has to sit above the
+98-hour case the checklist requires to still WARN rather than skip. One appended line at
+the end of the Track D block; nothing reordered.
 
 `[prompt 01] package.json` — added `"@types/pg": "^8.11.0"` to `devDependencies`
 because `pg` is in the baseline dependencies but ships no type declarations, so
@@ -274,6 +303,24 @@ Now four tests that can each fail on their own:
 - A test proves the enumeration **refuses to verify what it cannot count**.
 - Every assertion compares against the live enumeration. The literal table list is used
   only by a schema-completeness test, which is a different question.
+
+`[prompt 05]` — **Threading sends N+1 messages; unthreaded sends exactly one.** The
+prompt says "per-item threading when `capabilities()` reports it", and `outbound.v1` is
+one message with blocks — so per-item threading has to mean one message per item,
+each `reply_to_message_id`-linked to a lead. Without threading everything collapses into
+the lead's block list, silently: no capability request, and nothing in the copy mentions
+it. A transport that cannot thread is not an error condition.
+
+`[prompt 05]` — **An empty morning sends nothing.** Not in the checklist, and not
+strictly required. Sending "0 people worth a message today" every quiet day is how a
+habit becomes a notification people switch off, so `deliverBrief` returns
+`nothing_to_say` and the channel stays untouched. Prompt 06 may want to revisit this if
+the scheduler needs a heartbeat the user can see.
+
+`[prompt 05]` — **`BOI_BRIEF_MAX_ITEMS` can lower the cap but never raise it.**
+`brief.v1.json` sets `maxItems: 3`. An env var able to exceed that would produce
+documents the validator rejects at the moment somebody sets it to 20 in production, so
+`maxItems()` takes the minimum of the configured value and 3. Asserted.
 
 `[prompt 04]` — **Two layout breaks found by looking at the images, not by the tests.**
 The first render clipped the caption — `"…went quiet this yea"` with the `r` past the
