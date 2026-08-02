@@ -257,11 +257,19 @@ def _write_uncheckpointed_wal_row(db: pathlib.Path, guid_n: int, when_ns: int) -
         con = sqlite3.connect({str(db)!r})
         con.execute("PRAGMA journal_mode=WAL")
         con.execute("PRAGMA wal_autocheckpoint=0")
-        con.execute(
+        cur = con.execute(
             "INSERT INTO message (guid, text, handle_id, service, date, is_from_me)"
             " VALUES (?,?,?,?,?,?)",
             ("MSG-{guid_n:07d}", "this row lives only in the WAL", 1, "iMessage",
              {when_ns}, 0),
+        )
+        # Join it to chat 1 so it survives the 1:1 filter. Without this the WAL-only row
+        # is invisible to every filtered read, and the immutable=1 experiment would only
+        # be provable on a raw count(*) that the product never calls -- the flagship
+        # criterion covering a code path nobody ships.
+        con.execute(
+            "INSERT INTO chat_message_join VALUES (?,?,?)",
+            (1, cur.lastrowid, {when_ns}),
         )
         con.commit()
         os.kill(os.getpid(), signal.SIGKILL)   # no close -> no checkpoint

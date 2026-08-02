@@ -10,6 +10,7 @@ final class FoundationTests: XCTestCase {
             .deletingLastPathComponent()   // BoiKitTests
             .deletingLastPathComponent()   // Tests
             .deletingLastPathComponent()   // mac
+            .deletingLastPathComponent()   // repo root
             .appendingPathComponent("contracts/fixtures/digest/healthy.json")
 
         let data = try Data(contentsOf: url)
@@ -32,7 +33,7 @@ final class FoundationTests: XCTestCase {
     func testVoicePackFixtureDecodes() throws {
         let url = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent()
-            .deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("contracts/fixtures/voice_pack/maya.json")
         let pack = try JSONDecoder().decode(VoicePack.self, from: Data(contentsOf: url))
         XCTAssertEqual(pack.scope, "contact")
