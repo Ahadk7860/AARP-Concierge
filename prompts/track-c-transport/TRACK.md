@@ -143,7 +143,7 @@ report rather than picking a default that another track may also pick.
 
 | # | File | Outcome | Depends on | Status |
 |---|---|---|---|---|
-| 01 | `01-mock-linq.md` | a mock Linq v3 server with fault injection | none | not started |
+| 01 | `01-mock-linq.md` | a mock Linq v3 server with fault injection | none | done — 1 item blocked (lint, no eslint.config.js; see NOTES.md) |
 | 02 | `02-linq-adapter.md` | LinqChannel implementing the frozen Channel interface | 01 | not started |
 | 03 | `03-inbound.md` | signature verification and inbound.v1 normalization | 01 | not started |
 | 04 | `04-line-health.md` | sticky assignment, health tracking, automatic downgrade | 02 | not started |
