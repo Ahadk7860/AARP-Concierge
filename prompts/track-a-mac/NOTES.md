@@ -108,8 +108,57 @@ exemplar when nothing stops it. The test also asserts the fixture still contains
 user-sent tapback quoting the canary, so it fails loudly rather than vacuously if the
 generator stops emitting it.
 
-`[prompt 07] CONTRACT GAP — guard three is unusable on any real corpus, and the fix is
-not in the repo yet.` `scripts/check_voice_pack_leak.py` builds its `sent` set from
+`[prompt 05 / Pass 2] GUARD THREE, RE-RUN IN ITS AUTHORITATIVE FORM. RESOLVED — the
+anchor is satisfied.` `7570082 scripts: land the guard-three --mirror fix (written 3 Aug,
+never committed)` landed and the corrected script is now in this worktree. Re-run against
+both corpora:
+
+```
+FIXTURE   7 of 7 packs      exit=0   "0 exemplars traceable to inbound messages"
+REAL      174 of 174 packs  exit=0   0 FAILs
+```
+
+The 174-pack run is the one that matters: **that is the corpus that produced 47 false
+FAILs under the pre-correction script.** Zero now. Guard three and
+`boi-cli voice-pack-provenance` agree on the same corpus, which is the first time the two
+independent instruments have been able to agree at all.
+
+`[prompt 05 / Pass 2] NEW FINDING IN THE CORRECTED SCRIPT — `--mirror` trusts the FLAG,
+not the FILE, so the refusal it exists to make is one typo away from being skipped.`
+`is_mirror=bool(a.mirror)`, and the NULL-text refusal is gated on `if not is_mirror`. So
+the same raw `chat.db` gets two different answers depending only on which flag you type:
+
+```
+$ ... --db /tmp/boi-a/chat.db --pack global_fallback.json
+REFUSING to check against a raw chat.db.
+  3,878 of 9,638 rows (40.2%) have no `text` column ...
+
+$ ... --mirror /tmp/boi-a/chat.db --pack global_fallback.json
+OK -- 0 exemplars traceable to inbound messages (0 redacted beyond verbatim match, 10 total)
+exit=0
+```
+
+The second is the exact unreliable answer the refusal was added to prevent, and reaching
+it needs no ill intent — just someone re-running this check and pointing the new flag at
+the path they already had in their shell history. A guard whose safety depends on the
+operator already knowing the thing it is meant to tell them is not doing much.
+
+There is a clean structural tell available, so this need not stay a convention:
+
+```
+                mirror_meta table   PRAGMA user_version
+Boi mirror              1                    2
+chat.db                 0                    0
+```
+
+Suggested: derive `is_mirror` from `_table_exists(con, "mirror_meta")` rather than from
+which flag was used, and let the flags stay as documentation of intent. **I did not touch
+the script** — it is named in CONTRACTS § 7 and prompt 05 calls it a frozen anchor. This
+does not affect the results above: the mirror I checked against really is a mirror
+(`mirror_meta=1`, `user_version=2`).
+
+`[prompt 07] CONTRACT GAP — guard three WAS unusable on any real corpus. RESOLVED, see
+above; the analysis is kept because it is why the fix exists.` `scripts/check_voice_pack_leak.py` builds its `sent` set from
 `SELECT text FROM message WHERE is_from_me = 1 AND text IS NOT NULL`. On this Mac that is
 **9,940 of 30,998 sent rows**; the other 21,047 carry their text in `attributedBody` —
 the exact trap prompt 03 exists to solve, reproduced inside the script that guards the
@@ -1015,13 +1064,21 @@ $ python3 scripts/validate_fixtures.py digest.v1 ~/Library/Application\ Support/
 OK — 1 document(s) valid against contracts/schema/
 ```
 
-**One thing I cannot fully explain and am not smoothing over:** a third `app.launched`
-appeared at 16:30:26, 14 s after the relaunch. Only one process survives
+**KNOWN ISSUE, CARRIED TO THE PACKAGING ROUND — a relaunch race.** A third
+`app.launched` appeared at 16:30:26, 14 s after the relaunch. Only one process survives
 (`pgrep` shows a single pid) and the granted-to-relaunched sequence at 16:30:12 is clean,
 but two instances were started. `Relauncher` has both an `openApplication` completion
 handler and a 1.2 s belt-and-braces `terminate`, and a race between them is the likeliest
 cause. Harmless here — the surviving instance is correct and holds the grant — but it is
-an extra launch nobody asked for and it should be understood before this ships.
+an extra launch nobody asked for.
+
+**It will reappear on a slower machine**, where the 1.2 s timer is likelier to fire before
+`openApplication`'s completion handler runs, and this one was observed on a fast one.
+Pass 2 agreed it is not a merge blocker and asked that it stay recorded as a known issue
+for the packaging round. The fix is presumably a single guard so whichever of the two
+paths gets there first wins and the other becomes a no-op; it is not made here because it
+is a behaviour change to the relaunch path landing after the evidence for that path was
+captured, and it deserves its own verified run rather than a blind edit.
 
 `[prompt 07] The first attempt at this evidence was thrown away because the DoD item was
 satisfied by the wrong process.` The relaunched instance did **not** write a fresh digest:
