@@ -139,13 +139,13 @@ report rather than picking a default that another track may also pick.
 
 | # | File | Outcome | Depends on | Status |
 |---|---|---|---|---|
-| 01 | `01-reader.md` | a CLI that reads the fixture database and proves the WAL is visible | none | not started |
-| 02 | `02-mirror.md` | SQLite + FTS5 mirror with a watermark that survives backfill | 01 (consumes the reader; same files) | not started |
-| 03 | `03-typedstream.md` | attributedBody decoded; unrecoverable share drops below 2% | 01 (consumes the reader; same files) | not started |
-| 04 | `04-metrics-digest.md` | a valid digest.v1 written to disk from real message history | 02, 03 | not started |
-| 05 | `05-voice-pack.md` | valid voice_pack.v1 with zero inbound leakage | 02, 03 | not started |
-| 06 | `06-health-check.md` | healthy / fixable / thin, with a repair path | 04 | not started |
-| 07 | `07-app-bundle.md` | a launchable .app with FDA onboarding and a working LaunchAgent | 06 | not started |
+| 01 | `01-reader.md` | a CLI that reads the fixture database and proves the WAL is visible | none | **done** — DoD green, 23 tests pass |
+| 02 | `02-mirror.md` | SQLite + FTS5 mirror with a watermark that survives backfill | 01 (consumes the reader; same files) | **done** — DoD green, 42 tests pass |
+| 03 | `03-typedstream.md` | attributedBody decoded; unrecoverable share drops below 2% | 01 (consumes the reader; same files) | **done** — decoder failures 0.0300% vs <0.5% bar; 62 tests pass |
+| 04 | `04-metrics-digest.md` | a valid digest.v1 written to disk from real message history | 02, 03 | **done** — DoD green (the `reciproc` grep criterion was retired by the 3 Aug CONTRACTS § 6 amendment) |
+| 05 | `05-voice-pack.md` | valid voice_pack.v1 with zero inbound leakage | 02, 03 | **done** — 7 packs validate + pass the leak checker; guard-one canary 4 red / 0 green |
+| 06 | `06-health-check.md` | healthy / fixable / thin, with a repair path | 04 | **done** — all three cases classify; 131 tests pass |
+| 07 | `07-app-bundle.md` | a launchable .app with FDA onboarding and a working LaunchAgent | 06 | **done, Pass 2 corrections applied** — sent-tapback hole closed and double-canaried; relaunch log in NOTES; 163 tests pass |
 
 **Read the `Depends on` column, not the numbering.** Numbering implies a sequence and
 most of that sequence is imaginary. A prompt whose dependencies are complete is ready,

@@ -14,9 +14,17 @@ let package = Package(
     platforms: [.macOS(.v13)],
     products: [
         .library(name: "BoiKit", targets: ["BoiKit"]),
+        .executable(name: "boi-cli", targets: ["BoiCLI"]),
+        // The shipping binary. `mac/scripts/build-app.sh` wraps it in Boi.app, because
+        // all privileged I/O must happen inside a bundle -- see the note above. The
+        // LaunchAgent invokes THIS binary with --sync, never a helper: TCC is
+        // per-responsible-process and children do not inherit the grant.
+        .executable(name: "BoiApp", targets: ["BoiApp"]),
     ],
     targets: [
         .target(name: "BoiKit"),
+        .executableTarget(name: "BoiCLI", dependencies: ["BoiKit"]),
+        .executableTarget(name: "BoiApp", dependencies: ["BoiKit"]),
         .testTarget(name: "BoiKitTests", dependencies: ["BoiKit"]),
     ]
 )
