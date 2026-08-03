@@ -57,17 +57,30 @@ public struct SyncRun {
         public var health: CorpusHealth = .thin
         public var heartbeatPath: String?
         public var elapsed: TimeInterval = 0
+        /// What reached the cloud. `nil` means no upload was attempted at all — no
+        /// `BOI_API_BASE`, or no paired identity — which is a legitimate state for a
+        /// developer run and is logged as `upload.not_configured` rather than as a
+        /// failure.
+        public var upload: Uploader.Dispatch?
     }
 
     public let paths: Paths
     public let salt: String
     public let minimumHoursBetweenRuns: Int
+    /// Injected so a test can drive the whole run against a real loopback HTTP server.
+    /// `nil` means "read the environment", which is what the LaunchAgent gets.
+    let uploader: Uploader?
+    let tokenStore: TokenStore
 
     public init(paths: Paths, salt: String,
-                minimumHoursBetweenRuns: Int = SyncRun.defaultMinimumHoursBetweenRuns) {
+                minimumHoursBetweenRuns: Int = SyncRun.defaultMinimumHoursBetweenRuns,
+                uploader: Uploader? = nil,
+                tokenStore: TokenStore = EnvironmentTokenStore()) {
         self.paths = paths
         self.salt = salt
         self.minimumHoursBetweenRuns = minimumHoursBetweenRuns
+        self.uploader = uploader
+        self.tokenStore = tokenStore
     }
 
     static let lastRunKey = "last_full_run_at"
@@ -110,20 +123,38 @@ public struct SyncRun {
         let health = HealthCheck.evaluate(corpus: metrics.corpus, system: system)
         outcome.health = health.health
 
+        // THE PAIRED IDENTITY, AND WHY IT IS THREADED IN RATHER THAN DERIVED.
+        //
+        // `DigestBuilder` defaults `user_id` to `ContactResolver.localUserIdentifier()`,
+        // an HMAC of the local salt. The server issues `user_id` at signup instead, and
+        // `POST /v1/digest` answers `401 unauthorized` when the body's `user_id` is not
+        // the authenticated one. So a locally-derived id produces a digest that is
+        // correct on disk and unacceptable on the wire — silently, forever. That is
+        // precisely the class of failure this track exists to find; see NOTES.md.
+        //
+        // An injected uploader carries its own identity; the token store is the path the
+        // LaunchAgent takes. Preferring the injection keeps a test from configuring the
+        // same identity twice and disagreeing with itself.
+        let identity = uploader?.identity ?? tokenStore.identity()
+        var digest: Digest?
+        var packs: [VoicePack] = []
+
         // DEGRADE, NEVER FABRICATE. A thin corpus gets no digest — handing somebody a
         // report built on 400 messages and calling it their year is the failure this
         // whole health check exists to prevent, and writing the file anyway would let a
         // later step pick it up and send it.
         if health.producesReport {
-            let digest = DigestBuilder(resolver: resolver,
-                                       options: .init(generatedAt: now, system: system))
+            let built = DigestBuilder(resolver: resolver,
+                                      options: .init(userID: identity?.user_id,
+                                                     generatedAt: now, system: system))
                 .build(from: metrics)
             let digestPath = URL(fileURLWithPath: paths.outputDirectory)
                 .appendingPathComponent("digest.json").path
-            try DigestBuilder.write(digest, to: digestPath)
+            try DigestBuilder.write(built, to: digestPath)
             outcome.digestPath = digestPath
+            digest = built
 
-            let packs = try VoicePackBuilder(options: .init(
+            packs = try VoicePackBuilder(options: .init(
                 now: now, redactor: Redactor(directory: contacts ?? .empty)))
                 .build(mirror: mirror, identities: metrics.relationships.map(\.identity))
             outcome.voicePackPaths = try packs.map {
@@ -139,7 +170,95 @@ public struct SyncRun {
 
         outcome.ran = true
         outcome.elapsed = Date().timeIntervalSince(started)
+
+        // UPLOAD LAST, AND AFTER EVERYTHING DURABLE IS ON DISK.
+        //
+        // The digest file stays whatever happens here — it is the only thing a support
+        // conversation can ask for, and it is also what the queue re-reads. Nothing above
+        // this line depends on the network, so a Mac with no connectivity still produces
+        // a complete local run.
+        outcome.upload = try upload(digest: digest,
+                                    digestPath: outcome.digestPath,
+                                    packs: packs,
+                                    packPaths: outcome.voicePackPaths,
+                                    heartbeatPath: outcome.heartbeatPath,
+                                    deviceID: resolver.localDeviceIdentifier(),
+                                    identity: identity,
+                                    now: now)
         return outcome
+    }
+
+    /// Sends what this run produced, and throws `Uploader.Deferred` if any of it did not
+    /// land.
+    ///
+    /// **The throw is the point.** Prompt `01`: "a 500 from the server enqueues the
+    /// digest and returns non-zero from `--sync`". The shipping `--sync` entry point is
+    /// in `BoiApp.swift`, which this track does not own, so a return value cannot change
+    /// its exit code — only an error can. Everything durable is already written when this
+    /// runs, so the throw costs nothing but the process's exit status, which is exactly
+    /// what it is for.
+    func upload(digest: Digest?,
+                digestPath: String?,
+                packs: [VoicePack],
+                packPaths: [String],
+                heartbeatPath: String?,
+                deviceID: String,
+                identity: DeviceIdentity?,
+                now: Date) throws -> Uploader.Dispatch? {
+        let uploader: Uploader
+        if let injected = self.uploader {
+            uploader = injected
+        } else {
+            guard let configuration = Uploader.Configuration.fromEnvironment() else {
+                StructuredLog.emit("upload.not_configured", fields: [
+                    "reason": "no \(Uploader.Configuration.baseURLVariable)",
+                ])
+                return nil
+            }
+            guard let identity else {
+                StructuredLog.emit("upload.not_configured", fields: [
+                    "reason": "no paired identity: set \(EnvironmentTokenStore.userIDVariable) "
+                        + "and \(EnvironmentTokenStore.deviceTokenVariable)",
+                ])
+                return nil
+            }
+            uploader = Uploader(configuration: configuration, identity: identity)
+        }
+
+        var payloads: [Uploader.Payload] = []
+
+        // Read the bytes back off disk rather than re-encoding. `DigestBuilder.write`
+        // fills explicit nulls that a plain `JSONEncoder` omits, so re-encoding here
+        // would upload a document that differs from the one on disk — and the file is
+        // the artefact a support conversation asks for.
+        if let digest, let digestPath, let body = FileManager.default.contents(atPath: digestPath) {
+            payloads.append(.init(body: body, endpoint: .digest,
+                                  descriptor: .forDigest(digest)))
+        }
+        for (pack, path) in zip(packs, packPaths) {
+            guard let body = FileManager.default.contents(atPath: path) else { continue }
+            payloads.append(.init(body: body, endpoint: .voicePack,
+                                  descriptor: .forVoicePack(pack)))
+        }
+        if let heartbeatPath,
+           let data = FileManager.default.contents(atPath: heartbeatPath),
+           let beat = try? JSONDecoder().decode(Heartbeat.self, from: data) {
+            let wire = HeartbeatUpload.from(beat, deviceID: deviceID,
+                                            digestGeneratedAt: digest?.generated_at)
+            if let body = try? JSONEncoder().encode(wire) {
+                payloads.append(.init(body: body, endpoint: .heartbeat,
+                                      descriptor: .forHeartbeat(wire)))
+            }
+        }
+
+        let queue = UploadQueue(directory: paths.stateDirectory)
+        let report = uploader.dispatch(payloads, queue: queue, now: now)
+        guard report.isClean else {
+            throw Uploader.Deferred(queued: report.queued,
+                                    rejected: report.rejected,
+                                    endpoints: Array(Set(report.unlanded)).sorted())
+        }
+        return report
     }
 
     /// Records a heartbeat **whether or not the run succeeded**.
