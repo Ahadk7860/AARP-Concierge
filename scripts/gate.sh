@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The gate between prompts. Run it after EVERY prompt, batched or not.
 #
-#     bash scripts/gate.sh <a|b|c|d>
+#     bash scripts/gate.sh <a|b|c|d|e>
 #
 # Exits non-zero if anything is red. A track running a batch of prompts stops at the
 # first non-zero gate and reports -- it does not continue and it does not "fix it in
@@ -19,7 +19,7 @@ set -uo pipefail
 
 LETTER="${1:-}"
 BASE="${BOI_BASE:-main}"
-if [ -z "$LETTER" ]; then echo "usage: gate.sh <a|b|c|d>" >&2; exit 2; fi
+if [ -z "$LETTER" ]; then echo "usage: gate.sh <a|b|c|d|e>" >&2; exit 2; fi
 
 cd "$(git rev-parse --show-toplevel)"
 
@@ -36,7 +36,23 @@ case "$LETTER" in
   d) TEST="npx vitest run --passWithNoTests cloud/api cloud/brief cloud/card cloud/db"
      LINT="npx eslint ."
      TYPE="npx tsc --noEmit -p tsconfig.json" ;;
+  # Track E is the join, so its gate is every other track's gate at once. A change
+  # that wires two tracks together can break either of them, and the whole reason this
+  # track exists is that nobody has ever run all four suites against one commit.
+  e) TEST="npx vitest run --passWithNoTests cloud && python -m pytest && swift test --package-path mac"
+     LINT="npx eslint . && ruff check intelligence && ruff format --check intelligence"
+     TYPE="npx tsc --noEmit -p tsconfig.json" ;;
   *) echo "unknown track: $LETTER" >&2; exit 2 ;;
+esac
+
+# The vitest portion only, for the skipped-suite check below. Running the compound
+# TEST there would re-run pytest and swift for a grep, which is slow enough that
+# somebody would eventually delete the check.
+VITEST_ONLY=""
+case "$LETTER" in
+  c) VITEST_ONLY="npx vitest run --passWithNoTests cloud/channel cloud/mock-linq" ;;
+  d) VITEST_ONLY="npx vitest run --passWithNoTests cloud/api cloud/brief cloud/card cloud/db" ;;
+  e) VITEST_ONLY="npx vitest run --passWithNoTests cloud" ;;
 esac
 
 FAILED=0
@@ -64,9 +80,9 @@ run "ownership" "bash scripts/check-ownership.sh $LETTER"
 
 # A test file that exists but ran zero tests is the failure mode this whole script is
 # named after. Vitest calls it "skipped"; it exits zero either way.
-if [ "$LETTER" = "c" ] || [ "$LETTER" = "d" ]; then
+if [ -n "$VITEST_ONLY" ]; then
   printf '\n──────── no-silently-skipped-tests\n'
-  skipped=$(eval "$TEST" 2>&1 | grep -Eo '[0-9]+ skipped' | head -1 || true)
+  skipped=$(eval "$VITEST_ONLY" 2>&1 | grep -Eo '[0-9]+ skipped' | head -1 || true)
   if [ -n "$skipped" ]; then
     printf '✗ vitest reports "%s" — a skipped suite is not a passing suite\n' "$skipped"
     FAILED=1

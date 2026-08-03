@@ -10,7 +10,9 @@ one it drafts **two** candidate messages in your own voice. It never sends them.
 
 ## This repo
 
-Built by four agents working in parallel, each in its own git worktree.
+Built by four agents working in parallel, each in its own git worktree — then joined by a
+fifth, working alone on `main`, because the seams between four frozen contracts are the
+one thing four parallel agents cannot test.
 **Start at [`prompts/LAUNCH.md`](prompts/LAUNCH.md).**
 
 | Path | What |
@@ -23,6 +25,7 @@ Built by four agents working in parallel, each in its own git worktree.
 | `cloud/channel/`, `cloud/mock-linq/` | Track C — TypeScript. The channel spine. |
 | `cloud/api/`, `cloud/brief/`, `cloud/card/`, `cloud/db/` | Track D — TypeScript. The product surface. |
 | `cloud/shared/` | **Frozen.** Shared types and the stub channel. |
+| `cloud/intelligence-bridge/`, `cloud/e2e/` | Track E — the join. The only track that runs the product. |
 
 Strategy documents live outside this repo, in `Documents/Claude/boi-imessage/`:
 `BOI_BRIEF.md` (what and why), `BOI_ARCHITECTURE.md` (how, including the drafting layer
