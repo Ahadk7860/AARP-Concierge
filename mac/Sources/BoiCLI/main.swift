@@ -599,6 +599,14 @@ case "sync-run":
             "upload_dry_run": outcome.upload?.dryRun ?? -1,
             "elapsed_s": (outcome.elapsed * 1000).rounded() / 1000,
         ])
+    } catch let unavailable as Uploader.QueueUnavailable {
+        // Strictly worse than `Deferred`: nothing was queued, so nothing will be retried.
+        // Reported separately so an operator cannot read it as "it'll go next time".
+        StructuredLog.emit("sync_run.queue_unavailable", level: .error, fields: [
+            "endpoint": unavailable.endpoint,
+            "detail": unavailable.description,
+        ])
+        exit(1)
     } catch let deferred as Uploader.Deferred {
         // NON-ZERO. A silent success on a failed upload is the defect prompt 01 exists
         // to catch. The local artefacts are all written; the queue holds what did not

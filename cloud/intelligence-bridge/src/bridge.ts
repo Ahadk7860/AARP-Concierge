@@ -26,7 +26,7 @@
 // ingest route carries the result. Recorded in NOTES.md; it is the user's to make.
 // ---------------------------------------------------------------------------------
 
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { DraftBundle, Gist, VoicePack } from "../../shared/src/index.js";
@@ -61,6 +61,21 @@ export type BridgeConfig = {
   /** Capped the same way the brief is. Three a day is a habit; twenty is noise. */
   maxItems?: number | undefined;
   log?: BridgeLog | undefined;
+  /**
+   * **The channel degradation escapes through.**
+   *
+   * `gistsFor` returns `Gist[]`, so every failure state — Python missing, the producer
+   * crashing, a timeout — collapses into an empty array by the time the composer sees
+   * it, and the user gets a brief that reads as a quiet week. That degradation is
+   * correct for the *composer* (it must not know why) and catastrophic for an
+   * *operator*, who otherwise learns the intelligence has been down only when somebody
+   * complains.
+   *
+   * Fired for every status in `DEGRADED_STATUSES` and never for `nothing_to_say`.
+   */
+  onDegraded?: ((outcome: GistOutcome, scope: UserScope) => void) | undefined;
+  /** Overridable so a test can inspect what the child was handed and what survived it. */
+  workdir?: string | undefined;
 };
 
 export const DEFAULT_MAX_ITEMS = 3;
@@ -89,7 +104,21 @@ export type GistOutcome =
   | { status: "ok"; gists: Gist[] }
   | { status: "nothing_to_say"; gists: [] }
   | { status: "no_answer"; gists: []; detail: string }
+  | { status: "timed_out"; gists: []; detail: string }
   | { status: "unavailable"; gists: []; detail: string };
+
+/**
+ * The states that mean **the intelligence is broken**, as opposed to quiet.
+ *
+ * `nothing_to_say` is a healthy corpus. Everything else here is an operator's problem,
+ * and it is invisible from the composer's seat because all of them render as an empty
+ * gist list — which is why the degradation needs its own channel out.
+ */
+export const DEGRADED_STATUSES = ["no_answer", "timed_out", "unavailable"] as const;
+
+export function isDegraded(outcome: GistOutcome): boolean {
+  return (DEGRADED_STATUSES as readonly string[]).includes(outcome.status);
+}
 
 // ---------------------------------------------------------------------------
 // Gists
@@ -139,6 +168,26 @@ export async function gistOutcomeFor(
 
     // EXIT CODE FIRST. A crash that happened to leave a readable file behind is still a
     // crash, and the files it left are from a run that did not finish.
+    //
+    // A TIMEOUT IS ITS OWN STATUS. It also has a non-zero exit — the child was SIGKILLed
+    // — so folding it into `no_answer` made the timeout criterion's test pass through the
+    // crash branch and assert nothing about timing out. They are different operator
+    // problems: one is a bug in the producer, the other is a producer that is too slow or
+    // a model call that hung.
+    if (result.timedOut) {
+      log({
+        msg: "bridge.gists.timed_out",
+        user_id: scope.user_id,
+        timeout_ms: config.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+        duration_ms: result.durationMs,
+        reaped: result.reaped,
+      });
+      return {
+        status: "timed_out",
+        gists: [],
+        detail: `killed after ${result.durationMs}ms`,
+      };
+    }
     if (result.status !== 0) {
       log({
         msg: "bridge.gists.failed",
@@ -165,30 +214,7 @@ export async function gistOutcomeFor(
         : { status: "no_answer", gists: [], detail: "zero exit, no documents written" };
     }
 
-    const gists: Gist[] = [];
-    for (const [index, file] of files.entries()) {
-      const raw = await readFile(path.join(workdir, file), "utf8");
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(raw);
-      } catch {
-        log({ msg: "bridge.gists.unparseable", user_id: scope.user_id, index });
-        continue;
-      }
-      // A MALFORMED GIST IS A DROPPED GIST. The remaining ones still reach the composer:
-      // one bad document out of three must not cost the user their morning text.
-      const validated = check<Gist>("gist.v1", parsed);
-      if (!validated.ok) {
-        log({
-          msg: "bridge.gists.invalid",
-          user_id: scope.user_id,
-          index,
-          errors: validated.errors,
-        });
-        continue;
-      }
-      gists.push(validated.value);
-    }
+    const gists = await collectGists(workdir, files, log, scope.user_id);
 
     if (gists.length === 0) {
       return { status: "no_answer", gists: [], detail: `${files.length} document(s), none valid` };
@@ -210,11 +236,81 @@ export async function gistOutcomeFor(
   }
 }
 
-/** The `TickDeps.gistsFor` shape. Degradation is invisible to the composer by design. */
+/**
+ * Reads and validates what the producer wrote. **This is the bridge boundary.**
+ *
+ * Extracted so it can be tested against documents the producer would never write. It
+ * used to be inline, which meant the only test of boundary validation called `check()`
+ * directly — proving the validator works and proving nothing about whether the bridge
+ * consults it. A regression that dropped the `check` call entirely would have passed.
+ */
+export async function collectGists(
+  directory: string,
+  files: readonly string[],
+  log: BridgeLog,
+  userId: string,
+): Promise<Gist[]> {
+  const gists: Gist[] = [];
+  for (const [index, file] of files.entries()) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(await readFile(path.join(directory, file), "utf8"));
+    } catch {
+      log({ msg: "bridge.gists.unparseable", user_id: userId, index, file });
+      continue;
+    }
+    // A MALFORMED GIST IS A DROPPED GIST. The remaining ones still reach the composer:
+    // one bad document out of three must not cost the user their morning text.
+    const validated = check<Gist>("gist.v1", parsed);
+    if (!validated.ok) {
+      log({
+        msg: "bridge.gists.invalid",
+        user_id: userId,
+        index,
+        file,
+        errors: validated.errors,
+      });
+      continue;
+    }
+    gists.push(validated.value);
+  }
+  return gists;
+}
+
+/**
+ * The `TickDeps.gistsFor` shape. Degradation is invisible to the composer by design —
+ * and **visible to an operator via `onDegraded`**, which is the difference between a
+ * quiet week and a bridge that has been down since Tuesday.
+ */
 export function gistsFor(
   config: BridgeConfig = configFromEnvironment(),
 ): (scope: UserScope) => Promise<Gist[]> {
-  return async (scope) => (await gistOutcomeFor(scope, config)).gists;
+  return async (scope) => {
+    const outcome = await gistOutcomeFor(scope, config);
+    reportDegradation(outcome, scope, config);
+    return outcome.gists;
+  };
+}
+
+/** Fires `onDegraded`, and logs at error level whether or not one is configured. */
+function reportDegradation(
+  outcome: GistOutcome,
+  scope: UserScope,
+  config: BridgeConfig,
+): void {
+  if (!isDegraded(outcome)) return;
+  const log = config.log ?? (() => {});
+  log({
+    msg: "bridge.degraded",
+    level: "error",
+    user_id: scope.user_id,
+    status: outcome.status,
+    detail: "detail" in outcome ? outcome.detail : undefined,
+    // Said plainly, because the log line is the only thing that distinguishes this from
+    // a user who genuinely had a quiet week.
+    consequence: "the brief will render as though there were nothing to say",
+  });
+  config.onDegraded?.(outcome, scope);
 }
 
 // ---------------------------------------------------------------------------
@@ -242,7 +338,13 @@ export async function draftsForGists(
   const bundles = new Map<string, DraftBundle>();
   if (gists.length === 0) return bundles;
 
-  const workdir = await mkdtemp(path.join(tmpdir(), "boi-bridge-draft-"));
+  // Injectable so a test can inspect what survived a crash. When the bridge makes its
+  // own, the bridge removes it; when a caller supplies one, the caller owns it — which
+  // is what lets the "pack deleted even when the child crashes" assertion be about the
+  // per-gist `finally` rather than about the outer one that deletes the whole tree.
+  const ownsWorkdir = config.workdir === undefined;
+  const workdir = config.workdir ?? (await mkdtemp(path.join(tmpdir(), "boi-bridge-draft-")));
+  await mkdir(workdir, { recursive: true });
   try {
     for (const gist of gists) {
       const packRow = await voicePackFor(scope, gist.contact_id);
@@ -267,15 +369,13 @@ export async function draftsForGists(
 
         const result = await invokePython(
           "boi_intel.draft",
-          [
-            "--voice-pack", packPath,
-            "--gist", gistPath,
-            // `--out`, because stdout carries BOTH the `draft.produced` log line and the
-            // bundle. Parsing a stream something else shares is the trap.
-            "--out", outPath,
-            "--provider", config.provider ?? "fake",
-            "--user-id", scope.user_id,
-          ],
+          draftArgv({
+            packPath,
+            gistPath,
+            outPath,
+            provider: config.provider ?? "fake",
+            userId: scope.user_id,
+          }),
           {
             timeoutMs: config.timeoutMs ?? DEFAULT_TIMEOUT_MS,
             env: { BOI_MODEL_PROVIDER: config.provider ?? "fake" },
@@ -352,7 +452,7 @@ export async function draftsForGists(
     }
     return bundles;
   } finally {
-    await rm(workdir, { recursive: true, force: true });
+    if (ownsWorkdir) await rm(workdir, { recursive: true, force: true });
   }
 }
 
@@ -376,7 +476,12 @@ export function bridgeDeps(config: BridgeConfig = configFromEnvironment()): {
   const outcome = (scope: UserScope): Promise<GistOutcome> => {
     const existing = inFlight.get(scope.user_id);
     if (existing !== undefined) return existing;
-    const promise = gistOutcomeFor(scope, config);
+    const promise = gistOutcomeFor(scope, config).then((result) => {
+      // Reported once per tick, here rather than in `gistsFor`, because the outcome is
+      // memoized and an operator should not get the same alarm twice for one brief.
+      reportDegradation(result, scope, config);
+      return result;
+    });
     inFlight.set(scope.user_id, promise);
     return promise;
   };
@@ -384,6 +489,35 @@ export function bridgeDeps(config: BridgeConfig = configFromEnvironment()): {
     gistsFor: async (scope) => (await outcome(scope)).gists,
     draftsFor: async (scope) => draftsForGists(scope, (await outcome(scope)).gists, config),
   };
+}
+
+/**
+ * The child's argv, built where a test can see it.
+ *
+ * The voice pack is the user's own sent messages, and `argv` is world-readable on macOS
+ * — `--voice-pack '{"exemplars":[…]}'` would put them in `ps` output for every process
+ * on the machine. Only PATHS go here.
+ *
+ * Extracted because the assertion that used to guard this was written against an array
+ * the test built itself, which proves the test can construct a safe argv rather than
+ * that the bridge does.
+ */
+export function draftArgv(input: {
+  packPath: string;
+  gistPath: string;
+  outPath: string;
+  provider: string;
+  userId: string;
+}): string[] {
+  return [
+    "--voice-pack", input.packPath,
+    "--gist", input.gistPath,
+    // `--out`, because stdout carries BOTH the `draft.produced` log line and the
+    // bundle. Parsing a stream something else shares is the trap.
+    "--out", input.outPath,
+    "--provider", input.provider,
+    "--user-id", input.userId,
+  ];
 }
 
 function corpusPathFor(scope: UserScope, config: BridgeConfig): string | null {

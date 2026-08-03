@@ -252,7 +252,10 @@ public struct SyncRun {
         }
 
         let queue = UploadQueue(directory: paths.stateDirectory)
-        let report = uploader.dispatch(payloads, queue: queue, now: now)
+        // `try`, not `try?`. A queue that cannot be written throws `QueueUnavailable`,
+        // which propagates out of `--sync` as a non-zero exit — it is a strictly worse
+        // state than `Deferred` and must not be flattened into it.
+        let report = try uploader.dispatch(payloads, queue: queue, now: now)
         guard report.isClean else {
             throw Uploader.Deferred(queued: report.queued,
                                     rejected: report.rejected,

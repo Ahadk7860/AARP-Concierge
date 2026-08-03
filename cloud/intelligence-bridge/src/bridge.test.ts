@@ -32,12 +32,17 @@ import {
   PythonUnavailableError,
   REPO_ROOT,
   bridgeDeps,
+  check,
+  collectGists,
   configFromEnvironment,
+  draftArgv,
   draftsForGists,
   gistOutcomeFor,
   invokePython,
+  isGone,
+  gistsFor,
   pythonExecutable,
-  check,
+  spawnPython,
 } from "./index.js";
 
 const SALT = "boi-dev-salt-do-not-ship-0001";
@@ -227,18 +232,49 @@ describe("the subprocess boundary", () => {
   }, 60_000);
 
   it("kills a hanging child rather than abandoning it, and reaps it", async () => {
-    // `-c` via `-m` is not available, so this uses a module that exists and a timeout
-    // short enough that the interpreter is still starting. The assertion that matters
-    // is not the timing — it is that the process is GONE afterwards.
     const started = Date.now();
     const result = await invokePython("boi_intel.gist", ["--db", CORPUS, "--out", tmpdir()], {
       timeoutMs: 25,
     });
     expect(result.timedOut).toBe(true);
-    expect(result.reaped).toBe(true);
     expect(result.signal).toBe("SIGKILL");
-    // Resolved promptly: an orphaned model call holds a quota slot and a file handle.
+    // `reaped` is now MEASURED by `kill(pid, 0)` rather than being a literal `true`, so
+    // this assertion has teeth. Re-check it independently here anyway.
+    expect(result.reaped).toBe(true);
+    expect(result.pid).not.toBeNull();
+    expect(isGone(result.pid ?? undefined)).toBe(true);
     expect(Date.now() - started).toBeLessThan(20_000);
+  }, 60_000);
+
+  it("kills the whole process GROUP, not just the interpreter", async () => {
+    // THE REGRESSION THE PREVIOUS TEST CANNOT CATCH. `killGroup` sends to `-pid`
+    // precisely so an orphaned model call does not keep holding a Gemini quota slot and
+    // a file handle. A childless interpreter dies identically under `kill(pid)` and
+    // `kill(-pid)`, so proving the group behaviour needs a child that itself has a child.
+    const marker = `boi-group-kill-${process.pid}-${Date.now()}`;
+    const script =
+      "import subprocess,sys,time\n" +
+      `subprocess.Popen(['/bin/sh','-c','exec -a ${marker} sleep 120'])\n` +
+      "sys.stderr.write('spawned\\n'); sys.stderr.flush()\n" +
+      "time.sleep(120)\n";
+
+    const result = await spawnPython(["-c", script], { timeoutMs: 3_000 });
+    expect(result.timedOut).toBe(true);
+    expect(result.reaped).toBe(true);
+
+    // The GRANDCHILD must be gone too. Give the OS a moment to reap.
+    let survivors = "";
+    for (let i = 0; i < 20; i += 1) {
+      survivors = execFileSync("/bin/sh", ["-c", `ps -Ao args | grep -c "[${marker[0]}]${marker.slice(1)}" || true`], {
+        encoding: "utf8",
+      }).trim();
+      if (survivors === "0") break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    expect(
+      survivors,
+      "a grandchild survived the timeout: killGroup is signalling the pid, not the group",
+    ).toBe("0");
   }, 60_000);
 });
 
@@ -348,6 +384,66 @@ describe("gistsFor", () => {
     }
   }, 180_000);
 
+  it("reports a timeout as timed_out, not as a crash", async () => {
+    // A SIGKILLed child also has a non-zero exit, so folding the timeout into
+    // `no_answer` meant the timeout criterion's test ran through the crash branch and
+    // asserted nothing about timing out. They are different operator problems: a bug in
+    // the producer versus a producer that is too slow or a model call that hung.
+    const scope = await seedUser([]);
+    const { events, log } = capture();
+    const outcome = await gistOutcomeFor(scope, baseConfig({ log, timeoutMs: 25 }) as never);
+
+    expect(outcome.status).toBe("timed_out");
+    expect(outcome.gists).toEqual([]);
+    expect(messages(events)).toContain("bridge.gists.timed_out");
+    expect(messages(events)).not.toContain("bridge.gists.failed");
+  }, 120_000);
+
+  it("tells an operator the brief will look like a quiet week", async () => {
+    // `gistsFor` returns `Gist[]`, so every failure state collapses to an empty array by
+    // the time the composer sees it. That is correct for the composer and catastrophic
+    // for an operator, who would otherwise learn the bridge has been down only when
+    // somebody complains. `onDegraded` is the way out.
+    const scope = await seedUser([]);
+    const degraded: string[] = [];
+    const { events, log } = capture();
+
+    const gists = await gistsFor(
+      baseConfig({
+        log,
+        corpusDb: path.join(tmpdir(), "not-a-database.db"),
+        onDegraded: (outcome: { status: string }) => degraded.push(outcome.status),
+      }) as never,
+    )(scope);
+
+    expect(gists).toEqual([]);           // invisible to the composer, by design
+    expect(degraded).toEqual(["no_answer"]);  // and loud to an operator
+    const alarm = events.find((e) => e["msg"] === "bridge.degraded");
+    expect(alarm, JSON.stringify(events)).toBeDefined();
+    expect(alarm?.["level"]).toBe("error");
+    expect(String(alarm?.["consequence"])).toContain("nothing to say");
+  }, 120_000);
+
+  it("does not cry wolf when the corpus is simply quiet", async () => {
+    // The other half: `nothing_to_say` is a HEALTHY outcome and must never fire the
+    // alarm, or the alarm gets ignored — which is exactly how the real one gets missed.
+    const scope = await seedUser([]);
+    const quiet = await quietCorpus();
+    try {
+      const degraded: string[] = [];
+      const gists = await gistsFor(
+        baseConfig({
+          corpusDb: quiet,
+          onDegraded: (outcome: { status: string }) => degraded.push(outcome.status),
+        }) as never,
+      )(scope);
+      expect(gists).toEqual([]);
+      expect(degraded).toEqual([]);
+    } finally {
+      await rm(path.dirname(quiet), { recursive: true, force: true });
+    }
+  }, 120_000);
+
   it("degrades to no gists rather than throwing when nothing is configured", async () => {
     const scope = await seedUser([]);
     const { events, log } = capture();
@@ -357,27 +453,64 @@ describe("gistsFor", () => {
     expect(messages(events)).toContain("bridge.gists.no_corpus");
   }, 60_000);
 
-  it("drops a malformed gist and keeps the rest", async () => {
-    // Not reachable through the producer, which is the point: the boundary check has to
-    // hold for a document the producer would never write, because "the producer is
-    // correct today" is not a property this bridge can rely on.
+  it("drops a malformed gist and keeps the rest — at the BRIDGE, not just in the validator", async () => {
+    // This used to call `check()` directly, which proves the validator works and proves
+    // nothing about whether the bridge consults it: delete the `check` call from
+    // `collectGists` and the old test still passed. `collectGists` is the actual code
+    // path `gistOutcomeFor` runs, so a regression that stopped validating fails here.
     const good = JSON.parse(
       readFileSync(
         path.join(REPO_ROOT, "contracts", "fixtures", "gist", "maya_action_needed.json"),
         "utf8",
       ),
     ) as Gist;
-    expect(check<Gist>("gist.v1", good).ok).toBe(true);
+    const other = JSON.parse(
+      readFileSync(
+        path.join(REPO_ROOT, "contracts", "fixtures", "gist", "yu_fading_sql_only.json"),
+        "utf8",
+      ),
+    ) as Gist;
 
-    const bad = { ...good, gist_id: "not-a-gist-id", days_silent: -4 };
-    const validated = check<Gist>("gist.v1", bad);
-    expect(validated.ok).toBe(false);
-    if (!validated.ok) {
-      expect(validated.errors).toContain("/gist_id");
-      // Field paths and messages, never values. The gist crossed the digest boundary.
-      expect(validated.errors).not.toContain(good.gist);
+    const dir = await mkdtemp(path.join(tmpdir(), "boi-collect-"));
+    try {
+      await writeFile(path.join(dir, "gist_1_good.json"), JSON.stringify(good));
+      await writeFile(
+        path.join(dir, "gist_2_bad.json"),
+        JSON.stringify({ ...good, gist_id: "not-a-gist-id", days_silent: -4 }),
+      );
+      await writeFile(path.join(dir, "gist_3_unparseable.json"), "{ this is not json");
+      await writeFile(path.join(dir, "gist_4_good.json"), JSON.stringify(other));
+
+      const { events, log } = capture();
+      const collected = await collectGists(
+        dir,
+        ["gist_1_good.json", "gist_2_bad.json", "gist_3_unparseable.json", "gist_4_good.json"],
+        log,
+        "usr_test",
+      );
+
+      // THE REMAINING GISTS STILL REACH THE COMPOSER. One bad document out of four must
+      // not cost the user their morning text.
+      expect(collected.map((g) => g.gist_id)).toEqual([good.gist_id, other.gist_id]);
+
+      // Logged with its index and the validation error, as the criterion requires.
+      const invalid = events.find((e) => e["msg"] === "bridge.gists.invalid");
+      expect(invalid, JSON.stringify(events)).toBeDefined();
+      expect(invalid?.["index"]).toBe(1);
+      expect(String(invalid?.["errors"])).toContain("/gist_id");
+      expect(messages(events)).toContain("bridge.gists.unparseable");
+
+      // Field paths and messages, NEVER values. The gist crossed the digest boundary,
+      // and putting it in a log is what that boundary exists to prevent.
+      const logged = JSON.stringify(events);
+      expect(logged).not.toContain(good.gist);
+      for (const fact of [...good.facts.dates, ...good.facts.times, ...good.facts.names]) {
+        expect(logged).not.toContain(fact);
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
     }
-  });
+  }, 60_000);
 });
 
 // ---------------------------------------------------------------------------
@@ -439,52 +572,131 @@ describe("draftsFor", () => {
     const exemplar = pack.exemplars[0];
     expect(exemplar).toBeTruthy();
 
-    const seen: string[][] = [];
+    // 1. THE ARGV THE BRIDGE ACTUALLY BUILDS. This used to assert on an array the test
+    //    constructed itself, which proves a test can write a safe argv rather than that
+    //    the bridge does — `draftArgv` is the function the bridge calls.
+    const argv = draftArgv({
+      packPath: "/tmp/pack.json",
+      gistPath: "/tmp/gist.json",
+      outPath: "/tmp/out.json",
+      provider: "fake",
+      userId: scope.user_id,
+    });
+    expect(argv).toContain("--voice-pack");
+    for (const arg of argv) {
+      expect(arg.startsWith("/") || arg.startsWith("--") || arg.length < 64).toBe(true);
+      expect(arg).not.toContain(exemplar ?? " ");
+      // No argument may be a JSON document: that is what inlining the pack would look like.
+      expect(arg.trimStart().startsWith("{")).toBe(false);
+    }
+
+    // 2. AND THE REAL INVOCATION'S argv, read back off `InvokeResult` rather than
+    //    reconstructed — plus a live `ps` snapshot taken while the child is running.
     const workdir = await mkdtemp(path.join(tmpdir(), "boi-argv-"));
     try {
-      // The bridge builds the same argv `invokePython` would receive. Assert on it
-      // directly AND on a live `ps` snapshot taken while a child is running.
       const packPath = path.join(workdir, "pack.json");
+      const gistPath = path.join(workdir, "gist.json");
       await writeFile(packPath, JSON.stringify(pack), { mode: 0o600 });
-      const argvUsed = ["--voice-pack", packPath, "--gist", "/tmp/g.json"];
-      seen.push(argvUsed);
-      for (const arg of argvUsed) {
-        expect(arg).not.toContain(exemplar);
-      }
+      await writeFile(gistPath, JSON.stringify(gist), { mode: 0o600 });
 
-      const running = draftsForGists(scope, [gist], baseConfig() as never);
+      const running = invokePython(
+        "boi_intel.draft",
+        draftArgv({
+          packPath,
+          gistPath,
+          outPath: path.join(workdir, "out.json"),
+          provider: "fake",
+          userId: scope.user_id,
+        }),
+        { timeoutMs: 60_000, env: { BOI_MODEL_PROVIDER: "fake" } },
+      );
+
       let snapshot = "";
-      for (let i = 0; i < 40; i += 1) {
+      for (let i = 0; i < 60; i += 1) {
         snapshot += execFileSync("/bin/ps", ["-Ao", "args"], { encoding: "utf8" });
         if (snapshot.includes("boi_intel.draft")) break;
         await new Promise((r) => setTimeout(r, 25));
       }
-      await running;
+      const result = await running;
+
+      expect(snapshot).toContain("boi_intel.draft");
       if (exemplar !== undefined) {
-        expect(snapshot).not.toContain(exemplar);
+        expect(snapshot, "an exemplar reached ps output").not.toContain(exemplar);
+        for (const arg of result.argv) {
+          expect(arg, "an exemplar reached argv").not.toContain(exemplar);
+        }
       }
+      // Every free-text field in the pack, not just the first exemplar.
+      for (const text of [...pack.exemplars, ...(pack.register.apology_openers ?? [])]) {
+        expect(snapshot).not.toContain(text);
+        expect(result.argv.join(" ")).not.toContain(text);
+      }
+    } finally {
+      await rm(workdir, { recursive: true, force: true });
+    }
+  }, 180_000);
+
+  it("deletes the voice pack file in the per-gist finally, not just with the workdir", async () => {
+    // The old version asserted that no `boi-bridge-draft-*` directory survived — which
+    // the OUTER `finally` guarantees by deleting the whole tree, whether or not the
+    // per-gist `finally` ever ran. Delete the inner cleanup and the old test still
+    // passed, while a crash mid-loop would leave the user's own sent messages in a
+    // world-readable temp file for as long as the process lived.
+    //
+    // The workdir is injected here, so the test owns it and it is still there to inspect.
+    const gist = await fixtureGist("maya_action_needed.json");
+    const scope = await seedUser([gist.contact_id]);
+    const workdir = await mkdtemp(path.join(tmpdir(), "boi-owned-"));
+    try {
+      // A timeout of 1ms guarantees the child is killed mid-flight.
+      const bundles = await draftsForGists(
+        scope,
+        [gist],
+        baseConfig({ timeoutMs: 1, workdir }) as never,
+      );
+      expect(bundles.size).toBe(0);
+
+      // The directory SURVIVES (the test owns it) and is empty of secrets.
+      expect(existsSync(workdir)).toBe(true);
+      const leftovers = execFileSync("/bin/sh", ["-c", `ls -A ${workdir} || true`], {
+        encoding: "utf8",
+      }).trim();
+      expect(
+        leftovers.split("\n").filter((f) => f.startsWith("pack-")),
+        `the voice pack outlived the crash: ${leftovers}`,
+      ).toEqual([]);
+      expect(leftovers.split("\n").filter((f) => f.startsWith("gist-"))).toEqual([]);
     } finally {
       await rm(workdir, { recursive: true, force: true });
     }
   }, 120_000);
 
-  it("deletes the voice pack file even when the child crashes", async () => {
+  it("writes the voice pack 0600 while it exists", async () => {
+    // `ps` is not the only way the pack leaks. It is on disk for the duration of the
+    // call, and the mode is what keeps another account on the machine out of it.
     const gist = await fixtureGist("maya_action_needed.json");
     const scope = await seedUser([gist.contact_id]);
-    // A timeout of 1ms guarantees the child is killed mid-flight.
-    const bundles = await draftsForGists(
-      scope,
-      [gist],
-      baseConfig({ timeoutMs: 1 }) as never,
-    );
-    expect(bundles.size).toBe(0);
-    // Nothing under the system temp dir still holds the pack. The `finally` is what
-    // makes this true when the child dies rather than returns.
-    const leftovers = execFileSync("/bin/sh", [
-      "-c",
-      `ls -d ${tmpdir()}/boi-bridge-draft-* 2>/dev/null || true`,
-    ], { encoding: "utf8" });
-    expect(leftovers.trim()).toBe("");
+    const workdir = await mkdtemp(path.join(tmpdir(), "boi-mode-"));
+    try {
+      const running = draftsForGists(scope, [gist], baseConfig({ workdir }) as never);
+      let mode: string | null = null;
+      for (let i = 0; i < 200; i += 1) {
+        const listed = execFileSync("/bin/sh", [
+          "-c",
+          `stat -f '%Sp' ${workdir}/pack-*.json 2>/dev/null || true`,
+        ], { encoding: "utf8" }).trim();
+        if (listed !== "") {
+          mode = listed.split("\n")[0] ?? null;
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      await running;
+      expect(mode, "never observed the pack on disk").not.toBeNull();
+      expect(mode).toBe("-rw-------");
+    } finally {
+      await rm(workdir, { recursive: true, force: true });
+    }
   }, 120_000);
 
   it("yields zero drafts and never a fabricated one when Python crashes", async () => {

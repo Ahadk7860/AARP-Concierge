@@ -28,7 +28,7 @@ import {
 } from "../../db/src/index.js";
 import { migrate } from "../../db/src/migrate.js";
 import { acquireSuiteLock, releaseSuiteLock } from "../../db/src/test-lock.js";
-import { REPO_ROOT, bridgeDeps, draftsForGists, gistOutcomeFor } from "./index.js";
+import { REPO_ROOT, bridgeDeps, draftsForGists, gistOutcomeFor, gistsFor } from "./index.js";
 
 const SALT = "boi-dev-salt-do-not-ship-0001";
 const CORPUS = "/tmp/boi-a/chat.db";
@@ -255,26 +255,51 @@ describe("the brief, over a real bridge", () => {
       },
     );
 
-    // The producer was killed, so there are no gists — a brief with nothing to say,
-    // which is a skip rather than a crash. Either way it RETURNED.
-    expect(["skipped", "sent", "failed"]).toContain(outcome.status);
-    expect(Date.now() - started).toBeLessThan(120_000);
-  }, 300_000);
-
-  it("sends the brief when the corpus is unreachable, so the intelligence is not a single point of failure", async () => {
-    // No corpus configured at all: no gists, no drafts. The composer decides whether
-    // that is worth sending, and the tick returns cleanly either way.
-    const scope = await seedThroughTheAPI();
-    const channel = new StubChannel();
-    const outcome = await runForUser(
-      { user_id: scope.user_id, timezone: TZ },
-      { now: eightAmLocal(TZ), channel, ...bridgeDeps({} as never) },
-    );
-    expect(["sent", "skipped"]).toContain(outcome.status);
+    // `["skipped","sent","failed"]` accepted three of the four possible outcomes, which
+    // is a test that cannot fail for any reason worth catching. The producer is killed at
+    // the timeout, so there are no gists, so the brief has nothing to say — that is the
+    // one correct answer.
+    expect(outcome.status).toBe("skipped");
     if (outcome.status === "skipped") {
-      // "nothing to say" — never "no_digest", which would mean the bridge's failure had
-      // been misreported as the Mac never having reported.
       expect(outcome.reason).toBe("nothing_to_say");
     }
+    // And it RETURNED rather than holding the scheduler.
+    expect(Date.now() - started).toBeLessThan(120_000);
+
+    // The degradation reached an operator even though the composer could not see it.
+    const degraded: string[] = [];
+    await gistsFor(baseConfig({ timeoutMs: 1, onDegraded: (o: { status: string }) => degraded.push(o.status) }) as never)(scope);
+    expect(degraded).toEqual(["timed_out"]);
+  }, 300_000);
+
+  it("renders a dead bridge as nothing_to_say to the user AND as an alarm to an operator", async () => {
+    // This test used to assert that `unavailable` rendering as `nothing_to_say` was
+    // correct, full stop. Half of that is right and it is the dangerous half: the
+    // composer must not know why there are no gists, but somebody has to. A bridge that
+    // has been down since Tuesday and a user who had a quiet week are indistinguishable
+    // from the brief, and only one of them is fine.
+    const scope = await seedThroughTheAPI();
+    const channel = new StubChannel();
+    const degraded: Array<{ status: string }> = [];
+
+    const outcome = await runForUser(
+      { user_id: scope.user_id, timezone: TZ },
+      {
+        now: eightAmLocal(TZ),
+        channel,
+        // No corpus configured at all.
+        ...bridgeDeps({ onDegraded: (o: { status: string }) => degraded.push(o) } as never),
+      },
+    );
+
+    // To the user: a quiet morning, never a wrong answer and never a crash.
+    expect(outcome.status).toBe("skipped");
+    if (outcome.status === "skipped") {
+      // Never `no_digest` — that would misreport the bridge's failure as the Mac never
+      // having reported, and send somebody to debug the wrong machine.
+      expect(outcome.reason).toBe("nothing_to_say");
+    }
+    // To an operator: the actual reason, exactly once for the tick.
+    expect(degraded.map((d) => d.status)).toEqual(["unavailable"]);
   }, 300_000);
 });

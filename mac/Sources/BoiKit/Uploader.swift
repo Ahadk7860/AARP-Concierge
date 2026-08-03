@@ -119,6 +119,8 @@ public struct Uploader: Sendable {
         /// Transport failure, `429`, or `5xx`. Enqueue and back off.
         case retryable(status: Int?, code: String)
 
+        /// Whether this run is finished with the payload. `.dryRun` is terminal for the
+        /// *attempt* — there is nothing to retry, because nothing was tried.
         public var isTerminal: Bool {
             switch self {
             case .accepted, .duplicate, .dryRun, .rejected: return true
@@ -126,9 +128,21 @@ public struct Uploader: Sendable {
             }
         }
 
-        /// A rejection is not a reason to lose the artefact from disk, but it *is* a
-        /// reason to stop resending it.
-        public var leavesQueue: Bool { isTerminal }
+        /// Whether the entry may be **deleted** from the durable queue.
+        ///
+        /// **`.dryRun` is terminal and does NOT leave the queue, and conflating those two
+        /// was a data-loss bug.** `leavesQueue` used to be `isTerminal`, so a
+        /// `--sync --dry-run` over a queue holding three days of undelivered digests
+        /// dequeued every one of them without sending a byte — the flag whose entire
+        /// promise is "uploads nothing" silently destroyed the backlog instead. A dry run
+        /// must be observation only.
+        ///
+        /// A rejection is different: it is not a reason to lose the artefact from disk,
+        /// but it *is* a reason to stop resending it.
+        public var leavesQueue: Bool {
+            if case .dryRun = self { return false }
+            return isTerminal
+        }
     }
 
     /// Raised when everything durable has been written but something did not reach the
@@ -138,6 +152,22 @@ public struct Uploader: Sendable {
     ///
     /// Deliberately carries counts and endpoint names. No bodies, no error detail from a
     /// server that might echo one back.
+    /// The durable queue could not be written or read.
+    ///
+    /// Deliberately **not** a `Deferred`. `Deferred` means "the server did not take it,
+    /// and the next sync will retry from the queue" — a promise that depends on the queue
+    /// existing. When the queue itself is the thing that failed, that promise is false and
+    /// the run must say so differently, because the digest is now nowhere.
+    public struct QueueUnavailable: Swift.Error, CustomStringConvertible, Equatable {
+        public var endpoint: String
+        public var detail: String
+
+        public var description: String {
+            "the upload queue is unavailable (\(endpoint): \(detail)). Nothing was queued, "
+                + "so nothing will be retried — the digest on disk is the only copy."
+        }
+    }
+
     public struct Deferred: Swift.Error, CustomStringConvertible, Equatable {
         public var queued: Int
         public var rejected: Int
@@ -403,14 +433,36 @@ public struct Uploader: Sendable {
     /// happened. Stopping on the first retryable failure means a Mac that wakes to a
     /// down server makes one request and queues the rest, rather than working through
     /// thirty-two entries against a socket that is not answering.
+    ///
+    /// **This throws, and every `try?` that used to be here was a lie.** An unreadable
+    /// queue directory produced `(try? queue.due(now:)) ?? []` — an empty drain, a clean
+    /// report and exit 0, which is the exact "silent success on a failed upload" this
+    /// prompt exists to catch, arriving through the queue rather than through the socket.
+    /// The swallowed enqueues were worse: they incremented `report.queued` while nothing
+    /// had been written, so `Deferred` announced "3 queued" over an empty directory and
+    /// the digests were simply gone.
     public func dispatch(_ payloads: [Payload],
                          queue: UploadQueue,
                          now: Date = Date(),
                          backoff: Backoff = Backoff(),
                          log: (String, StructuredLog.Level, [String: Any]) -> Void = Uploader.emit)
-        -> Dispatch {
+        throws -> Dispatch {
         var report = Dispatch()
         var serverIsAnswering = true
+
+        /// A queue write that failed. Distinct from `Deferred`, which means the *server*
+        /// did not take it: this means the digest is not anywhere, and the run must not
+        /// be able to report a tidy count of things it did not save.
+        func queueFailure(_ error: Swift.Error, endpoint: Endpoint) -> QueueUnavailable {
+            let failure = QueueUnavailable(endpoint: endpoint.rawValue,
+                                           detail: "\(type(of: error))")
+            log("upload.queue.unavailable", .error, [
+                "endpoint": endpoint.rawValue,
+                "directory": queue.directory.path,
+                "detail": failure.detail,
+            ])
+            return failure
+        }
 
         func note(_ result: Result, endpoint: Endpoint) {
             switch result {
@@ -427,8 +479,33 @@ public struct Uploader: Sendable {
             }
         }
 
-        for entry in (try? queue.due(now: now)) ?? [] {
+        // NOT `try?`. A queue we cannot read is a queue we cannot honour, and returning
+        // an empty drain would report a healthy run over an unknown backlog.
+        let due: [UploadQueue.Entry]
+        do {
+            due = try queue.due(now: now)
+        } catch {
+            log("upload.queue.unreadable", .error, [
+                "directory": queue.directory.path,
+                "detail": "\(type(of: error))",
+            ])
+            throw QueueUnavailable(endpoint: "drain", detail: "\(type(of: error))")
+        }
+
+        for entry in due {
             guard serverIsAnswering else { break }
+            // A dry run reads the queue and reports it. It does not send, and — since
+            // `leavesQueue` is false for `.dryRun` — it does not delete.
+            guard !configuration.dryRun else {
+                log("upload.dry_run.queued", .info, [
+                    "endpoint": entry.endpoint.rawValue,
+                    "id": entry.id,
+                    "byte_count": entry.byte_count,
+                    "attempts": entry.attempts,
+                ])
+                report.dryRun += 1
+                continue
+            }
             guard let body = try? queue.body(of: entry) else {
                 queue.remove(entry, reason: "body_unreadable")
                 continue
@@ -445,7 +522,11 @@ public struct Uploader: Sendable {
                 // observable in the report rather than only in the queue.
                 note(result, endpoint: entry.endpoint)
             } else {
-                _ = try? queue.recordFailure(entry, now: now, backoff: backoff)
+                do {
+                    _ = try queue.recordFailure(entry, now: now, backoff: backoff)
+                } catch {
+                    throw queueFailure(error, endpoint: entry.endpoint)
+                }
                 serverIsAnswering = false
                 report.queued += 1
                 report.unlanded.append(entry.endpoint.rawValue)
@@ -466,8 +547,12 @@ public struct Uploader: Sendable {
             guard serverIsAnswering else {
                 // Straight to the queue without a request. The previous failure already
                 // established the server is not answering.
-                _ = try? queue.enqueue(payload.body, to: payload.endpoint,
-                                       descriptor: payload.descriptor, now: now)
+                do {
+                    _ = try queue.enqueue(payload.body, to: payload.endpoint,
+                                          descriptor: payload.descriptor, now: now)
+                } catch {
+                    throw queueFailure(error, endpoint: payload.endpoint)
+                }
                 report.queued += 1
                 report.unlanded.append(payload.endpoint.rawValue)
                 continue
@@ -479,9 +564,12 @@ public struct Uploader: Sendable {
                 // discarded. Enqueueing at zero attempts would leave it due immediately
                 // and the first backoff would never apply — a failure the queue would
                 // report as healthy, since the entry is present and the depth is right.
-                if let entry = try? queue.enqueue(payload.body, to: payload.endpoint,
-                                                  descriptor: payload.descriptor, now: now) {
-                    _ = try? queue.recordFailure(entry, now: now, backoff: backoff)
+                do {
+                    let entry = try queue.enqueue(payload.body, to: payload.endpoint,
+                                                  descriptor: payload.descriptor, now: now)
+                    _ = try queue.recordFailure(entry, now: now, backoff: backoff)
+                } catch {
+                    throw queueFailure(error, endpoint: payload.endpoint)
                 }
             }
             note(result, endpoint: payload.endpoint)

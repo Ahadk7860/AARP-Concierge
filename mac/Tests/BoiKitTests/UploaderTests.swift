@@ -467,7 +467,7 @@ final class UploadDispatchTests: XCTestCase {
         let directory = try UploadFixture.scratch("five-hundred")
         let queue = UploadQueue(directory: directory, log: { _, _, _ in })
 
-        let report = UploadFixture.uploader(base: server.baseURL)
+        let report = try UploadFixture.uploader(base: server.baseURL)
             .dispatch([try payload(UploadFixture.digest())], queue: queue,
                       log: { _, _, _ in })
 
@@ -488,19 +488,19 @@ final class UploadDispatchTests: XCTestCase {
         let uploader = UploadFixture.uploader(base: server.baseURL)
         let digest = UploadFixture.digest()
 
-        _ = uploader.dispatch([try payload(digest)], queue: queue, log: { _, _, _ in })
+        _ = try uploader.dispatch([try payload(digest)], queue: queue, log: { _, _, _ in })
         XCTAssertEqual(try queue.depth(), 1, "a failed upload is kept")
 
         // The server recovers. The entry is not due yet, so a run right now must not
         // clear it — the backoff is real, not decorative.
         server.respond { _ in .accepted }
-        let tooSoon = uploader.dispatch([], queue: queue, now: Date(), log: { _, _, _ in })
+        let tooSoon = try uploader.dispatch([], queue: queue, now: Date(), log: { _, _, _ in })
         XCTAssertEqual(try queue.depth(), 1)
         XCTAssertEqual(tooSoon.accepted, 0)
 
         // ...and once it is due, it goes, and the server receives the original bytes.
         let later = Date().addingTimeInterval(3 * 3600)
-        let recovered = uploader.dispatch([], queue: queue, now: later, log: { _, _, _ in })
+        let recovered = try uploader.dispatch([], queue: queue, now: later, log: { _, _, _ in })
         XCTAssertEqual(recovered.accepted, 1)
         XCTAssertEqual(try queue.depth(), 0, "removed only after a 2xx")
 
@@ -528,10 +528,10 @@ final class UploadDispatchTests: XCTestCase {
         let uploader = UploadFixture.uploader(base: server.baseURL)
         let body = Data(#"{"schema_version":"digest.v1","marker":"exact-bytes-é"}"#.utf8)
 
-        _ = uploader.dispatch([.init(body: body, endpoint: .digest, descriptor: .init())],
+        _ = try uploader.dispatch([.init(body: body, endpoint: .digest, descriptor: .init())],
                               queue: queue, log: { _, _, _ in })
         server.respond { _ in .accepted }
-        _ = uploader.dispatch([], queue: queue, now: Date().addingTimeInterval(3 * 3600),
+        _ = try uploader.dispatch([], queue: queue, now: Date().addingTimeInterval(3 * 3600),
                               log: { _, _, _ in })
 
         XCTAssertEqual(server.requests.last?.body, body)
@@ -550,7 +550,7 @@ final class UploadDispatchTests: XCTestCase {
         let spy = UploadFixture.LogSpy()
         let queue = UploadQueue(directory: directory, log: spy.sink)
 
-        let report = UploadFixture.uploader(base: server.baseURL).dispatch(
+        let report = try UploadFixture.uploader(base: server.baseURL).dispatch(
             [.init(body: Data("{}".utf8), endpoint: .voicePack, descriptor: .init())],
             queue: queue, log: spy.sink)
 
@@ -567,7 +567,7 @@ final class UploadDispatchTests: XCTestCase {
         let directory = try UploadFixture.scratch("duplicate")
         let queue = UploadQueue(directory: directory, log: { _, _, _ in })
 
-        let report = UploadFixture.uploader(base: server.baseURL)
+        let report = try UploadFixture.uploader(base: server.baseURL)
             .dispatch([try payload(UploadFixture.digest())], queue: queue, log: { _, _, _ in })
 
         XCTAssertEqual(report.duplicates, 1)
@@ -585,7 +585,7 @@ final class UploadDispatchTests: XCTestCase {
                                   descriptor: .init())
         }
 
-        _ = UploadFixture.uploader(base: server.baseURL)
+        _ = try UploadFixture.uploader(base: server.baseURL)
             .dispatch([], queue: queue, log: { _, _, _ in })
 
         XCTAssertEqual(server.requests.count, 1,
@@ -601,13 +601,96 @@ final class UploadDispatchTests: XCTestCase {
 
         let beat = HeartbeatUpload(device_id: "dev_1", app_version: "1.0.0",
                                    digest_as_of: "2026-08-03T09:00:00Z")
-        _ = UploadFixture.uploader(base: server.baseURL).dispatch(
+        _ = try UploadFixture.uploader(base: server.baseURL).dispatch(
             [.init(body: try JSONEncoder().encode(beat), endpoint: .heartbeat,
                    descriptor: .forHeartbeat(beat))],
             queue: queue, log: { _, _, _ in })
 
         XCTAssertEqual(try queue.depth(), 0,
                        "replaying yesterday's liveness signal would read as a live Mac")
+    }
+
+    func testDryRunOverANonEmptyQueueDeletesNothing() throws {
+        // THE REGRESSION THIS TEST EXISTS FOR. `leavesQueue` was `isTerminal`, and
+        // `.dryRun` is terminal — so a `--sync --dry-run` over a queue holding three days
+        // of undelivered digests DEQUEUED EVERY ONE without sending a byte. The flag whose
+        // entire promise is "uploads nothing" destroyed the backlog instead.
+        //
+        // The two dry-run tests below both start from an empty queue, where `depth() == 0`
+        // is satisfied just as well by a wiped queue as by an untouched one. This one
+        // starts full on purpose.
+        let server = try LoopbackHTTPServer()
+        defer { server.stop() }
+        let directory = try UploadFixture.scratch("dry-run-preserves")
+        let queue = UploadQueue(directory: directory, log: { _, _, _ in })
+
+        var ids: [String] = []
+        for index in 0..<3 {
+            let entry = try queue.enqueue(Data("{\"n\":\(index)}".utf8), to: .digest,
+                                          descriptor: .init(schemaVersion: "digest.v1"))
+            ids.append(entry.id)
+        }
+        XCTAssertEqual(try queue.depth(), 3)
+
+        let digest = UploadFixture.digest()
+        let report = try UploadFixture.uploader(base: server.baseURL, dryRun: true).dispatch(
+            [.init(body: try JSONEncoder().encode(digest), endpoint: .digest,
+                   descriptor: .forDigest(digest))],
+            queue: queue, log: { _, _, _ in })
+
+        XCTAssertEqual(server.requests.count, 0, "--dry-run must not open a socket")
+        XCTAssertEqual(try queue.depth(), 3, "--dry-run must not delete a queued digest")
+        XCTAssertEqual(try queue.entries().map(\.id), ids, "and must not reorder or replace")
+        // Every queued entry was reported, plus the new payload.
+        XCTAssertEqual(report.dryRun, 4)
+        XCTAssertEqual(report.accepted, 0)
+
+        // And the bodies still round-trip: not truncated, not rewritten.
+        XCTAssertEqual(try queue.body(of: try XCTUnwrap(queue.entries().first)),
+                       Data("{\"n\":0}".utf8))
+    }
+
+    func testDryRunIsTerminalButDoesNotLeaveTheQueue() {
+        // The two properties that were conflated, asserted separately so they cannot be
+        // re-conflated by someone simplifying `leavesQueue` back to `isTerminal`.
+        XCTAssertTrue(Uploader.Result.dryRun.isTerminal, "there is nothing to retry")
+        XCTAssertFalse(Uploader.Result.dryRun.leavesQueue, "and nothing to delete")
+        for terminal in [Uploader.Result.accepted(status: 202), .duplicate,
+                         .rejected(status: 422, code: "redaction_failed")] {
+            XCTAssertTrue(terminal.leavesQueue, "\(terminal) is done with the payload")
+        }
+        XCTAssertFalse(Uploader.Result.retryable(status: 500, code: "internal").leavesQueue)
+    }
+
+    func testAnUnwritableQueueThrowsRatherThanReportingACleanRun() throws {
+        // `(try? queue.due(now:)) ?? []` and `try? queue.enqueue(…)` turned an unusable
+        // queue into an empty drain, a tidy report and exit 0 — a silent success on a
+        // failed upload arriving through the queue instead of the socket. Worse, the
+        // swallowed enqueues still incremented `report.queued`, so `Deferred` announced
+        // "1 queued" over a directory that held nothing.
+        let server = try LoopbackHTTPServer { _ in .serverError }
+        defer { server.stop() }
+        let directory = try UploadFixture.scratch("unwritable")
+
+        // A FILE where the queue's directory needs to be. Every write fails.
+        try Data("not a directory".utf8)
+            .write(to: URL(fileURLWithPath: directory).appendingPathComponent("upload-queue"))
+        let queue = UploadQueue(directory: directory, log: { _, _, _ in })
+
+        let digest = UploadFixture.digest()
+        XCTAssertThrowsError(
+            try UploadFixture.uploader(base: server.baseURL).dispatch(
+                [.init(body: try JSONEncoder().encode(digest), endpoint: .digest,
+                       descriptor: .forDigest(digest))],
+                queue: queue, log: { _, _, _ in })
+        ) { error in
+            guard let unavailable = error as? Uploader.QueueUnavailable else {
+                return XCTFail("expected QueueUnavailable, got \(error)")
+            }
+            // The message must not promise a retry that cannot happen.
+            XCTAssertTrue(unavailable.description.contains("nothing will be retried"),
+                          unavailable.description)
+        }
     }
 
     func testDryRunSendsNothingAtAll() throws {
@@ -619,7 +702,7 @@ final class UploadDispatchTests: XCTestCase {
 
         let digest = UploadFixture.digest()
         let body = try JSONEncoder().encode(digest)
-        let report = UploadFixture.uploader(base: server.baseURL, dryRun: true).dispatch(
+        let report = try UploadFixture.uploader(base: server.baseURL, dryRun: true).dispatch(
             [.init(body: body, endpoint: .digest, descriptor: .forDigest(digest))],
             queue: queue, log: spy.sink)
 

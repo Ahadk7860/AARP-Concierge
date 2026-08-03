@@ -47,6 +47,8 @@ export type InvokeOptions = {
 
 export type InvokeResult = {
   argv: string[];
+  /** The child's pid, so a caller can prove the process group went with it. */
+  pid: number | null;
   status: number | null;
   signal: NodeJS.Signals | null;
   stdout: string;
@@ -97,18 +99,33 @@ export async function invokePython(
   args: readonly string[],
   options: InvokeOptions = {},
 ): Promise<InvokeResult> {
+  return await spawnPython(["-m", module, ...args], options);
+}
+
+/**
+ * `invokePython` with raw interpreter arguments instead of `-m <module>`.
+ *
+ * The same spawn, the same timeout, the same kill — `invokePython` is a thin wrapper.
+ * Exported because the process-group kill cannot be proven without a child that itself
+ * has a child, and `-m` can only reach modules that exist in `boi_intel`. A test that
+ * asserts `SIGKILL` on a childless interpreter proves nothing about `kill(-pid)`.
+ */
+export async function spawnPython(
+  argvTail: readonly string[],
+  options: InvokeOptions = {},
+): Promise<InvokeResult> {
   // MERGED, not `options.env` alone. `options.env` carries the per-call overrides the
   // bridge sets (`BOI_MODEL_PROVIDER`), and reading only that would mean an operator's
   // `BOI_PYTHON` was silently ignored while `pythonExecutable` reported honouring it.
   // The same merge is what the child receives below, so the interpreter this picks and
   // the environment it runs in cannot disagree.
   const executable = pythonExecutable({ ...process.env, ...options.env });
-  const argv = [executable, "-m", module, ...args];
+  const argv = [executable, ...argvTail];
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const started = Date.now();
 
   return await new Promise<InvokeResult>((resolve, reject) => {
-    const child = spawn(executable, ["-m", module, ...args], {
+    const child = spawn(executable, [...argvTail], {
       cwd: options.cwd ?? REPO_ROOT,
       env: { ...process.env, ...options.env, PYTHONPATH: path.join(REPO_ROOT, "intelligence") },
       // Its own process group, so a timeout kills the interpreter AND anything it
@@ -156,16 +173,33 @@ export async function invokePython(
       clearTimeout(timer);
       resolve({
         argv,
+        pid: child.pid ?? null,
         status,
         signal,
         stdout,
         stderr,
         timedOut,
-        reaped: true,
+        // MEASURED, not asserted. This was the literal `true`, which made
+        // `expect(result.reaped).toBe(true)` a test that could not fail — a regression
+        // from `kill(-pid)` to `kill(pid)` would have passed it while leaving an orphaned
+        // model call holding a quota slot. `kill(pid, 0)` throws ESRCH when the process
+        // is genuinely gone, so this is a probe rather than a claim.
+        reaped: isGone(child.pid),
         durationMs: Date.now() - started,
       });
     });
   });
+}
+
+/** Whether a pid is genuinely gone. `kill(pid, 0)` signals nothing and throws ESRCH. */
+export function isGone(pid: number | undefined): boolean {
+  if (pid === undefined) return true;
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "ESRCH";
+  }
 }
 
 function killGroup(pid: number | undefined, signal: NodeJS.Signals): void {

@@ -135,12 +135,15 @@ transient network failure now logs `sync.failed` on the LaunchAgent path. The de
 string distinguishes it (`upload deferred: N queued…`), but a server-side rule alarming
 on `sync.failed` would have to read it.
 
-**A stale queued digest can land after a fresher one.** A digest queued on Tuesday
-uploads on Wednesday, after Wednesday's own digest has already been accepted. The queue
-drains oldest-first *within* a run, but across runs the ordering is by when the server
-could be reached, not by `generated_at`. Track D's `latestDigest` should therefore order
-on `generated_at` rather than on receipt time. Not verified by this track — worth a look
-in prompt `03`.
+**A stale queued digest can land after a fresher one — and it does not matter.**
+~~Track D's `latestDigest` should therefore order on `generated_at` rather than on
+receipt time. Not verified by this track — worth a look in prompt `03`.~~ **Retracted
+after review, and it was my error to raise it as an open question without checking.**
+`cloud/db/src/repository.ts:461` already reads
+`order by generated_at desc limit 1`, so a Tuesday digest arriving after Wednesday's
+cannot displace it. The queue's cross-run ordering is genuinely by when the server could
+be reached, but nothing downstream depends on receipt order. **Do not chase this in
+`03`.**
 
 **Queue ids needed a sequence counter, not a timestamp.** One sync enqueues the digest
 and every voice pack with a single `now`, so a millisecond prefix plus a random UUID
@@ -163,6 +166,48 @@ environment. The two could disagree about which interpreter was in use. Fixed by
 human summary. A bridge that parsed stdout would work until the day somebody added a log
 line. The bridge reads the `--out` file and keeps stdout for diagnostics only. This is
 the subprocess trap prompt `02` names, and it is real rather than theoretical.
+
+## What the review found, and what it cost
+
+Three passes ran on batch 1. Pass 2's three lenses cleared both things flagged for
+suspicion — `review-capture.sh`'s `e)` case is a faithful additive mirror of `gate.sh`'s,
+and nothing in `mac/Tests/` skips — and found **three blocking defects plus six tests
+that could not fail.** All are fixed. Recorded here because the tests-that-cannot-fail
+category is the one this repo has a specific history with, and because two of the three
+defects were in code the working agent had already called correct.
+
+### The defects
+
+| Where | What | Why it survived the first round |
+|---|---|---|
+| `Uploader.Result.leavesQueue` | **`--dry-run` deleted the queue.** `leavesQueue` was `isTerminal`, and `.dryRun` is terminal — so a `--sync --dry-run` over a queue holding days of undelivered digests dequeued every one without sending a byte. The flag whose entire promise is "uploads nothing" destroyed the backlog instead. | Both dry-run tests started from an **empty** queue, where `depth() == 0` is satisfied just as well by a wiped queue as by an untouched one. |
+| `Uploader.dispatch` | **`(try? queue.due(now:)) ?? []` turned an unreadable queue into a clean report and exit 0** — the "silent success on a failed upload" prompt 01 exists to catch, arriving through the queue instead of the socket. The swallowed `try? queue.enqueue(…)` calls were worse: they incremented `report.queued` while nothing was written, so `Deferred` announced "3 queued" over an empty directory. | Nothing exercised a queue that could not be written. `dispatch` now `throws`, and `QueueUnavailable` is deliberately **not** a `Deferred` — `Deferred` promises a retry that only exists if the queue does. |
+| `bridge.ts` `gistsFor` | **A dead bridge rendered to the user as a quiet week**, and `pipeline.test.ts` asserted that was correct. The `no_answer` / `nothing_to_say` distinction was built and then discarded one line later by `(await gistOutcomeFor(…)).gists`. | The criterion said "reported as `no_answer`, distinctly from `nothing_to_say`" and the *outcome type* satisfied it. Nothing required the distinction to reach anybody. Fixed with `BridgeConfig.onDegraded`, fired for `no_answer` / `timed_out` / `unavailable` and never for `nothing_to_say` — invisible to the composer by design, loud to an operator. |
+
+### The tests that could not fail
+
+- **Criterion 4 had no bridge-level test at all.** Boundary validation was asserted by
+  calling `check()` directly, which proves the validator works and proves nothing about
+  whether the bridge consults it — deleting the `check` call from the bridge left it
+  green. Extracted `collectGists`, which is the path `gistOutcomeFor` actually runs.
+- **`reaped: true` was a literal.** A regression from `kill(-pid)` to `kill(pid)` passed
+  it while leaving an orphaned model call holding a quota slot. Now measured with
+  `kill(pid, 0)`, plus a new test that spawns a Python child which itself spawns a
+  grandchild and asserts the grandchild is gone — **verified to fail** on a pid-only kill.
+- **The argv assertion was on an array the test built itself**, proving a test can
+  construct a safe argv rather than that the bridge does. Extracted `draftArgv`, and the
+  real invocation's `InvokeResult.argv` is now read back and checked against every
+  free-text field in the pack.
+- **The timeout criterion's test ran through the crash branch.** A SIGKILLed child also
+  has a non-zero exit, so `timed_out` was folded into `no_answer` and nothing asserted
+  anything about timing out. `timed_out` is now its own status.
+- **The pack-deleted-on-crash test was satisfied by the outer `finally`**, which deletes
+  the whole tree whether or not the per-gist cleanup ran. The workdir is now injectable
+  so the test owns it and can see what survived. Added a `0600` mode check while it exists.
+- **`pipeline.test.ts` accepted three of four possible outcomes.** Tightened to the one
+  correct answer.
+
+Each fix was verified by reintroducing the defect and watching the new test fail.
 
 ## Runtime resources
 
@@ -195,6 +240,12 @@ means prompt `01`'s live evidence run could not disturb Track D's fixtures.
   item — two drafts from the real provider, passing the validator — is the only evidence
   that closes real-gist → draft, since `FakeProvider` structurally cannot. Reported as
   complete-pending-key rather than green.
-- **A `POST /v1/gists` route and Mac-side gist production** are the resolution to the
-  largest finding in this track. Both are contract amendments and neither is Track E's
-  to make.
+- **The gist finding's resolution is an amendment to `digest.v1`, not a `/v1/gists`
+  route.** Corrected by the user at review: `classify()` and `priority()` need exactly
+  three things the digest does not carry — `last_from_me`, `max_gap_days` and
+  `unanswered_question` — and all three are **metadata rather than content**, so they
+  cross the T0 boundary without carrying anybody's words. That is a much smaller change
+  than a new ingest route and a Mac-side producer, and it leaves the gist producer where
+  it can reach a corpus. The user is writing the amendment. Until it lands,
+  `BOI_CORPUS_DB` stays and so does the comment at the top of `bridge.ts`; **prompt `03`
+  must label the topology provisional in the seam report.**
