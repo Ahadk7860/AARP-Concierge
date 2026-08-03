@@ -33,6 +33,7 @@ usage: boi-cli scan --db <path> [options]
        boi-cli voice-pack --mirror <path> --out <dir> [--contacts <abcddb>]
        boi-cli health --mirror <path> [--contacts <abcddb>]
        boi-cli sync-run --db <path> --state <dir> [--force] [--dry-run]
+                        [--contacts <abcddb>]
 
   --db <path>                 chat.db to read. Opened file:<path>?mode=ro, always.
   --snapshot                  copy the db and both sidecars first, then read the copy
@@ -584,7 +585,8 @@ case "sync-run":
                 .appendingPathComponent("mirror.db").path,
             outputDirectory: URL(fileURLWithPath: stateDirectory)
                 .appendingPathComponent("out").path,
-            stateDirectory: stateDirectory)
+            stateDirectory: stateDirectory,
+            contacts: value("contacts"))
         let outcome = try SyncRun(paths: paths, salt: salt).run(force: flag("force"))
 
         StructuredLog.emit("sync_run.complete", fields: [

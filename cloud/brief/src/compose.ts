@@ -81,6 +81,12 @@ export type ComposeInput = {
   /** Keyed by `gist_id`. A gist with no bundle is a legitimate degraded item. */
   drafts: ReadonlyMap<string, DraftBundle>;
   card_url?: string | null;
+  /**
+   * What the renderer produced. `"refusal"` is a real, honest card and it is still never
+   * attached to a brief — see `deliver.ts`. Carried here because the composer is the
+   * only place that can decide, and until prompt 05 nothing carried it at all.
+   */
+  card_kind?: "standard" | "refusal" | null;
 };
 
 export type ComposeResult = {
@@ -138,6 +144,7 @@ export function composeBrief(input: ComposeInput): ComposeResult {
     staleness: decision.staleness,
     items,
     card_url: input.card_url ?? null,
+    card_kind: input.card_kind ?? null,
   };
 
   return { brief, decision, dropped: Math.max(0, eligible - items.length) };

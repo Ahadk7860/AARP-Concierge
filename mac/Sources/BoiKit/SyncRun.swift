@@ -26,13 +26,24 @@ public struct SyncRun {
         public var mirror: String
         public var outputDirectory: String
         public var stateDirectory: String
+        /// An explicit `AddressBook-v22.abcddb`, or `nil` to auto-discover.
+        ///
+        /// Added for prompt 05. `AddressBookDirectory.discover()` resolves the home
+        /// directory through `homeDirectoryForCurrentUser`, which does NOT read `HOME` —
+        /// so a harness could not point this run at a contacts directory by any means,
+        /// and every card the end-to-end run produced was headed with phone numbers.
+        /// `digest`, `voice-pack` and `health` have taken `--contacts` since Track A;
+        /// `sync-run` was the one command without it.
+        public var contacts: String?
 
         public init(chatDatabase: String, mirror: String,
-                    outputDirectory: String, stateDirectory: String) {
+                    outputDirectory: String, stateDirectory: String,
+                    contacts: String? = nil) {
             self.chatDatabase = chatDatabase
             self.mirror = mirror
             self.outputDirectory = outputDirectory
             self.stateDirectory = stateDirectory
+            self.contacts = contacts
         }
 
         /// Where a real installation keeps things: Application Support, not `/tmp`.
@@ -111,7 +122,8 @@ public struct SyncRun {
         outcome.messagesIngested = stats.inserted + stats.updated
         outcome.mirrorMessageCount = try mirror.messageCount()
 
-        let contacts = AddressBookDirectory.discover()
+        let contacts = paths.contacts.flatMap(AddressBookDirectory.read(path:))
+            ?? AddressBookDirectory.discover()
         let calls = CallHistory.discover()
         let resolver = ContactResolver(salt: salt, directory: contacts ?? .empty)
         let metrics = try MetricLibrary(resolver: resolver,

@@ -11,6 +11,9 @@ ambiguity found, and every place a prompt's stated assumption turned out to be w
 | review | `scripts/generate_fact_vocabulary.py` | New script: regenerates `FactVocabulary.swift` from `facts.py` and `redact.py`. Append. | AMENDMENT-001 puts a second fact extractor in Swift, and ~800 vocabulary words copied by hand is the obvious way for the two to stop agreeing. `scripts/` is foundation-owned append-only, so this needs no grant — recorded here per the rule. |
 | 04 | `.gitignore` | Appended `cloud/e2e/runs/`. | Run artifacts are the instrument of prompt `04`, not a project artifact: derived from a corpus, different every run, and large. `git add -A` staged them on the first try — the same reflex that committed `review-capture-e.md`. |
 | 04 | `package.json` | Appended the `e2e` script. | `npm run e2e` is the prompt's stated entry point. |
+| 05 | `package.json` | Appended the `card` script. | `cloud/card/src/main.ts` is a real entry point now that the renderer stores things; the test suite starts it as a child process to prove a card is fetchable by something that is not the test. |
+| 05 | `.env.example` | Appended `BOI_CARD_DIR`, `BOI_CARD_SIGNING_SECRET`, `BOI_CARD_PUBLIC_BASE`. | The first is the directory the renderer and `deleteUser` share instead of an import, so it has to be nameable from both sides. The second is a bearer-token secret and its default is labelled as a development value in the file itself. |
+| 05 | `scripts/check-ownership.sh` | Extended track E's `OWNED` with `cloud/card/` and `cloud/scheduler/`, and `AMENDMENT_001` with the Python and signup test files. | Raised before writing code: three paths named in prompts 05/06/07's own Constraints sections were `OUT OF BOUNDS` under the regex the user had just verified. The user ruled: extend it, tests live next to the code they test. |
 | review | `.gitignore` | Appended `review-capture-*.md`, with a comment saying why. Append only. | `review-capture-e.md` was committed in `9f2d2b8` and `check-ownership.sh e` correctly called it `OUT OF BOUNDS` — Tracks A–D all left theirs untracked, but nothing enforced that. The file is a snapshot of one machine at one moment, not a project artifact, and it is still on disk for the reviewers; only the tracking is gone. Foundation defect rather than a track one: the rule should always have been there, and this makes it the default instead of something each track has to remember. |
 | review | `scripts/review-capture.sh` | Appended an `e)` case to the track switch, an `e)` line to the interpreter `require` switch, and `e` to the usage string. Nothing reordered or removed. | **The script had no case for `e` and exited 2 on `unknown track: e`.** Track E was added to `gate.sh` and `check-ownership.sh` but not to this one, so Pass 1 could not run at all. The commands mirror `gate.sh`'s `e` case exactly — all four toolchains — rather than inventing a narrower suite. Flagged for the reviewer: **this is the working agent editing the script that captures evidence about its own work**, which is not ideal. The change is a copy of an existing case and is the smallest thing that makes Pass 1 possible; read it first. |
 | 02, then 03 | `.env.example` | Appended a `# ---- Track E: the join ----` block. **Prompt 03 removed `BOI_CORPUS_DB` and `BOI_CORPUS_DIR` again** — AMENDMENT-001 deleted the seam they configured. `BOI_PYTHON` and `BOI_INTEL_TIMEOUT_MS` remain. | The bridge cannot run without a corpus path and cannot pick an interpreter safely without one being nameable. The corpus variables carry a comment saying they are the seam that should not exist in production, so nobody reads them as the intended topology. Unlike the prompt-01 token variables these are paths, not secrets, so a named-but-empty value does not read as "configured somewhere else". |
@@ -466,6 +469,101 @@ The first `npm run e2e` exited zero having executed no stages: the entry guard t
 command that reports success without doing any work is exactly what `gate.sh` exists to
 catch, and it is not a thing to leave a clever guard in charge of — the entry point is
 now a file whose only job is to run.
+
+## Prompt 05 — the card exists now
+
+Before this prompt the repo had never produced the artifact the kill test needs. Every
+card it could render was `kind: refusal` (`not_enough_ranked` — six ranked relationships
+against a bar of ten), and the URL that reached the channel was `file:///…/card.png`,
+which no transport can fetch. **The stop condition both strategy documents name for the
+whole product was not merely unrun, it was unrunnable.**
+
+### The corpus is opt-in, and the default is byte-identical
+
+`--profile rich` adds ten people to `make_synthetic_chatdb.py`, generated as
+**conversations** rather than as the uniform drip the six default people use — every
+archetype except `chapter` is defined by conversational structure, and `initiation_ratio`
+counts who breaks a six-hour silence, which a thread with a message every 25 minutes
+barely has. Sixteen ranked relationships, and all five archetypes appear on the first run.
+
+The default profile is unchanged and verified so: same row count, same per-handle counts,
+same message text sequence as `HEAD`. **Track A's `DigestTests` asserts
+`relationships.count == 6` and `thread_count == 7`**, and those assertions characterise a
+fixture that also encodes a muted thread, an SMS thread and per-person NULL-text shares.
+Editing another track's assertions so that my card renders is the wrong repair for "the
+fixture is too small", even though the amendment grant would have allowed it.
+
+### The card was headed with phone numbers, and that is not a kill-test artifact
+
+Found by looking at the first real card: every archetype read `+15550100014`. The corpus
+had names all along — `PEOPLE` has carried them since the foundation — and nowhere to put
+them, so `ContactResolver` fell back to the handle.
+
+Two facts underneath it, both worth keeping:
+
+- **`AddressBookDirectory.discover()` resolves home through
+  `homeDirectoryForCurrentUser`, which does not read `HOME`.** A harness cannot point it
+  anywhere by any means available to it.
+- **`sync-run` was the one subcommand without `--contacts`.** `digest`, `voice-pack` and
+  `health` have taken it since Track A.
+
+So the fixture now also writes a synthetic `AddressBook-v22.abcddb`, and `sync-run` gained
+`--contacts` — **a deviation from prompt 05's stated paths**, which name `cloud/`,
+`scripts/make_synthetic_chatdb.py` and `brief.v1.json` and not `mac/`. Both files are in
+Track E's ownership regex; the edit is additive and mirrors five existing subcommands.
+Recorded here rather than assumed: the card now reads *Ade Oyelaran — the fade*, and the
+brief reads *"Priya Raman asked you something 6 days ago"*.
+
+### Hosting, and why deletion had to ship in the same commit
+
+`POST /cards/:user_id` renders, stores at `<BOI_CARD_DIR>/<user_id>/<card_id>.png`, and
+returns a **signed HTTP URL** with a seven-day expiry. `GET /cards/:user_id/:card_id.png`
+verifies an HMAC over `user_id/card_id/exp` — all three together, because signing the path
+alone yields a link that never dies and signing the expiry alone lets a signature be moved
+onto somebody else's card. `/render` is untouched and Track D's suite still drives it.
+
+`repository.ts` carried *"`briefs.card_url` is derived data and nothing here reaches it.
+Prompt 04 owns that"* — and prompt 04 wired the card **into** delivery without closing it.
+It was harmless exactly as long as nothing was stored, so hosting is the thing that makes
+it live. `deleteUser` now removes the user's card directory **after** the transaction
+commits (a file removed inside a transaction that rolls back is a card deleted for a user
+who still exists, and the filesystem has no rollback), counts what is left rather than
+what it removed, and throws `ResidualUserDataError` if anything survives.
+
+**`deleteUser` does not import the card store and must not.** They share a directory the
+way two services share a bucket name. An import would make a legal guarantee depend on
+which module a process happened to load — and the API process, which serves
+`DELETE /v1/users/{id}`, does not import the renderer.
+
+### The refusal policy is enforced twice, and only one of them is falsifiable end to end
+
+A refusal card is rendered and **not stored**, so `card_url` is null; and `deliver.ts`
+gates the image block on `card_kind === "standard"`. The end-to-end refusal test cannot
+tell those apart — delete the `deliver.ts` check and it stays green, because there is no
+URL to attach either way.
+
+That is the tests-that-cannot-fail shape this repo keeps finding, caught this time before
+it shipped. The gate is asserted separately at block level, on the one input that
+discriminates: a brief carrying **both** a `card_url` and `card_kind: "refusal"`.
+
+### Every new assertion, verified to fail
+
+| Test | Falsified by | Failure seen |
+|---|---|---|
+| a real report card, not a refusal | the `minimal` profile (which the refusal test runs) | `expected 'refusal' to be 'standard'` |
+| hosted, fetchable by another process, unsigned refused | `verifyCardSignature` returning true | `expected 200 to be 401` |
+| a refusal is dropped at block level | removing the `card_kind` gate | `expected true to be false` |
+| deleteUser removes the stored card | making the card delete a no-op | `expected 200 to be 404` |
+
+### Still true, and not fixed here
+
+- **The signed URL is a bearer capability with no revocation short of deletion.** Seven
+  days, and anyone the user forwards it to can read it — which is what a share artifact
+  is for, and it should be a deliberate line on the trust page rather than a default
+  nobody chose.
+- `BOI_CARD_DIR` is a local filesystem. Two renderer processes must therefore share a
+  volume; the production shape is object storage, and the swap is `putCard`/`readCard`
+  plus the two lines in `deleteStoredCards`.
 
 ## Runtime resources
 

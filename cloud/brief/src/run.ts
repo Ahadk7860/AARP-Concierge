@@ -57,7 +57,7 @@ export type TickDeps = {
   gistsFor: (scope: UserScope) => Promise<Gist[]>;
   draftsFor: (scope: UserScope) => Promise<Map<string, DraftBundle>>;
   /**
-   * The 9:16 card, or `null`.
+   * The 9:16 card: where it is fetchable, and WHICH card it is.
    *
    * `composeBrief` has accepted `card_url` since Track D built it and every caller
    * passed `null` — `cloud/card/` renders beautifully and had only ever been called by
@@ -66,8 +66,15 @@ export type TickDeps = {
    * **A renderer that is down produces a brief WITHOUT a card, never no brief.** The
    * card is the acquisition loop; the brief is the product. Returning `null` here is a
    * degraded morning, and throwing is a missing one.
+   *
+   * `kind` was added in prompt 05 and is the reason this returns a pair rather than a
+   * URL. Without it the composer could not tell a report card from a refusal card, and
+   * a user below the renderer's bar was handed "not enough history yet" every morning.
    */
-  cardUrlFor?: (scope: UserScope, digest: unknown) => Promise<string | null>;
+  cardFor?: (scope: UserScope, digest: unknown) => Promise<{
+    url: string | null;
+    kind: "standard" | "refusal" | null;
+  }>;
   log?: (event: Record<string, unknown>) => void;
   attempt?: number;
 };
@@ -88,6 +95,23 @@ export function tickDeps(
   rest: Omit<TickDeps, "gistsFor" | "draftsFor">,
 ): TickDeps {
   return { ...rest, gistsFor: bridge.gistsFor, draftsFor: bridge.draftsFor };
+}
+
+/**
+ * The card's two fields, or two nulls.
+ *
+ * A helper rather than an inline ternary because there are now two fields that must
+ * agree: a `card_url` with no `card_kind` is a card nobody checked the kind of, which is
+ * exactly the state that put a refusal card in front of a user every morning.
+ */
+async function cardFields(
+  deps: TickDeps,
+  scope: UserScope,
+  digest: unknown,
+): Promise<{ card_url: string | null; card_kind: "standard" | "refusal" | null }> {
+  if (deps.cardFor === undefined) return { card_url: null, card_kind: null };
+  const card = await deps.cardFor(scope, digest);
+  return { card_url: card.url, card_kind: card.kind };
 }
 
 export async function runForUser(
@@ -148,9 +172,9 @@ export async function runForUser(
     relationships,
     gists: await deps.gistsFor(scope),
     drafts: await deps.draftsFor(scope),
-    // The card. `cardUrlFor` swallows a renderer failure and returns null, so a card
+    // The card. `cardFor` swallows a renderer failure and returns nulls, so a card
     // that cannot be rendered costs the card and not the brief.
-    card_url: deps.cardUrlFor ? await deps.cardUrlFor(scope, digest.payload) : null,
+    ...(await cardFields(deps, scope, digest.payload)),
   });
 
   // Reuse the row on a resumed attempt: `unique (user_id, scheduled_for)` would reject

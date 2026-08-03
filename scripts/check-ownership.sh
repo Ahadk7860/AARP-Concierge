@@ -17,12 +17,17 @@ case "$LETTER" in
   b) OWNED='^intelligence/' ;;
   c) OWNED='^cloud/(channel|mock-linq)/' ;;
   d) OWNED='^cloud/(api|brief|card|db)/' ;;
-  # Track E is the join. It owns two new cloud directories, the Spectrum channel, the
-  # Mac's uploader, and NOTHING ELSE — including inside the files it is allowed to edit.
+  # Track E is the join. It owns its own cloud directories (intelligence-bridge, e2e,
+  # and — from prompt 07 — scheduler), the Spectrum channel, the Mac's uploader, and
+  # NOTHING ELSE — including inside the files it is allowed to edit.
+  #
+  # `cloud/card/` is Track D's and is granted from prompt 05: the card has to become
+  # hosted, authenticated and deletable, and that lives in the renderer's own service.
+  # Redesigning the card is still out of scope; the merge reads this diff.
   # The narrow call-site edits in SyncRun.swift, main.swift, run.ts and compose.ts are
   # listed here by name because "may edit one line of" is not a thing a path regex can
   # express. Reviewing the diff of those four files by eye is part of the merge.
-  e) OWNED='^(cloud/(intelligence-bridge|e2e)/|cloud/channel/src/spectrum-[a-z-]+\.ts$|cloud/channel/test/spectrum-[a-z-]+\.test\.ts$|mac/Sources/BoiKit/(Uploader|UploadQueue)\.swift$|mac/Tests/BoiKitTests/Uploader.*Tests\.swift$|mac/Sources/BoiKit/SyncRun\.swift$|mac/Sources/BoiCLI/main\.swift$|cloud/brief/src/(run|compose|deliver)\.ts$)' ;;
+  e) OWNED='^(cloud/(intelligence-bridge|e2e|scheduler)/|cloud/card/|cloud/channel/src/spectrum-[a-z-]+\.ts$|cloud/channel/test/spectrum-[a-z-]+\.test\.ts$|mac/Sources/BoiKit/(Uploader|UploadQueue)\.swift$|mac/Tests/BoiKitTests/Uploader.*Tests\.swift$|mac/Sources/BoiKit/SyncRun\.swift$|mac/Sources/BoiCLI/main\.swift$|cloud/brief/src/(run|compose|deliver)\.ts$)' ;;
   *) echo "unknown track: $LETTER" >&2; exit 2 ;;
 esac
 
@@ -45,12 +50,12 @@ FROZEN='^(contracts/|prompts/(CONTRACTS|MERGE-POLICY|TRACK-REVIEW|WORKTREE-PROTO
 #
 # The second is deliberately not narrowed to the union — a regex cannot tell a widened
 # union from a deleted field. It is narrowed by review instead: the merge reads the diff.
-ALLOWED_FROZEN='^(contracts/transcripts/spectrum/|cloud/shared/src/contracts\.ts$|contracts/schema/digest\.v1\.json$|contracts/fixtures/digest/|mac/Sources/BoiKit/Contracts\.swift$|intelligence/boi_intel/contracts\.py$)'
+ALLOWED_FROZEN='^(contracts/transcripts/spectrum/|cloud/shared/src/contracts\.ts$|contracts/schema/(digest|brief)\.v1\.json$|contracts/fixtures/digest/|mac/Sources/BoiKit/Contracts\.swift$|intelligence/boi_intel/contracts\.py$)'
 
 # Prompt 03 (AMENDMENT-001) additionally lets Track E edit the gist producer and the two
 # checkers, which belong to Tracks A and B. Those tracks have merged and stopped, and the
 # amendment names these files explicitly. Not frozen, just not normally track E's.
-AMENDMENT_001='^(mac/Sources/BoiKit/(DigestBuilder|Fact[A-Za-z]*)\.swift$|mac/Tests/BoiKitTests/(Digest|Fact[A-Za-z]*)Tests\.swift$|intelligence/boi_intel/(gist|threads)\.py$|intelligence/tests/test_(gist|threads|facts)\.py$|scripts/(check_voice_pack_leak|validate_fixtures)\.py$|cloud/api/src/(schemas\.ts|schemas\.test\.ts|differential\.test\.ts)$)'
+AMENDMENT_001='^(mac/Sources/BoiKit/(DigestBuilder|Fact[A-Za-z]*)\.swift$|mac/Tests/BoiKitTests/(Digest|Fact[A-Za-z]*)Tests\.swift$|intelligence/boi_intel/(gist|threads)\.py$|intelligence/tests/test_(gist|threads|facts)\.py$|scripts/(check_voice_pack_leak|validate_fixtures)\.py$|cloud/api/src/(schemas\.ts|schemas\.test\.ts|differential\.test\.ts|signup\.test\.ts|routes/signup\.ts)$|cloud/db/src/repository\.ts$|intelligence/boi_intel/(prompts|validator)\.py$|intelligence/tests/test_(prompts|validator|draft)\.py$|scripts/make_synthetic_chatdb\.py$)'
 
 if ! git rev-parse --verify --quiet "$BASE" >/dev/null; then
   echo "cannot resolve base ref '$BASE' — refusing to report a pass I cannot justify" >&2

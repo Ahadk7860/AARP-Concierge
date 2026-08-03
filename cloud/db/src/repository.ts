@@ -10,6 +10,9 @@
 // returning nothing but an id.
 
 import type { Digest, Relationship, VoicePack, Brief, OutboundBlock } from "../../shared/src/index.js";
+import { existsSync, readdirSync, rmSync } from "node:fs";
+import path from "node:path";
+
 import { getPool, withTransaction, type Queryable } from "./pool.js";
 import { residueByTable } from "./catalog.js";
 import { unsafeScopeFromUserId, scopedQuery, type UserScope } from "./scope.js";
@@ -168,14 +171,25 @@ export async function getUser(
  * fails the request loudly instead of leaving user data behind quietly. One-click
  * delete that leaves derived rows behind is the gap the FTC prosecutes.
  *
- * STILL OPEN: section 3 also counts derived data outside Postgres. A rendered card at
- * `briefs.card_url` is derived data and nothing here reaches it. Prompt 04 owns that.
+ * CLOSED IN PROMPT 05, and it was open for one prompt longer than it should have been.
+ * Section 3 also counts derived data outside Postgres: a rendered card at
+ * `briefs.card_url` is derived data, this comment used to say "prompt 04 owns that", and
+ * prompt 04 wired the card INTO delivery without closing it. It was harmless only while
+ * nothing was stored — the moment hosting landed it went live, which is why hosting and
+ * this ship together.
+ *
+ * The stored cards live at `<BOI_CARD_DIR>/<user_id>/<card_id>.png`, written by
+ * `cloud/card/src/store.ts`. **This function does not import that module and never
+ * should.** The two share a directory the way two services share a bucket name; an import
+ * would make a legal guarantee depend on which module a given process happened to load,
+ * and the API process does not import the renderer. The swap to object storage replaces
+ * the two calls below and nothing else.
  */
 export async function deleteUser(
   scope: UserScope,
   pool = getPool(),
-): Promise<{ deleted: boolean; verified_tables: string[] }> {
-  return withTransaction(async (tx) => {
+): Promise<{ deleted: boolean; verified_tables: string[]; verified_external: string[] }> {
+  const result = await withTransaction(async (tx) => {
     const res = await scopedQuery(tx, scope, "delete from users where user_id = $1", [
       scope.user_id,
     ]);
@@ -190,6 +204,36 @@ export async function deleteUser(
 
     return { deleted: (res.rowCount ?? 0) > 0, verified_tables: Object.keys(residue).sort() };
   }, pool);
+
+  // AFTER the transaction commits, deliberately. A file removed inside a transaction
+  // that then rolls back is a card deleted for a user who still exists — and the
+  // filesystem has no rollback. The rows are gone first; if this throws, it throws
+  // loudly with the user already deleted, which is the safe direction to fail in.
+  const cardsRemaining = deleteStoredCards(scope.user_id);
+  if (cardsRemaining > 0) {
+    throw new ResidualUserDataError({ [CARD_STORE]: cardsRemaining });
+  }
+
+  return { ...result, verified_external: [CARD_STORE] };
+}
+
+/** The one external store, named so the residue error says which one leaked. */
+const CARD_STORE = "cards(filesystem)";
+
+/**
+ * Remove every stored card for a user and return WHAT IS LEFT, not what was removed.
+ *
+ * Returning the count deleted would make an unwritable directory look like a clean
+ * delete: `rm` fails, nothing is reported, and the residue check has nothing to compare.
+ * Counting afterwards asks the only question the law cares about.
+ */
+function deleteStoredCards(userId: string): number {
+  const root = process.env["BOI_CARD_DIR"] ?? "/tmp/boi-e/cards";
+  const dir = path.join(root, path.basename(userId));
+  if (!existsSync(dir)) return 0;
+  rmSync(dir, { recursive: true, force: true });
+  if (!existsSync(dir)) return 0;
+  return readdirSync(dir).filter((f) => f.endsWith(".png")).length;
 }
 
 // ---------------------------------------------------------------------------

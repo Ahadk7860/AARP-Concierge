@@ -24,6 +24,8 @@ export type CardResult = {
 
 export type CardClientOptions = {
   baseUrl: string;
+  /** Cards are stored per user, and deleted per user. */
+  userId: string;
   /** Where the PNG is written. In production this is object storage. */
   artifactDir: string;
   timeoutMs?: number;
@@ -31,30 +33,36 @@ export type CardClientOptions = {
 };
 
 /**
- * POSTs a digest to the renderer and writes the PNG next to the run's other artifacts.
+ * POSTs a digest to the renderer, which stores the card and hands back a signed URL.
  *
- * The returned `url` is a `file://` URL that genuinely resolves on this machine, which is
- * what the DoD means by "a `card_url` that resolves". **Production is object storage and
- * a signed HTTPS URL** — the card is the share artifact, so it has to be fetchable by
- * whoever the user sends it to, and a `file://` obviously is not. Recorded in NOTES.md;
- * the swap is one function.
+ * **This used to return a `file://` URL and that was the finding.** It "resolved" — the
+ * DoD's word — on the machine that rendered it, and no transport on earth can fetch it,
+ * so the acquisition loop was wired end to end and still could not reach a phone. It now
+ * calls `POST /cards/:user_id`, and the URL that comes back is an HTTP one somebody else
+ * can GET.
+ *
+ * The PNG is still written to the artifact directory, because the artifact directory is
+ * how a human reads a run — but that copy is evidence, not the address.
  */
 export async function renderCardForDigest(
   digest: unknown,
   options: CardClientOptions,
 ): Promise<CardResult> {
+  const userId = options.userId;
   const log = options.log ?? (() => {});
   const started = Date.now();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? 20_000);
 
   try {
-    const response = await fetch(`${options.baseUrl.replace(/\/$/, "")}/render`, {
+    const response = await fetch(
+      `${options.baseUrl.replace(/\/$/, "")}/cards/${encodeURIComponent(userId)}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(digest),
       signal: controller.signal,
-    });
+    },
+    );
 
     if (!response.ok) {
       // A 400 here means the renderer rejected a digest the API accepted, which would be
@@ -77,25 +85,56 @@ export async function renderCardForDigest(
       };
     }
 
-    const png = Buffer.from(await response.arrayBuffer());
-    await mkdir(options.artifactDir, { recursive: true });
-    const file = path.join(options.artifactDir, "card.png");
-    await writeFile(file, png);
+    const body = (await response.json()) as {
+      kind: "standard" | "refusal";
+      reason: string | null;
+      url: string | null;
+      card_id: string | null;
+      bytes: number;
+    };
 
-    const kind = response.headers.get("x-boi-card-kind");
-    const reason = response.headers.get("x-boi-card-reason") || null;
+    // A refusal card is rendered and NOT stored, so there is no URL and nothing to
+    // attach. That is the policy, not a failure: honest once on the onboarding surface,
+    // a reproach every morning in a brief.
+    if (body.kind === "refusal" || body.url === null) {
+      log({
+        msg: "card.refused",
+        reason: body.reason,
+        consequence: "the brief goes out with no image block, which is the policy",
+      });
+      return {
+        url: null, bytes: body.bytes, kind: body.kind, reason: body.reason,
+        durationMs: Date.now() - started,
+      };
+    }
+
+    // Fetch it back over HTTP and write THOSE bytes to the artifact directory. Writing
+    // the render response instead would prove only that the renderer can render; this
+    // proves the URL in the brief resolves, which is the thing that was false before.
+    const fetched = await fetch(body.url);
+    if (!fetched.ok) {
+      log({ msg: "card.unfetchable", status: fetched.status, url_host: hostOf(body.url) });
+      return {
+        url: null, bytes: 0, kind: body.kind, reason: body.reason,
+        durationMs: Date.now() - started, error: `fetch_${fetched.status}`,
+      };
+    }
+    const png = Buffer.from(await fetched.arrayBuffer());
+    await mkdir(options.artifactDir, { recursive: true });
+    await writeFile(path.join(options.artifactDir, "card.png"), png);
+
     log({
       msg: "card.rendered",
       bytes: png.length,
-      kind,
-      reason,
+      kind: body.kind,
+      card_id: body.card_id,
       duration_ms: Date.now() - started,
     });
     return {
-      url: `file://${file}`,
+      url: body.url,
       bytes: png.length,
-      kind,
-      reason,
+      kind: body.kind,
+      reason: body.reason,
       durationMs: Date.now() - started,
     };
   } catch (err) {
@@ -104,6 +143,7 @@ export async function renderCardForDigest(
     log({
       msg: "card.unavailable",
       error,
+      detail: err instanceof Error ? err.message : String(err),
       consequence: "the brief will go out with card_url: null, which is the point",
     });
     return {
@@ -116,5 +156,14 @@ export async function renderCardForDigest(
     };
   } finally {
     clearTimeout(timer);
+  }
+}
+
+/** Host only — a signed card URL carries a signature nobody needs in a log line. */
+function hostOf(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return "unparseable";
   }
 }

@@ -1,6 +1,6 @@
-# Track E — Prompt 04: Photon, and the first message a human receives
+# Track E — Prompt 08: Photon, and the first message a human receives
 
-**Depends on:** 03, green, with artifacts you have read by hand.
+**Depends on:** 07, green — and a real report card from `05` that you have looked at.
 
 ## Context
 

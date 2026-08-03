@@ -68,6 +68,18 @@ export function briefIdempotencyKey(brief: Brief, suffix: string): string {
  *
  * Gated on `capabilities.images`. A transport that cannot carry an image gets no card and
  * no substitute: a bare URL in a text block is not a card, it is a link nobody taps.
+ *
+ * **And gated on `card_kind === "standard"`, which is the policy prompt 05 fixed.** A
+ * refusal card — "not enough history yet" — is a good product exactly once, on the
+ * onboarding surface, where it names a real problem and points at
+ * `Settings > Messages > Keep Messages`. Attached to a brief it arrives every morning
+ * forever, which is a reproach rather than information, and it violates "never hand
+ * someone a bad report and call it their year in messages". A brief below the bar ships
+ * its text and no image.
+ *
+ * A `card_url` with no `card_kind` is treated as no card. That is deliberate: the field
+ * is optional in the type for compatibility, and the failure this gate exists to prevent
+ * is precisely a card whose kind nobody checked.
  */
 export function leadBlocks(brief: Brief, capabilities?: Capabilities): OutboundBlock[] {
   const blocks: OutboundBlock[] = [];
@@ -80,7 +92,8 @@ export function leadBlocks(brief: Brief, capabilities?: Capabilities): OutboundB
   }
 
   const card = brief.card_url;
-  if (typeof card === "string" && card.length > 0 && capabilities?.images === true) {
+  if (typeof card === "string" && card.length > 0 && capabilities?.images === true
+      && brief.card_kind === "standard") {
     blocks.push({ type: "image", url: card, alt: "your relationships this week" });
   }
 

@@ -16,7 +16,8 @@
     "test:c": "vitest run cloud/channel cloud/mock-linq",
     "test:d": "vitest run cloud/api cloud/brief cloud/card cloud/db",
     "lint:py": "ruff check intelligence && ruff format --check intelligence",
-    "e2e": "vite-node cloud/e2e/src/main.ts"
+    "e2e": "vite-node cloud/e2e/src/main.ts",
+    "card": "vite-node cloud/card/src/main.ts"
   },
   "devDependencies": {
     "@types/js-yaml": "^4.0.9",

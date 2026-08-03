@@ -68,6 +68,7 @@ export type E2EResult = {
   scope: UserScope;
   sent: number;
   cardUrl: string | null;
+  cardKind: "standard" | "refusal" | null;
   briefItems: number;
   status: string;
   /**
@@ -99,6 +100,13 @@ export type E2EOptions = {
   provider?: string;
   /** Skip the card server, to prove a brief still goes out without one. */
   withoutCard?: boolean;
+  /**
+   * `rich` (default) clears the renderer's ten-relationship bar and produces a real
+   * report card. `minimal` is the six-person corpus, which produces a REFUSAL card — the
+   * only kind this repo could make before prompt 05, and the input that proves a refusal
+   * is never attached to a brief.
+   */
+  corpusProfile?: "minimal" | "rich";
   /** Reuse an existing account, to exercise idempotency on a second run. */
   reuseScope?: UserScope;
   artifactRoot?: string;
@@ -145,15 +153,27 @@ export async function runEndToEnd(options: E2EOptions = {}): Promise<E2EResult> 
   await stage("migrate", "schema from empty", () => migrate());
 
   // ---------------------------------------------------------------- 2. the corpus
-  const corpus = path.join(REPO_ROOT, "cloud", "e2e", "runs", "chat.db");
-  await stage("corpus", "synthetic chat.db, real schema, open WAL", async () => {
-    if (!existsSync(corpus)) {
-      await mkdir(path.dirname(corpus), { recursive: true });
-      await run("/usr/bin/python3", [
-        path.join(REPO_ROOT, "scripts", "make_synthetic_chatdb.py"), "--out", corpus,
-      ]);
-    }
-  });
+  // `--profile rich`, and it is the difference between a demo and the kill test.
+  //
+  // The default six-person corpus yields six ranked relationships; `buildCardModel`
+  // refuses anything under ten, so every card this repo had ever rendered was a refusal
+  // card. The contacts directory matters for the same reason at a smaller scale: without
+  // one every archetype on the card is headed `+15550100014`, and the card's whole claim
+  // is that the user can check it against their own memory.
+  const profile = options.corpusProfile ?? "rich";
+  const runsDir = path.join(REPO_ROOT, "cloud", "e2e", "runs");
+  const corpus = path.join(runsDir, `chat-${profile}.db`);
+  const contacts = path.join(runsDir, `AddressBook-${profile}.abcddb`);
+  await stage("corpus", `synthetic chat.db (${profile}) + address book, open WAL`,
+    async () => {
+      if (!existsSync(corpus) || !existsSync(contacts)) {
+        await mkdir(runsDir, { recursive: true });
+        await run("/usr/bin/python3", [
+          path.join(REPO_ROOT, "scripts", "make_synthetic_chatdb.py"),
+          "--out", corpus, "--profile", profile, "--contacts-out", contacts,
+        ]);
+      }
+    });
 
   // ---------------------------------------------------------------- 3. servers
   const channel = new StubChannel();
@@ -211,7 +231,8 @@ export async function runEndToEnd(options: E2EOptions = {}): Promise<E2EResult> 
           path.join(REPO_ROOT, "mac"), "--product", "boi-cli"]);
       }
       const state = path.join(artifactDir, "mac");
-      await run(cli, ["sync-run", "--db", corpus, "--state", state, "--force"], {
+      await run(cli, ["sync-run", "--db", corpus, "--state", state, "--force",
+                      "--contacts", contacts], {
         env: {
           PATH: "/usr/bin:/bin",
           HOME: "/tmp",
@@ -245,6 +266,7 @@ export async function runEndToEnd(options: E2EOptions = {}): Promise<E2EResult> 
 
     // -------------------------------------------------------------- 7. the tick
     let cardUrl: string | null = null;
+    let cardKind: "standard" | "refusal" | null = null;
     const outcome = await stage("tick", "compose, render, deliver", async () => {
       const deps = bridgeDeps({ provider, log });
       return runForUser({ user_id: scope.user_id, timezone: TZ }, {
@@ -253,18 +275,19 @@ export async function runEndToEnd(options: E2EOptions = {}): Promise<E2EResult> 
         log,
         gistsFor: deps.gistsFor,
         draftsFor: deps.draftsFor,
-        cardUrlFor: async (_scope, digest) => {
-          if (cardBase === null) return null;
+        cardFor: async (_scope: UserScope, digest: unknown) => {
+          if (cardBase === null) return { url: null, kind: null };
           const card = await renderCardForDigest(digest, {
-            baseUrl: cardBase, artifactDir, log,
+            baseUrl: cardBase, userId: scope.user_id, artifactDir, log,
           });
           stages.push({
             name: "card", inputBytes: sizeOf(digest), outputBytes: card.bytes,
             durationMs: card.durationMs,
-            note: card.url ? `${card.kind} card` : `no card: ${card.error}`,
+            note: card.url ? `${card.kind} card, hosted` : `no card: ${card.error ?? card.reason}`,
           });
           cardUrl = card.url;
-          return card.url;
+          cardKind = card.kind as "standard" | "refusal" | null;
+          return { url: card.url, kind: cardKind };
         },
       });
     });
@@ -292,6 +315,7 @@ export async function runEndToEnd(options: E2EOptions = {}): Promise<E2EResult> 
       scope,
       sent: channel.sent.length,
       cardUrl,
+      cardKind,
       briefItems: outboundRows.length,
       status: outcome.status,
       outbound: channel.sent,

@@ -109,7 +109,20 @@
       "type": [
         "string",
         "null"
-      ]
+      ],
+      "description": "Where the rendered card is fetchable. A transport has to be able to GET this, so file:// is a development artifact and never a shipped value."
+    },
+    "card_kind": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        "standard",
+        "refusal",
+        null
+      ],
+      "description": "What the renderer produced. ADDITIVE, prompt 05. The renderer has always known this -- it returns x-boi-card-kind -- and the composer never carried it, so deliverBrief could not tell a report card from a refusal card and attached both. A refusal card every morning is a reproach; the policy is that it is never attached to a brief. null when no card was rendered at all."
     }
   }
 }
