@@ -56,6 +56,18 @@ export type TickDeps = {
    */
   gistsFor: (scope: UserScope) => Promise<Gist[]>;
   draftsFor: (scope: UserScope) => Promise<Map<string, DraftBundle>>;
+  /**
+   * The 9:16 card, or `null`.
+   *
+   * `composeBrief` has accepted `card_url` since Track D built it and every caller
+   * passed `null` — `cloud/card/` renders beautifully and had only ever been called by
+   * its own tests. This is the edge.
+   *
+   * **A renderer that is down produces a brief WITHOUT a card, never no brief.** The
+   * card is the acquisition loop; the brief is the product. Returning `null` here is a
+   * degraded morning, and throwing is a missing one.
+   */
+  cardUrlFor?: (scope: UserScope, digest: unknown) => Promise<string | null>;
   log?: (event: Record<string, unknown>) => void;
   attempt?: number;
 };
@@ -136,6 +148,9 @@ export async function runForUser(
     relationships,
     gists: await deps.gistsFor(scope),
     drafts: await deps.draftsFor(scope),
+    // The card. `cardUrlFor` swallows a renderer failure and returns null, so a card
+    // that cannot be rendered costs the card and not the brief.
+    card_url: deps.cardUrlFor ? await deps.cardUrlFor(scope, digest.payload) : null,
   });
 
   // Reuse the row on a resumed attempt: `unique (user_id, scheduled_for)` would reject

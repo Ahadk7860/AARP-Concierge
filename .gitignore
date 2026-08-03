@@ -39,3 +39,9 @@ chat.db-shm
 # machine at one moment, not a project artifact. Tracks A-D all left theirs untracked;
 # this rule makes that the default rather than a thing each track has to remember.
 review-capture-*.md
+
+# End-to-end run artifacts. One directory per run, holding the digest as uploaded, the
+# gists, the drafts, the rendered card and the outbound blocks. They are the INSTRUMENT
+# of prompt 04, not a project artifact: derived from somebody's corpus, different every
+# run, and large. Same rule as review-capture-*.md, and for the same reason.
+cloud/e2e/runs/

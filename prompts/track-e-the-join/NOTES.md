@@ -9,6 +9,8 @@ ambiguity found, and every place a prompt's stated assumption turned out to be w
 |---|---|---|---|
 | 01 | — | none | `BOI_API_BASE` already existed in `.env.example`; see the first row of "Prompt assumptions that were wrong". Two new variables are read but neither is appended — see "Open". |
 | review | `scripts/generate_fact_vocabulary.py` | New script: regenerates `FactVocabulary.swift` from `facts.py` and `redact.py`. Append. | AMENDMENT-001 puts a second fact extractor in Swift, and ~800 vocabulary words copied by hand is the obvious way for the two to stop agreeing. `scripts/` is foundation-owned append-only, so this needs no grant — recorded here per the rule. |
+| 04 | `.gitignore` | Appended `cloud/e2e/runs/`. | Run artifacts are the instrument of prompt `04`, not a project artifact: derived from a corpus, different every run, and large. `git add -A` staged them on the first try — the same reflex that committed `review-capture-e.md`. |
+| 04 | `package.json` | Appended the `e2e` script. | `npm run e2e` is the prompt's stated entry point. |
 | review | `.gitignore` | Appended `review-capture-*.md`, with a comment saying why. Append only. | `review-capture-e.md` was committed in `9f2d2b8` and `check-ownership.sh e` correctly called it `OUT OF BOUNDS` — Tracks A–D all left theirs untracked, but nothing enforced that. The file is a snapshot of one machine at one moment, not a project artifact, and it is still on disk for the reviewers; only the tracking is gone. Foundation defect rather than a track one: the rule should always have been there, and this makes it the default instead of something each track has to remember. |
 | review | `scripts/review-capture.sh` | Appended an `e)` case to the track switch, an `e)` line to the interpreter `require` switch, and `e` to the usage string. Nothing reordered or removed. | **The script had no case for `e` and exited 2 on `unknown track: e`.** Track E was added to `gate.sh` and `check-ownership.sh` but not to this one, so Pass 1 could not run at all. The commands mirror `gate.sh`'s `e` case exactly — all four toolchains — rather than inventing a narrower suite. Flagged for the reviewer: **this is the working agent editing the script that captures evidence about its own work**, which is not ideal. The change is a copy of an existing case and is the smallest thing that makes Pass 1 possible; read it first. |
 | 02, then 03 | `.env.example` | Appended a `# ---- Track E: the join ----` block. **Prompt 03 removed `BOI_CORPUS_DB` and `BOI_CORPUS_DIR` again** — AMENDMENT-001 deleted the seam they configured. `BOI_PYTHON` and `BOI_INTEL_TIMEOUT_MS` remain. | The bridge cannot run without a corpus path and cannot pick an interpreter safely without one being nameable. The corpus variables carry a comment saying they are the seam that should not exist in production, so nobody reads them as the intended topology. Unlike the prompt-01 token variables these are paths, not secrets, so a named-but-empty value does not read as "configured somewhere else". |
@@ -313,6 +315,71 @@ travel. `topic` is optional in `gist.v1` and no gate depends on it, so this is a
 bounded loss of colour in the gist string. The amendment names four fields and this
 prompt adds nothing to it; a fifth field carrying a category label would be a separate
 amendment.
+
+
+## Prompt 04 — the runner, and the fifth gap
+
+`npm run e2e` takes an empty database to a sent message. The pipe has now been executed
+end to end; before this the count was zero.
+
+### GAP 5: the card reaches the brief and stops
+
+`composeBrief` sets `brief.card_url` and **`deliverBrief` never reads it.** Confirmed on
+a real run: the stored `brief.v1` carries
+`card_url: file:///…/card.png`, and `grep card` over the outbound blocks the channel
+received returns nothing. The renderer works, the compose edge now works, and the card
+still never reaches the user.
+
+`BOI_ARCHITECTURE.md` § 5 calls the card "the entire acquisition loop", and § 11 phase 3
+makes it the moment. So this is the same shape as the four gaps this track was formed to
+find — a missing edge between built nodes — and it was invisible until something wrote
+the brief document to disk and looked at it. **Not fixed here:** `deliver.ts` is not in
+Track E's owned paths and prompt `04` permits only the `card_url` argument at the
+`composeBrief` call site. It is a one-line finding and a separate decision: the channel
+supports images and `Capabilities.images` is already negotiated, so the question is
+whether the card rides the lead message or a second one.
+
+*(Found only because the artifact was fixed: the first version wrote the tick's return
+value to `brief.json` — three counters — which has no card field to be empty. An artifact
+that cannot show a defect is not evidence.)*
+
+### The card is a REFUSAL card on the synthetic corpus
+
+`kind: refusal`, `reason: not_enough_ranked`. The corpus produces 6 relationships, below
+the renderer's bar. The PNG is a legible 1080×1920 card that says so honestly — which is
+the designed behaviour and the right one — but **the e2e has never rendered a real report
+card**, so nothing in this repo has yet seen the artifact the whole acquisition loop
+depends on. A corpus with more ranked relationships would settle it; that is a fixture
+change, not a code change, and it is worth doing before anybody judges the card.
+
+### `fake` cannot draft, so the default run has zero drafts
+
+The prompt-02 finding, now biting the runner: `providers/fake.py` replays on
+`gist_id_contains` against four hard-coded fixture ids, so a gist the producer just made
+raises `LookupError` and the drafter exits 1. **A default `npm run e2e` produces a brief
+with three gists and zero drafts** — a correct degradation, and an incomplete artifact
+set that cannot satisfy the DoD's "each with a gist and two drafts".
+
+With `BOI_MODEL_PROVIDER=gemini` the same run produces two stance-distinct candidates per
+item, validator passed on the first attempt for all three, `model_id
+gemini-3.1-flash-lite`. Both runs are recorded. The DoD line is met by the live run and
+is **structurally unmeetable** by the default one, which is a property of the fixtures
+rather than of the pipe.
+
+### What agreed
+
+`contact_id` holds across all four artifacts — digest → gists → drafts → brief — for
+every item, asserted rather than eyeballed. Two `action_needed` and one `dormant`, which
+means AMENDMENT-001's four fields are doing their job on a real corpus through a real
+upload.
+
+### A green run that ran nothing
+
+The first `npm run e2e` exited zero having executed no stages: the entry guard tested
+`process.argv[1]`, which under `vite-node` is the runner rather than the module. A
+command that reports success without doing any work is exactly what `gate.sh` exists to
+catch, and it is not a thing to leave a clever guard in charge of — the entry point is
+now a file whose only job is to run.
 
 ## Runtime resources
 
