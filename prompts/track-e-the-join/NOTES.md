@@ -259,11 +259,28 @@ means prompt `01`'s live evidence run could not disturb Track D's fixtures.
 - Prompt `01`'s first DoD line — "the row is visible in the database" — needs a live
   `cloud/api` against Postgres and a paired user, which is a runtime step rather than a
   code one. Reported in the pass-1 evidence, not asserted by the Swift suite.
-- **Prompt `02`'s live-call DoD item is unticked pending a `GEMINI_API_KEY`.** `.env` has
-  the variable empty. Everything else in `02` runs on `BOI_MODEL_PROVIDER=fake`; this one
-  item — two drafts from the real provider, passing the validator — is the only evidence
-  that closes real-gist → draft, since `FakeProvider` structurally cannot. Reported as
-  complete-pending-key rather than green.
+- ~~**Prompt `02`'s live-call DoD item is unticked pending a `GEMINI_API_KEY`.**~~
+  **CLOSED.** Key supplied 3 Aug; one live call run by hand against
+  `g_091b2b6f69b6` — a real `action_needed` gist the producer made from the synthetic
+  corpus, whose id no committed transcript covers, so `FakeProvider` could not have
+  answered it. `gemini-3.1-flash-lite`, two stance-distinct candidates (44 and 37 chars),
+  `validator: {passed: true, attempts: 1, failures: []}`, valid against
+  `draft_bundle.v1`, 1426 ms. **Real-gist → draft is now demonstrated rather than
+  assumed**, which was the whole reason to close this before `03`.
+
+  Three things the fake path could not have shown:
+  - **Prompt-cache structure works end to end.** `cache_key: pc_3ead6d36a874e4c3`, keyed
+    on `(user_id, contact_id, voice_pack_version)` per `CONTRACTS.md` § 6.6 — the day-one
+    decision the architecture says cannot be retrofitted.
+  - **The validator passed a real model's first attempt**, no retry and no degradation to
+    zero candidates. The gates are not so tight that a live model cannot clear them.
+  - **The log carries `prompt_hash` and no prompt.** § 6's rule survives contact with a
+    real provider.
+
+  `.env` was not otherwise modified: `BOI_ALLOW_LIVE_CALLS` stays `0` and
+  `BOI_MODEL_PROVIDER` stays `fake`, both passed as per-invocation overrides, so no test
+  can start making live calls. The key itself should be rotated — a fragment of it
+  reached a screenshot during setup.
 - **The gist finding's resolution is an amendment to `digest.v1`, not a `/v1/gists`
   route.** Corrected by the user at review: `classify()` and `priority()` need exactly
   three things the digest does not carry — `last_from_me`, `max_gap_days` and
