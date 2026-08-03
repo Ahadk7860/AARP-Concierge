@@ -11,6 +11,14 @@ public enum DotEnv {
 
     public static let fileName = ".env"
 
+    /// Reads `key` from one exact file. No walking — used where the location is known
+    /// and a surprise `.env` two directories up would be worse than finding nothing.
+    public static func value(of key: String, inFile path: String) -> String? {
+        guard let text = try? String(contentsOfFile: path, encoding: .utf8),
+              let value = parse(text)[key], !value.isEmpty else { return nil }
+        return value
+    }
+
     /// Walks up from `directory` looking for a `.env`, and returns `key` from the first
     /// one found. Stops at the filesystem root.
     public static func value(of key: String,

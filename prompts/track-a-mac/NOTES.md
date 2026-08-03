@@ -62,6 +62,36 @@ Anything `prompts/CONTRACTS.md` does not specify, specifies wrongly, or specifie
 way that does not work in practice. You may not edit it — record it here and report.
 Every entry names the prompt where it surfaced.
 
+`[prompt 07] CONTRACT GAP — guard three is unusable on any real corpus, and the fix is
+not in the repo yet.` `scripts/check_voice_pack_leak.py` builds its `sent` set from
+`SELECT text FROM message WHERE is_from_me = 1 AND text IS NOT NULL`. On this Mac that is
+**9,940 of 30,998 sent rows**; the other 21,047 carry their text in `attributedBody` —
+the exact trap prompt 03 exists to solve, reproduced inside the script that guards the
+corpus. A phrase the user really sent is therefore absent from the checker's `sent` set,
+and if anyone ever said the same common phrase back, it is reported as a leak.
+
+Measured: **47 of 174 packs flagged, every one false.**
+
+I did not touch the script — it is named in CONTRACTS § 7 and the prompt calls it a
+frozen anchor. Instead `boi-cli voice-pack-provenance` answers the same question against
+the mirror, which holds the decoded text:
+
+```
+packs 174   exemplars 4442
+proven_sent                     4318
+redacted_beyond_verbatim_match   124
+traceable_to_inbound_only          0   <- the only bucket that is a leak
+sent_and_also_seen_inbound       517   <- the bucket guard three misreports
+```
+
+**Status: the user reported this fixed on main (`--mirror` as input, a raw `chat.db`
+refused). It is not in this worktree.** `git log --oneline --all --
+scripts/check_voice_pack_leak.py` returns only the foundation commit `d95d215`, the file
+at HEAD is byte-identical to it, and the merge titled `43deb7c merge main: guard three
+reads the mirror` carried Track B and Track D work but no change to that file. So this
+gap is still open here and the 47 false positives still reproduce. Re-running is a
+one-liner once the fix actually lands.
+
 `[prompt 05] CONTRACT GAP — § 6 pins the canonical JSON for voice_pack_version but not
 float formatting, and Foundation and Python disagree by default.` § 6 specifies sorted
 keys, no whitespace, and `ensure_ascii=false`. It does not say how a float is rendered,
@@ -175,6 +205,14 @@ Every append to a foundation-owned shared file: dependency manifests, lint confi
 
 Format: `[prompt NN] <file> — added <what> because <why>`
 
+`[prompt 07] mac/scripts/build-app.sh` — **new file, inside `mac/`.** Listed for
+visibility only: `mac/**` is this track's owned path, so this is not a shared-file
+append. Named because a reviewer scanning for build tooling should not have to find it.
+
+`[prompt 07] ~/Applications/Boi.app and ~/Library/Application Support/Boi` — **outside
+the assigned `/tmp/boi-a` scratch, deliberately, and recorded under Runtime resources
+below.**
+
 `[prompt 05, 06]` None. No shared file was touched by either prompt; every path is under
 `mac/`, plus this `NOTES.md` and the `Status` column of `TRACK.md`. No dependency added —
 HMAC and SHA-256 come from CryptoKit in the macOS SDK, and the Messages-in-iCloud probe
@@ -227,6 +265,19 @@ default — another track may pick the same one. Record it and report.
 
 Format: `[prompt NN] needed <resource> — used <what> provisionally / blocked`
 
+`[prompt 07] needed a STABLE install path outside /tmp — used `~/Applications/Boi.app`
+and `~/Library/Application Support/Boi`.` § 9 assigns `/tmp/boi-a` and says everything
+generated goes there. That cannot work for this prompt: a TCC grant binds to a bundle
+path, `/tmp` is cleared on reboot, and finding 3 is precisely that a grant tied to an
+unstable path is how a fleet loses access silently. `~/Applications` is where a
+per-user install belongs, carries no version component, and is what
+`ResponsibleBundle.containsVersionedComponent` is asserted against.
+
+`build-app.sh` still defaults to `/tmp/boi-a/app`; `--out ~/Applications` is what the
+verified run used. Application Support holds the installed mirror, the digest, the voice
+packs, `heartbeat.json` and `boi.log` — the same layout a shipped app would use, and the
+reason `launchd` (working directory `/`) can find its config at all.
+
 `[prompt 01]` Nothing unassigned. Used only what § 9 gives Track A: the fixture at
 `/tmp/boi-a/chat.db`, plus `/tmp/boi-a/snapshot` and `/tmp/boi-a/tests` as scratch —
 both inside the assigned `/tmp/boi-a`. No ports, no network, no other database.
@@ -239,10 +290,74 @@ visible and reversible.
 
 Format: `[prompt NN] → Track <X>: <what you need and why>`
 
+`[prompt 07] → Track D: THE FLEET-WIDE HEARTBEAT ALARM, and the two fields it needs.`
+The Mac half ships in this prompt: every completed run writes `heartbeat.json` and the
+payload is ready for `POST /v1/heartbeat` the moment networking is wired. The **alarm is
+server-side and only Track D can build it**, because it is a correlation across users and
+no single Mac can see it.
+
+Why it matters, from CONTRACTS § 11 item 10 observed in the wild: the responsible
+process's direct parent when granting by hand was `…/claude-code/2.1.219/claude.app` — a
+**version-numbered bundle path**. If TCC binds a grant to one, an auto-update drops it for
+every Mac in the fleet on the same day. All of them stop syncing, none raise an error, and
+the first signal is briefs going stale across the whole user base at once. A per-user
+"we haven't seen your Mac since Sunday" notice is a support ticket. **That is an outage
+nobody is paged for.**
+
+The payload already carries what the correlation needs:
+
+```json
+{ "as_of": "...", "app_version": "0.1.0", "bundle_path_stable": true,
+  "full_disk_access": true, "last_successful_sync_at": "...",
+  "mirror_message_count": 94827, "corpus_health": "fixable" }
+```
+
+- **`app_version` is the field the alarm is built on.** Without it a server sees that many
+  Macs went quiet; it cannot see that *every Mac on 1.2.3 went quiet the day 1.2.4
+  shipped*, which is the difference between an alarm in an hour and a diagnosis a week
+  later from the support queue.
+- **`full_disk_access` turns "quiet" into "quiet AND denied"**, which is the specific
+  signature of a grant dropped by an update rather than a laptop that is shut.
+- **`bundle_path_stable`** reports whether this install's own path carries a version, so
+  the hazard is visible from the server instead of discovered by a ticket.
+
+Suggested rule, and it should ship whatever the answer to "does FDA survive Sparkle"
+turns out to be — the alarm is what makes the unknown survivable: **page when the
+denied-or-silent share within a single `app_version` cohort crosses a threshold in a
+rolling window**, not when a raw count of quiet Macs does. Per-user staleness stays a
+user-visible notice at 24h (`Heartbeat.userVisibleStalenessHours`).
+
+`POST /v1/heartbeat` is already in CONTRACTS § 2 returning `204`; this asks for the two
+fields and the cohort rule behind it.
+
 ## Deviations from the plan
 
 Anywhere the implementation departs from what the prompt described, and why. A
 deviation is not a failure — an unrecorded one is.
+
+`[prompt 07] A REDACTION BUG THAT WOULD HAVE BLOCKED EVERY REAL USER, FOUND ONLY BY
+RUNNING AGAINST A REAL CORPUS.` The serializer refused to write **any** voice pack:
+`Redactor.containsSpecifics` is defined as "redaction would change this", and `redact`
+was not idempotent, so its own guard fired on text that had nothing to redact. Two
+causes, and neither can occur in synthetic data:
+
+1. **Whitespace.** Replacing `"  "` with `" "` leaves a double space behind on a run of
+   four, so the second pass differs from the first. Every hand-written test message had
+   single spaces; real messages are full of runs and embedded newlines.
+2. **A dangling digit run.** Matched against a 20-digit string, the phone pattern
+   consumed the last ten and left the first ten sitting against the placeholder — where a
+   word boundary now existed that had not before, so the next pass matched again. **4
+   messages in 30,399.**
+
+Fixed by collapsing whitespace with one regex pass, adding a `long_digit_run` pattern
+ahead of `phone`, bounding the phone pattern with lookarounds instead of `\b`, and
+iterating the whole set to a fixed point. `boi-cli redaction-selftest` — new, and the
+check that would have caught this — reports **0 non-idempotent across all 30,399 real
+sent messages**. `testRedactionIsIdempotentIncludingOnWhitespaceRuns` now covers the
+whitespace shapes that were missing.
+
+This is the argument for having run against a real corpus at all: synthetic data cannot
+structurally produce either shape.
 
 `[prompt 06] I READ THE 364/365/366 CRITERION AS BEING ABOUT THE EXACT-BOUNDARY
 SIGNATURE, AND KEPT A SEPARATE LOWER-CONFIDENCE PATH THAT A LITERAL READING WOULD HAVE
@@ -621,6 +736,28 @@ Choices the prompt left open that you had to resolve: a library, a data structur
 error-handling approach. The user needs to see these before merge, because another
 track may have chosen differently.
 
+`[prompt 07] Boi.app is assembled by a script, not by an Xcode project.` SwiftPM cannot
+emit a `.app`, and CONTRACTS § 8 anticipates `mac/Boi.xcodeproj/project.pbxproj` as a
+Track A generated file. I did not create one: a hand-written `pbxproj` is a large
+generated file nobody can review in a diff, and it would be the least reviewable thing
+in this track. `mac/scripts/build-app.sh` does the three things the bundle actually needs
+— binary in `Contents/MacOS`, `Info.plist`, LaunchAgent plist inside
+`Contents/Library/LaunchAgents` — in a file that can be read. If the plan wants the
+Xcode project, that is a prompt correction rather than something to infer.
+
+`[prompt 07] The LaunchAgent plist has ONE source of truth.` `build-app.sh` calls
+`boi-cli agent-plist` rather than embedding a copy, and that subcommand refuses to emit a
+plist that fails `LaunchAgentPlist.problems`. A plist embedded in the build script could
+drift into naming a helper or a calendar trigger months after a test said it did not, and
+both failure modes are silent.
+
+`[prompt 07] `boi-cli` remains a developer tool and is NOT expected to hold the grant.`
+CLI executables dropped off the Full Disk Access list in macOS 26.1–26.2, so every
+privileged read that ships happens inside the bundle. The prompt forbids a second
+executable that reads `chat.db`; `boi-cli` predates this prompt, is the dev entry point
+for prompts 01–06, and is not what the LaunchAgent invokes. The agent invokes
+`Boi.app/Contents/MacOS/Boi --sync`.
+
 `[prompt 06] One health function, two callers — so the CLI and the digest cannot
 disagree.` `DigestBuilder` no longer has its own provisional classifier; both it and
 `boi-cli health` call `HealthCheck.evaluate`. The Definition of Done asks for a test
@@ -778,6 +915,29 @@ generator's user lines contain no emoji, no greeting and no sign-off, so `emoji_
 The extraction logic is covered by purpose-built unit tests, but nothing on the shared
 fixture would notice if it broke. Third item for the same generator change.
 
+`[prompt 07] RUNNING THE APP BINARY FROM A SHELL DOES NOT PROVE THE APP HAS THE GRANT —
+IT PROVES THE TERMINAL'S APP DOES.` This bit during verification itself, which is the
+best possible demonstration of finding 2. `~/Applications/Boi.app/Contents/MacOS/Boi
+--sync` run from this session read `chat.db` happily **while Boi.app had no grant at
+all** (`tccutil reset` reported "No such bundle identifier"), because TCC attributed the
+access to the responsible process — Claude.app, three levels up, which does have it.
+
+So the only honest way to verify the app's own grant is to launch it detached, with
+`open -a`, and assert on what it reports about itself. `app.launched` now logs
+`responsible_bundle` and `bundle_path_stable` every launch, and the evidence for this
+prompt is that line reading `/Users/skylerluk/Applications/Boi.app` and `true` — not the
+absence of an error from a shell invocation. **Anyone re-running this Definition of Done
+from a terminal inside a granted app will get a false pass on the FDA items unless they
+launch with `open -a` and check that line.**
+
+`[prompt 07] The LaunchAgent fired on its own and the idempotent guard absorbed it.`
+Unplanned but the best evidence in the batch: 30 minutes after registration, `launchd`
+invoked the app binary with `--sync` and the log recorded
+`sync.skipped … inside the 6h window`. That is the scheduled entry point working
+end-to-end under `launchd`, and the guard doing exactly what it exists for — `launchd`
+fires on wake as well as on schedule, and a laptop opened five times an hour would
+otherwise do five full passes.
+
 `[prompt 04] THE SYNTHETIC FIXTURE CANNOT EXERCISE INITIATION AT ALL, AND THE NUMBER IT
 PRODUCES IS JUNK IN A WAY THAT LOOKS PLAUSIBLE.` The generator spaces each thread's
 messages **uniformly** — `start + (end - start) * i/n` plus at most an hour of jitter —
@@ -892,6 +1052,28 @@ Forever) rather than reporting `thin` or, worse, computing confident momentum nu
 against a corpus with an invisible floor. Every "first contact" date in this corpus is
 suspect for the same reason: a relationship that started in 2019 reads as starting on
 2025-08-02.
+
+`[prompt 07] NOTARIZATION, DEVELOPER ID SIGNING AND SPARKLE ARE DEFERRED, AS THE PROMPT
+DIRECTS. What ships is a working app that is not distributable, and that is the correct
+outcome for this round.` All three need a paid Apple Developer account and none can be
+verified against the foundation.
+
+`build-app.sh` **ad-hoc signs** (`codesign --sign -`), which is enough for TCC to
+identify the bundle on this machine and not enough to hand to anyone else: Gatekeeper
+will refuse it on a second Mac, and there is no update channel.
+
+What that defers, so the next round starts from a list rather than a surprise:
+
+- **Developer ID + notarization** are the gate on the bundle running anywhere else at
+  all, and the FDA flow in this prompt is unverifiable on another machine until then.
+- **Sparkle** is where CONTRACTS § 11 item 10 finally gets answered — does an FDA grant
+  survive an auto-update? — and the answer cannot be measured before there is an update
+  to ship. The fleet-wide heartbeat alarm requested from Track D above is what makes that
+  unknown survivable in the meantime, which is why it ships now rather than then.
+- **Ad-hoc signing changes the bundle's cdhash on every rebuild.** On this machine that
+  meant re-granting FDA after a rebuild during development. A Developer ID signature is
+  stable across builds and removes that; it is worth knowing the dev-loop friction is an
+  artefact of ad-hoc signing and not of the design.
 
 `[prompt 03] Real-blob test needs a local fixture and will fail on a machine without it.`
 Flagged explicitly because prompt 03 asks for it to be. The five real blobs live in

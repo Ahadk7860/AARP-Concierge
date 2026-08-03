@@ -63,9 +63,21 @@ public struct ContactResolver: Sendable {
     /// caller refuses to build rather than inventing a salt.
     public static func developmentSalt(
         environment: [String: String] = ProcessInfo.processInfo.environment,
-        searchingFrom directory: String = FileManager.default.currentDirectoryPath
+        searchingFrom directory: String = FileManager.default.currentDirectoryPath,
+        installedConfig: String? = SyncRun.Paths.installed().stateDirectory
     ) -> String? {
         if let value = environment[developmentSaltVariable], !value.isEmpty { return value }
+        // The installed app's own config file, checked before the source tree and read
+        // exactly rather than searched upward: `launchd` starts a job with a working
+        // directory of `/`, so walking up from the cwd finds nothing at all for a
+        // scheduled run. Dev stand-in only — the real salt arrives from `POST /v1/pair`
+        // and belongs in the Keychain.
+        if let installedConfig,
+           let value = DotEnv.value(of: developmentSaltVariable,
+                                    inFile: URL(fileURLWithPath: installedConfig)
+                                        .appendingPathComponent(DotEnv.fileName).path) {
+            return value
+        }
         return DotEnv.value(of: developmentSaltVariable, searchingFrom: directory)
     }
 

@@ -63,9 +63,18 @@ public struct Redactor: Sendable {
         ("email", #"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"#, placeholder),
         ("money", #"[$£€]\s?\d[\d,]*(\.\d{1,2})?(?i:\s?(k|m|bucks|dollars))?"#, placeholder),
         ("money_worded", #"(?i)\b\d[\d,]*(\.\d{1,2})?\s?(dollars|bucks|usd)\b"#, placeholder),
-        // Phone numbers, in the shapes people actually type them. Ten or more digits
-        // with any of the usual separators, or an explicit country code.
-        ("phone", #"(\+\d{1,3}[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}\b"#, placeholder),
+        // A long unbroken digit run — an order number, a tracking number, a verification
+        // code. Redacted wholesale and BEFORE the phone rule, which is what keeps that
+        // rule idempotent: matched on a 20-digit run, `phone` consumes the last ten and
+        // leaves the first ten sitting against the placeholder, where a word boundary now
+        // exists that did not before, so the next pass matches again. Found on the real
+        // corpus by `boi-cli redaction-selftest` — 4 messages in 30,399, and every
+        // hand-written test message missed it.
+        ("long_digit_run", #"(?<!\d)\d{11,}(?!\d)"#, placeholder),
+        // Phone numbers, in the shapes people actually type them. Bounded by lookarounds
+        // rather than `\b` so a match can never be adjacent to more digits.
+        ("phone", #"(?<!\d)(\+\d{1,3}[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}(?!\d)"#,
+         placeholder),
         // Street addresses. The number-then-words shape, case-insensitive because the
         // corpus is lowercase.
         ("street", #"(?i)\b\d{1,5}\s+([A-Za-z0-9'.-]+\s+){0,3}"#
@@ -84,8 +93,28 @@ public struct Redactor: Sendable {
             return (entry.name, regex, entry.replacement)
         }
 
-    /// Redacts one string. Idempotent: running it twice changes nothing the second time.
+    /// How many times the whole pattern set may be re-applied before giving up.
+    ///
+    /// Belt and braces on top of individually idempotent patterns: replacing text can
+    /// create adjacencies that did not exist before, and a future pattern that does so
+    /// must not be able to turn `containsSpecifics` into a permanent false alarm. Three
+    /// is generous — every case seen on the real corpus converges on the second pass.
+    static let maximumPasses = 3
+
+    /// Redacts one string. **Idempotent** — running it again changes nothing, which
+    /// matters because `containsSpecifics` is defined as "redaction would change this"
+    /// and the serializer refuses to write a pack that reports specifics.
     public func redact(_ text: String) -> String {
+        var result = text
+        for _ in 0..<Self.maximumPasses {
+            let before = result
+            result = onePass(result)
+            if result == before { break }
+        }
+        return result
+    }
+
+    private func onePass(_ text: String) -> String {
         var result = text
         for entry in Self.compiled {
             let range = NSRange(result.startIndex..., in: result)
@@ -93,8 +122,22 @@ public struct Redactor: Sendable {
                                                           withTemplate: entry.replacement)
         }
         result = redactKnownNames(in: result)
-        return result.replacingOccurrences(of: "  ", with: " ")
+        return Self.collapseWhitespace(result)
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Every run of whitespace becomes one space, in a single pass.
+    ///
+    /// **THIS HAS TO BE IDEMPOTENT AND THE OBVIOUS VERSION IS NOT.** Replacing `"  "`
+    /// with `" "` leaves a double space behind on any run of four, so a second pass
+    /// changes the string again — which made `containsSpecifics`, defined as "redaction
+    /// would change this", report a leak on text that had nothing to redact. Caught by
+    /// running against a real 94k corpus, where runs of spaces and embedded newlines are
+    /// ordinary; every synthetic test message had single spaces and none of them saw it.
+    static func collapseWhitespace(_ text: String) -> String {
+        guard let regex = try? NSRegularExpression(pattern: #"\s+"#) else { return text }
+        return regex.stringByReplacingMatches(
+            in: text, range: NSRange(text.startIndex..., in: text), withTemplate: " ")
     }
 
     /// Case-insensitive, on word boundaries, longest name first.
@@ -116,6 +159,25 @@ public struct Redactor: Sendable {
     /// remove. Used as an assertion at the serializer, not as a substitute for redacting.
     public func containsSpecifics(_ text: String) -> Bool {
         redact(text) != text
+    }
+
+    /// Which named pattern still fires on an already-redacted string, if any.
+    ///
+    /// Diagnostic for exactly one failure mode: a pattern that is not idempotent, so the
+    /// serializer's guard refuses a pack that is in fact clean. Returns the pattern's
+    /// **name** and never the text, so it is safe to log — see
+    /// `boi-cli redaction-selftest`.
+    public func nonIdempotentPattern(_ text: String) -> String? {
+        for entry in Self.compiled {
+            let range = NSRange(text.startIndex..., in: text)
+            let after = entry.regex.stringByReplacingMatches(in: text, range: range,
+                                                             withTemplate: entry.replacement)
+            if after != text { return entry.name }
+        }
+        if redactKnownNames(in: text) != text { return "known_name" }
+        if Self.collapseWhitespace(text) != text { return "whitespace" }
+        if text.trimmingCharacters(in: .whitespacesAndNewlines) != text { return "trim" }
+        return nil
     }
 }
 

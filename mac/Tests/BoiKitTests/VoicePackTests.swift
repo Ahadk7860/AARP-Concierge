@@ -45,11 +45,29 @@ final class RedactionTests: XCTestCase {
                       "if this now passes, name coverage improved — widen the claim in NOTES.md")
     }
 
-    /// A redactor that rewrote its own output would make `voice_pack_version` unstable.
-    func testRedactionIsIdempotent() {
+    /// A redactor that rewrote its own output would make `voice_pack_version` unstable —
+    /// and worse, `containsSpecifics` is defined as "redaction would change this", so a
+    /// non-idempotent redactor reports a leak on text that has nothing to leak.
+    ///
+    /// **The whitespace cases are here because the real corpus found them and every
+    /// synthetic message missed them.** Replacing `"  "` with `" "` leaves a double
+    /// space behind on a run of four, so the second pass differs from the first and the
+    /// serializer refuses to write a perfectly clean pack. Runs of spaces and embedded
+    /// newlines are ordinary in real messages and absent from every hand-written one.
+    func testRedactionIsIdempotentIncludingOnWhitespaceRuns() {
         let redactor = Redactor(knownNames: ["Maya Ortiz"])
-        let once = redactor.redact("maya ortiz owes me $40, text her at 555-010-0001")
-        XCTAssertEqual(redactor.redact(once), once)
+        for input in ["maya ortiz owes me $40, text her at 555-010-0001",
+                      "four    spaces here",
+                      "five     spaces here",
+                      "a\nnewline\nand   spaces",
+                      "trailing   ",
+                      "\t\ttabs\t\there",
+                      "ok that works for me"] {
+            let once = redactor.redact(input)
+            XCTAssertEqual(redactor.redact(once), once, "not idempotent on \(input.debugDescription)")
+            XCTAssertFalse(redactor.containsSpecifics(once),
+                           "\(once.debugDescription) reports a leak after redaction")
+        }
     }
 
     func testOrdinaryTextIsLeftAlone() {

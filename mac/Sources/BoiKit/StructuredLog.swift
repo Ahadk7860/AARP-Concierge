@@ -46,6 +46,39 @@ public enum StructuredLog {
                             level: Level = .info,
                             at date: Date = Date(),
                             fields: [String: Any] = [:]) {
-        print(line(event, level: level, at: date, fields: fields))
+        let line = line(event, level: level, at: date, fields: fields)
+        print(line)
+        append(line)
+    }
+
+    /// An optional file sink, in addition to stdout — never instead of it.
+    ///
+    /// A GUI app launched from the Finder and a job launched by `launchd` both have a
+    /// stdout that goes nowhere anybody will look. The permission flow in prompt 07 is
+    /// only auditable if it leaves a timestamped record on disk, and "did the relaunch
+    /// happen inside two seconds" is not a question a screenshot can answer.
+    ///
+    /// Message bodies never appear here, same as stdout: counts, ids and hashes only.
+    public static func setFileSink(_ url: URL?) {
+        queue.sync { sink = url }
+    }
+
+    private static let queue = DispatchQueue(label: "app.boi.mac.log")
+    private nonisolated(unsafe) static var sink: URL?
+
+    private static func append(_ line: String) {
+        queue.sync {
+            guard let sink else { return }
+            try? FileManager.default.createDirectory(
+                at: sink.deletingLastPathComponent(), withIntermediateDirectories: true)
+            guard let data = (line + "\n").data(using: .utf8) else { return }
+            if let handle = try? FileHandle(forWritingTo: sink) {
+                defer { try? handle.close() }
+                _ = try? handle.seekToEnd()
+                try? handle.write(contentsOf: data)
+            } else {
+                try? data.write(to: sink, options: .atomic)
+            }
+        }
     }
 }

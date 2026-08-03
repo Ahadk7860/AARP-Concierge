@@ -293,6 +293,152 @@ case "digest":
         exit(1)
     }
 
+case "agent-plist":
+    // THE SINGLE SOURCE OF TRUTH for the LaunchAgent. `build-app.sh` calls this rather
+    // than embedding its own copy, so the plist that ships inside the bundle and the one
+    // the suite checks cannot drift apart — which is exactly how a plist ends up naming
+    // a helper, or a calendar trigger, months after a test said it did not.
+    guard let binaryPath = value("binary") else { fail(usage) }
+    let xml = LaunchAgentPlist.xml(
+        binaryPath: binaryPath,
+        intervalSeconds: value("interval").flatMap(Int.init) ?? SyncRun.defaultIntervalSeconds,
+        logDirectory: value("log-directory"))
+    let problems = LaunchAgentPlist.problems(inXML: xml)
+    guard problems.isEmpty else {
+        fail("refusing to emit a LaunchAgent plist with problems:\n  "
+             + problems.joined(separator: "\n  "))
+    }
+    print(xml)
+
+case "voice-pack-provenance":
+    // Answers the question `scripts/check_voice_pack_leak.py` cannot answer on a real
+    // corpus: does every exemplar in this pack come from a row the user WROTE?
+    //
+    // Guard three compares against `chat.db`'s `text` column, and on this Mac only 9,940
+    // of 30,998 sent rows have one — the other 21,047 carry their text in
+    // `attributedBody`. So a phrase the user really did send is absent from the
+    // checker's "sent" set, and if anyone ever sent the same common phrase back, it is
+    // reported as a leak. This checks the mirror, which has the decoded text, and so can
+    // tell a real leak from that false positive.
+    //
+    // Counts only. No message text is printed, logged, or written.
+    guard let mirrorPath = value("mirror"),
+          let packArgument = value("pack") ?? value("packs") else { fail(usage) }
+    do {
+        let mirror = try MirrorDatabase(path: mirrorPath)
+
+        func normalize(_ text: String) -> String {
+            text.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        }
+
+        // ONE pass over the mirror, however many packs are being checked. A 94k-row
+        // corpus re-read once per pack turns a 174-pack audit into ten minutes.
+        var sent: Set<String> = []
+        var received: Set<String> = []
+        try mirror.forEachMessage { message in
+            guard let text = message.text, !text.isEmpty else { return }
+            if message.isFromMe { sent.insert(normalize(text)) }
+            else { received.insert(normalize(text)) }
+        }
+
+        var isDirectory: ObjCBool = false
+        _ = FileManager.default.fileExists(atPath: packArgument, isDirectory: &isDirectory)
+        let packPaths: [String]
+        if isDirectory.boolValue {
+            packPaths = ((try? FileManager.default.contentsOfDirectory(atPath: packArgument)) ?? [])
+                .filter { $0.hasSuffix(".json") && $0 != "digest.json" }
+                .sorted()
+                .map { URL(fileURLWithPath: packArgument).appendingPathComponent($0).path }
+        } else {
+            packPaths = [packArgument]
+        }
+
+        var totalExemplars = 0, totalProven = 0, totalRedacted = 0, totalUnproven = 0
+        var packsWithUnproven = 0, alsoInbound = 0
+
+        for path in packPaths {
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+                  let pack = try? JSONDecoder().decode(VoicePack.self, from: data) else { continue }
+            var proven = 0, redacted = 0, unproven = 0
+            for exemplar in pack.exemplars {
+                let key = normalize(exemplar)
+                let inSent = sent.contains(key)
+                let inReceived = received.contains(key)
+                if inSent { proven += 1; if inReceived { alsoInbound += 1 } }
+                else if inReceived { unproven += 1 }
+                else { redacted += 1 }
+            }
+            totalExemplars += pack.exemplars.count
+            totalProven += proven
+            totalRedacted += redacted
+            totalUnproven += unproven
+            if unproven > 0 {
+                packsWithUnproven += 1
+                StructuredLog.emit("voice_pack.provenance.unproven", level: .error, fields: [
+                    "pack": path,
+                    "contact_id": pack.contact_id ?? "null",
+                    "traceable_to_inbound_only": unproven,
+                ])
+            }
+        }
+
+        StructuredLog.emit("voice_pack.provenance",
+                           level: totalUnproven == 0 ? .info : .error, fields: [
+            "packs": packPaths.count,
+            "exemplars": totalExemplars,
+            // Provably from a row the mirror records as is_from_me = 1.
+            "proven_sent": totalProven,
+            // Rewritten by redaction, so no verbatim match exists anywhere. Expected.
+            "redacted_beyond_verbatim_match": totalRedacted,
+            // THE ONLY BUCKET THAT IS A LEAK.
+            "traceable_to_inbound_only": totalUnproven,
+            "packs_with_unproven": packsWithUnproven,
+            // Sent by the user AND also said back to them. This is the bucket guard
+            // three misreports, because chat.db's text column holds only a third of the
+            // sent rows and the rest live in attributedBody.
+            "sent_and_also_seen_inbound": alsoInbound,
+        ])
+        if totalUnproven > 0 { exit(1) }
+    } catch {
+        StructuredLog.emit("voice_pack.provenance.failed", level: .error,
+                           fields: ["detail": "\(error)"])
+        exit(1)
+    }
+
+case "redaction-selftest":
+    // Asserts redaction is IDEMPOTENT across a whole real corpus, and names the pattern
+    // when it is not. This is the check that would have caught the whitespace-collapse
+    // bug before it reached a run: every synthetic test message had single spaces, and
+    // the real corpus is full of runs and embedded newlines.
+    //
+    // Counts and pattern names only. No message text is printed, logged, or written.
+    guard let mirrorPath = value("mirror") else { fail(usage) }
+    do {
+        let mirror = try MirrorDatabase(path: mirrorPath)
+        let redactor = Redactor(directory: AddressBookDirectory.discover() ?? .empty)
+        var total = 0, offenders = 0
+        var byPattern: [String: Int] = [:]
+        try mirror.forEachSentMessage { message in
+            guard let text = message.text, !text.isEmpty else { return }
+            total += 1
+            let once = redactor.redact(text)
+            guard redactor.redact(once) != once else { return }
+            offenders += 1
+            byPattern[redactor.nonIdempotentPattern(once) ?? "unknown", default: 0] += 1
+        }
+        StructuredLog.emit("redaction.selftest", level: offenders == 0 ? .info : .error, fields: [
+            "sent_messages_with_text": total,
+            "not_idempotent": offenders,
+            "by_pattern": byPattern,
+        ])
+        if offenders > 0 { exit(1) }
+    } catch {
+        StructuredLog.emit("redaction.selftest.failed", level: .error,
+                           fields: ["detail": "\(error)"])
+        exit(1)
+    }
+
 case "health":
     guard let mirrorPath = value("mirror") else { fail(usage) }
     guard let salt = ContactResolver.developmentSalt() else {
