@@ -322,7 +322,7 @@ amendment.
 `npm run e2e` takes an empty database to a sent message. The pipe has now been executed
 end to end; before this the count was zero.
 
-### GAP 5: the card reaches the brief and stops
+### GAP 5: the card reaches the brief and stops — *closed below, kept as found*
 
 `composeBrief` sets `brief.card_url` and **`deliverBrief` never reads it.** Confirmed on
 a real run: the stored `brief.v1` carries
@@ -342,6 +342,79 @@ whether the card rides the lead message or a second one.
 *(Found only because the artifact was fixed: the first version wrote the tick's return
 value to `brief.json` — three counters — which has no card field to be empty. An artifact
 that cannot show a defect is not evidence.)*
+
+### GAP 5, CLOSED — the card now reaches the channel
+
+`deliver.ts` was granted to this track by the user for this fix and nothing else
+(`scripts/check-ownership.sh`'s `e)` case gains `deliver`), and prompt `04`'s DoD line was
+rewritten at the same time: **assert over the blocks `StubChannel` received, never over
+`brief.card_url`.** The old wording was satisfied by the run that found the gap.
+
+`leadBlocks` gained a `Capabilities` argument and emits one `image` block. Three decisions,
+each of which could have gone the other way:
+
+- **On the lead, not a second message.** The card is the framing of the whole brief, and a
+  second message is a second notification for one morning.
+- **After the caveat, before the framing line.** After, because a report card built from a
+  four-day-old corpus is exactly the confident wrong answer the staleness warning exists to
+  precede. Before, because the framing line leads into the items — and on an unthreaded
+  transport the items are concatenated onto this same message, so a card appended at the
+  end would land between "3 people worth a message today:" and the first person.
+- **Gated on `capabilities.images`.** A transport that cannot carry an image gets no card
+  and no substitute. A bare URL in a text block is not a card.
+
+`brief.sent` now logs `card: <bool>`, measured on the lead's blocks rather than on
+`briefs.card_url` — the same fact, on the side where it went missing.
+
+Verified by removing the fix and watching the assertion fail: the lead came back as
+`blocks: [{"type":"text","text":"3 people worth a message today:"}]`, which is exactly what
+the product shipped for the whole of prompt `04`.
+
+### `deliver.ts` cannot tell a refusal card from a report card, and now sends both
+
+A consequence of the fix, found by looking at what actually goes out. `brief.card_url` is a
+URL and nothing else; `kind: standard | refusal` exists only as the `x-boi-card-kind`
+header on the renderer's response, which the card client reads and drops. So on a corpus
+below the renderer's bar the user gets **"not enough history yet" attached to their brief,
+every morning, indefinitely.**
+
+Once, that is a good product — it names a real problem and points at
+`Settings › Messages › Keep Messages`, which is the one-tap remedy CONTRACTS § 6 asks for.
+Daily, it is a reproach. **Not fixed here**: the composer cannot see the kind, so this is a
+`brief.v1` question (a `card_kind` alongside `card_url`) rather than a `deliver.ts` one, and
+the grant is for the missing edge only. Flagged as the first thing to decide before a
+refusal card is ever sent to a real person in `05`.
+
+### The three unasserted criteria, now asserted
+
+`cloud/e2e/src/e2e.test.ts` drives the real `runEndToEnd` — the same code path `npm run
+e2e` runs, not a reimplementation of it — and each of its four tests was **verified to fail**
+by breaking the thing it measures:
+
+| Test | Falsified by | Failure seen |
+|---|---|---|
+| the card reaches the channel as an `image` block | disabling the `leadBlocks` push | `expected +0 to be 1` |
+| one `contact_id` across digest, gists, drafts, brief | perturbing the gist key | `no gist for h_f3bc915f35a84e04` |
+| two runs send once | dropping `reuseScope`, so the second run is a fresh account | `expected 'sent' to be 'already_sent'` |
+| renderer down → `card_url: null`, brief still sends | dropping `withoutCard`, so the renderer is up | `expected 'file:///…' to be null` |
+
+The idempotency test is worth reading closely because the cheap version of it is a lie: the
+second run does a **complete** second pass — `boi-cli sync-run`, a second digest upload, a
+second gist and draft production — and is stopped only at `briefForSlot`. Asserting on a
+fresh channel's `sent.length` alone would pass for a run that never reached delivery at all,
+so it also asserts the `messages_out` rows are byte-identical before and after.
+
+`E2EResult` gained `outbound`, `briefs`, `gists` and `drafts` so those assertions read what
+the channel received rather than re-parsing the artifact files. Same reason the artifact was
+changed to the real brief document: the assertion has to be able to see the defect.
+
+### What the gate caught the moment it was finally run
+
+`b3229cc` was **lint-red**, and had been since it was written: `cloud/e2e/src/run.ts`
+imported `closePool` and never called it (`main.ts` owns the pool's lifetime). One unused
+import is nothing on its own; what it demonstrates is that a prompt's work was committed and
+reported without `npx eslint .` ever having been run over it, which is the whole argument for
+running `gate.sh` at the boundary rather than at the end. Removed.
 
 ### The card is a REFUSAL card on the synthetic corpus
 

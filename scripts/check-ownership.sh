@@ -22,7 +22,7 @@ case "$LETTER" in
   # The narrow call-site edits in SyncRun.swift, main.swift, run.ts and compose.ts are
   # listed here by name because "may edit one line of" is not a thing a path regex can
   # express. Reviewing the diff of those four files by eye is part of the merge.
-  e) OWNED='^(cloud/(intelligence-bridge|e2e)/|cloud/channel/src/spectrum-[a-z-]+\.ts$|cloud/channel/test/spectrum-[a-z-]+\.test\.ts$|mac/Sources/BoiKit/(Uploader|UploadQueue)\.swift$|mac/Tests/BoiKitTests/Uploader.*Tests\.swift$|mac/Sources/BoiKit/SyncRun\.swift$|mac/Sources/BoiCLI/main\.swift$|cloud/brief/src/(run|compose)\.ts$)' ;;
+  e) OWNED='^(cloud/(intelligence-bridge|e2e)/|cloud/channel/src/spectrum-[a-z-]+\.ts$|cloud/channel/test/spectrum-[a-z-]+\.test\.ts$|mac/Sources/BoiKit/(Uploader|UploadQueue)\.swift$|mac/Tests/BoiKitTests/Uploader.*Tests\.swift$|mac/Sources/BoiKit/SyncRun\.swift$|mac/Sources/BoiCLI/main\.swift$|cloud/brief/src/(run|compose|deliver)\.ts$)' ;;
   *) echo "unknown track: $LETTER" >&2; exit 2 ;;
 esac
 

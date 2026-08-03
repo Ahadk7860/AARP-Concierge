@@ -18,13 +18,18 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
+import type {
+  Brief,
+  DraftBundle,
+  Gist,
+  OutboundMessage,
+} from "../../shared/src/index.js";
 import { StubChannel } from "../../shared/src/index.js";
 import { buildServer } from "../../api/src/server.js";
 import { buildCardServer } from "../../card/src/server.js";
 import { runForUser } from "../../brief/src/run.js";
 import { bridgeDeps, gistOutcomeFor, draftsForGists } from "../../intelligence-bridge/src/index.js";
 import {
-  closePool,
   createUser,
   issuePairingCode,
   latestDigest,
@@ -65,6 +70,20 @@ export type E2EResult = {
   cardUrl: string | null;
   briefItems: number;
   status: string;
+  /**
+   * **What `StubChannel` received**, not what was stored.
+   *
+   * The distinction is the whole of gap 5: the stored brief carried a `card_url` that
+   * resolved, and the blocks the channel got contained no card at all. Anything asserting
+   * on the product's output has to assert here — an artifact that cannot show the defect
+   * is not evidence.
+   */
+  outbound: OutboundMessage[];
+  /** The stored `brief.v1` documents, for the assertions that really are about storage. */
+  briefs: Brief[];
+  /** The gists and drafts as the bridge produced them, for the `contact_id` join. */
+  gists: Gist[];
+  drafts: DraftBundle[];
 };
 
 export type E2EOptions = {
@@ -275,6 +294,10 @@ export async function runEndToEnd(options: E2EOptions = {}): Promise<E2EResult> 
       cardUrl,
       briefItems: outboundRows.length,
       status: outcome.status,
+      outbound: channel.sent,
+      briefs: storedBriefs.map((b) => b.payload),
+      gists: gistOutcome.gists,
+      drafts: [...drafts.values()],
     };
   } finally {
     await api.close();
