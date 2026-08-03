@@ -33,3 +33,9 @@ chat.db-shm
 
 # Bootstrap artifact
 .bootstrap.tar.gz
+
+# Pass 1 review evidence. Written by scripts/review-capture.sh into the worktree root,
+# handed to the other two review passes, and never committed -- it is a snapshot of one
+# machine at one moment, not a project artifact. Tracks A-D all left theirs untracked;
+# this rule makes that the default rather than a thing each track has to remember.
+review-capture-*.md

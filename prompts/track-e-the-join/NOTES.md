@@ -8,6 +8,7 @@ ambiguity found, and every place a prompt's stated assumption turned out to be w
 | Prompt | File | What | Why it could not be track-local |
 |---|---|---|---|
 | 01 | — | none | `BOI_API_BASE` already existed in `.env.example`; see the first row of "Prompt assumptions that were wrong". Two new variables are read but neither is appended — see "Open". |
+| review | `.gitignore` | Appended `review-capture-*.md`, with a comment saying why. Append only. | `review-capture-e.md` was committed in `9f2d2b8` and `check-ownership.sh e` correctly called it `OUT OF BOUNDS` — Tracks A–D all left theirs untracked, but nothing enforced that. The file is a snapshot of one machine at one moment, not a project artifact, and it is still on disk for the reviewers; only the tracking is gone. Foundation defect rather than a track one: the rule should always have been there, and this makes it the default instead of something each track has to remember. |
 | review | `scripts/review-capture.sh` | Appended an `e)` case to the track switch, an `e)` line to the interpreter `require` switch, and `e` to the usage string. Nothing reordered or removed. | **The script had no case for `e` and exited 2 on `unknown track: e`.** Track E was added to `gate.sh` and `check-ownership.sh` but not to this one, so Pass 1 could not run at all. The commands mirror `gate.sh`'s `e` case exactly — all four toolchains — rather than inventing a narrower suite. Flagged for the reviewer: **this is the working agent editing the script that captures evidence about its own work**, which is not ideal. The change is a copy of an existing case and is the smallest thing that makes Pass 1 possible; read it first. |
 | 02 | `.env.example` | Appended a `# ---- Track E: the join ----` block: `BOI_CORPUS_DB`, `BOI_CORPUS_DIR`, `BOI_PYTHON`, `BOI_INTEL_TIMEOUT_MS`. Append only; nothing reordered or removed. | The bridge cannot run without a corpus path and cannot pick an interpreter safely without one being nameable. The corpus variables carry a comment saying they are the seam that should not exist in production, so nobody reads them as the intended topology. Unlike the prompt-01 token variables these are paths, not secrets, so a named-but-empty value does not read as "configured somewhere else". |
 
@@ -183,6 +184,29 @@ defects were in code the working agent had already called correct.
 | `Uploader.Result.leavesQueue` | **`--dry-run` deleted the queue.** `leavesQueue` was `isTerminal`, and `.dryRun` is terminal — so a `--sync --dry-run` over a queue holding days of undelivered digests dequeued every one without sending a byte. The flag whose entire promise is "uploads nothing" destroyed the backlog instead. | Both dry-run tests started from an **empty** queue, where `depth() == 0` is satisfied just as well by a wiped queue as by an untouched one. |
 | `Uploader.dispatch` | **`(try? queue.due(now:)) ?? []` turned an unreadable queue into a clean report and exit 0** — the "silent success on a failed upload" prompt 01 exists to catch, arriving through the queue instead of the socket. The swallowed `try? queue.enqueue(…)` calls were worse: they incremented `report.queued` while nothing was written, so `Deferred` announced "3 queued" over an empty directory. | Nothing exercised a queue that could not be written. `dispatch` now `throws`, and `QueueUnavailable` is deliberately **not** a `Deferred` — `Deferred` promises a retry that only exists if the queue does. |
 | `bridge.ts` `gistsFor` | **A dead bridge rendered to the user as a quiet week**, and `pipeline.test.ts` asserted that was correct. The `no_answer` / `nothing_to_say` distinction was built and then discarded one line later by `(await gistOutcomeFor(…)).gists`. | The criterion said "reported as `no_answer`, distinctly from `nothing_to_say`" and the *outcome type* satisfied it. Nothing required the distinction to reach anybody. Fixed with `BridgeConfig.onDegraded`, fired for `no_answer` / `timed_out` / `unavailable` and never for `nothing_to_say` — invisible to the composer by design, loud to an operator. |
+
+### The ordering trap: a green gate can be invalidated by the thing that measured it
+
+**`gate.sh` runs, then `review-capture.sh` writes a file into the worktree root, so
+committing that file changes `git diff main...HEAD` after the gate that approved it.**
+The gate was genuinely green when it ran and genuinely red afterwards, and nothing in
+between looked like a mistake — `git add -A` swept up an artifact that had not existed
+when ownership was last checked.
+
+It is a sequencing hazard rather than a one-off slip, and it generalises: **any command
+that produces a file in a checked path invalidates a check that already passed.** The
+capture script is the obvious case because its whole job is to run last, but a coverage
+report, a profile dump or a generated fixture would do the same.
+
+Two things make it not recur. The `.gitignore` append above removes this instance
+permanently. The general rule is the one worth carrying: **the gate is only valid for
+the tree that existed when it ran** — so re-run it after anything that writes to the
+worktree, and never let `git add -A` be the last thing between a gate and a commit
+without looking at what it staged.
+
+*(Found by the user at review, not by this track. `check-ownership.sh` caught it exactly
+as designed; the working agent ran the gate before creating the file and then trusted a
+result that no longer described the tree.)*
 
 ### The tests that could not fail
 
