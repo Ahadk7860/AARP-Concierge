@@ -368,6 +368,18 @@ means prompt `01`'s live evidence run could not disturb Track D's fixtures.
   `unanswered_question` — and all three are **metadata rather than content**, so they
   cross the T0 boundary without carrying anybody's words. That is a much smaller change
   than a new ingest route and a Mac-side producer, and it leaves the gist producer where
-  it can reach a corpus. The user is writing the amendment. Until it lands,
-  `BOI_CORPUS_DB` stays and so does the comment at the top of `bridge.ts`; **prompt `03`
-  must label the topology provisional in the seam report.**
+  it can reach a corpus.
+
+  **Landed as AMENDMENT-001 in `03`, and it was FOUR fields rather than three** — the
+  user's correction: `facts` is needed too, by `sql_gist_text` and `deadline_for`, and
+  it is the one carrying content-derived tokens. Acceptable because `gist.v1.facts` is
+  already documented as crossing the digest boundary under a 3-word / 40-char cap, so
+  moving those tokens into `digest.v1` changes the envelope and not the information.
+
+  ~~Until it lands, `BOI_CORPUS_DB` stays and so does the comment at the top of
+  `bridge.ts`; **prompt `03` must label the topology provisional in the seam
+  report.**~~ **RETIRED at the close of `03`, by the user.** That instruction existed
+  because gists came from a corpus path in the cloud. They do not any more — the path
+  is deleted, `bridge.ts`'s header describes the amendment rather than a seam, and
+  **`04` measures the real topology.** Recorded rather than dropped: an instruction
+  that quietly disappears looks like one that was forgotten.
