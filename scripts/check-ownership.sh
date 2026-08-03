@@ -84,6 +84,11 @@ while IFS= read -r f; do
   [ -z "$f" ] && continue
   if echo "$f" | grep -Eq "$OWNED"; then continue; fi
   if echo "$f" | grep -Eq "$OWN_NOTES"; then continue; fi
+  # The sanctioned-frozen files were announced by the FROZEN block above and then fell
+  # through to OUT OF BOUNDS here, because announcing is not the same as permitting.
+  # That made every sanctioned exception unusable — including the two for prompt 05,
+  # which had not been reached yet.
+  if [ "$LETTER" = "e" ] && echo "$f" | grep -Eq "$ALLOWED_FROZEN"; then continue; fi
   if [ "$LETTER" = "e" ] && echo "$f" | grep -Eq "$AMENDMENT_001"; then
     echo "AMENDMENT-001 (another track's file, granted by the amendment): $f"
     continue

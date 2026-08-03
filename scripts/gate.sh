@@ -55,6 +55,21 @@ case "$LETTER" in
   e) VITEST_ONLY="npx vitest run --passWithNoTests cloud" ;;
 esac
 
+# A gate is a claim about a commit. Running it over a dirty tree measures something
+# that does not exist in history, and editing the tree WHILE it runs measures two
+# different trees in one report. Track E hit both, twice, having written the rule down
+# in between — which is the argument for enforcing it here rather than in prose.
+if [ -n "$(git --no-optional-locks status --porcelain 2>/dev/null)" ]; then
+  echo "GATE REFUSED — the working tree is dirty."
+  git --no-optional-locks status --porcelain | sed 's/^/  /'
+  echo
+  echo "Commit (or stash) first. A green gate over uncommitted work is not evidence"
+  echo "about any commit, and it is the exact shape of report this project keeps"
+  echo "catching. Set BOI_GATE_ALLOW_DIRTY=1 only if you know why you are doing it."
+  [ "${BOI_GATE_ALLOW_DIRTY:-0}" = "1" ] || exit 2
+  echo "BOI_GATE_ALLOW_DIRTY=1 — continuing, and this report is not evidence."
+fi
+
 FAILED=0
 run () {  # run <label> <command>
   label="$1"; cmd="$2"
