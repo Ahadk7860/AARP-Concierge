@@ -48,12 +48,37 @@ def _table_exists(con: sqlite3.Connection, name: str) -> bool:
     ).fetchone() is not None
 
 
-def load_corpus(path: str, is_mirror: bool) -> tuple[set[str], set[str]]:
+def load_corpus(path: str, flag_says_mirror: bool) -> tuple[set[str], set[str]]:
     con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     con.text_factory = lambda b: b.decode("utf-8", errors="replace")
 
     if not _table_exists(con, "message"):
         sys.exit(f"{path}: no `message` table -- is this a chat.db or a Boi mirror?")
+
+    # DERIVE what the file IS; do not trust which flag was typed. Corrected 3 Aug.
+    #
+    # This used to be `is_mirror = bool(args.mirror)`, so the same chat.db gave two
+    # answers: --db refused it, --mirror cleared it. Defeating the guard required no ill
+    # intent at all -- just re-running the check and pointing the new flag at the path
+    # already in your shell history. A guard whose safety depends on the operator already
+    # knowing the thing it exists to tell them is not doing much.
+    #
+    # A Boi mirror carries a `mirror_meta` table. A chat.db does not. That is a
+    # structural tell, so the flag becomes documentation of intent and the file becomes
+    # the safety mechanism. Same principle as `from_handle` over `inbound.user_id`:
+    # re-derive rather than trust what you were handed.
+    is_mirror = _table_exists(con, "mirror_meta")
+
+    if flag_says_mirror and not is_mirror:
+        con.close()
+        sys.exit(
+            f"--mirror was given but {path} has no `mirror_meta` table, so it is not a "
+            f"Boi mirror.\nRefusing rather than checking against a corpus whose text "
+            f"column may be two thirds empty."
+        )
+    if not flag_says_mirror and is_mirror:
+        print(f"note: {path} is a Boi mirror (mirror_meta present); "
+              f"checking against decoded text.", file=sys.stderr)
 
     if not is_mirror:
         total = con.execute("SELECT count(*) FROM message").fetchone()[0]
@@ -88,6 +113,7 @@ def main() -> None:
     src = ap.add_mutually_exclusive_group(required=True)
     src.add_argument("--mirror", help="Boi local mirror -- decoded text, the correct input")
     src.add_argument("--db", help="raw chat.db -- refused when its NULL-text share is high")
+    # Both flags are advisory. What the file IS decides, not which flag you typed.
     ap.add_argument("--pack", required=True)
     a = ap.parse_args()
 
@@ -97,7 +123,7 @@ def main() -> None:
         print("OK -- pack has no exemplars")
         return
 
-    sent, received = load_corpus(a.mirror or a.db, is_mirror=bool(a.mirror))
+    sent, received = load_corpus(a.mirror or a.db, flag_says_mirror=bool(a.mirror))
 
     leaked = [e for e in exemplars if e in received and e not in sent]
     unknown = [e for e in exemplars if e not in sent and e not in received]
