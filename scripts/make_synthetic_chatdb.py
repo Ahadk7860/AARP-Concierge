@@ -214,6 +214,29 @@ def build(out: pathlib.Path, seed: int = 7, leave_wal_open: bool = True,
                 stats["tapbacks"] += 1
                 stats["messages"] += 1
 
+    # A TAPBACK THE USER SENT, quoting the other person. is_from_me = 1, and the body
+    # carries their sentence verbatim. This is the case that defeats every guard except
+    # an explicit tapback filter: the redaction scan sees no PII in it, and the verbatim
+    # leak checker cannot match `Loved "..."` against the message it quotes.
+    #
+    # Until 3 Aug every synthetic tapback was is_from_me = 0 with text = NULL, so no
+    # fixture could produce it and no test could catch it.
+    mguid += 1
+    when = now - timedelta(days=3)
+    cur.execute(
+        """INSERT INTO message
+           (guid, text, handle_id, service, date, is_from_me,
+            associated_message_guid, associated_message_type)
+           VALUES (?,?,?,?,?,?,?,?)""",
+        (f"MSG-{mguid:07d}",
+         'Loved \u201cCANARY-INBOUND-PROSE-SHOULD-NEVER-REACH-AN-EXEMPLAR\u201d',
+         1, "iMessage", to_apple_ns(when), 1, "p:0/MSG-0000001", 2000),
+    )
+    cur.execute("INSERT INTO chat_message_join VALUES (?,?,?)",
+                (1, cur.lastrowid, to_apple_ns(when)))
+    stats["messages"] += 1
+    stats["sent_tapbacks_quoting_inbound"] = 1
+
     # one group chat -- style 43. Metrics must exclude these from 1:1 ranking.
     cur.execute(
         "INSERT INTO chat (guid, style, chat_identifier, service_name, display_name) VALUES (?,?,?,?,?)",

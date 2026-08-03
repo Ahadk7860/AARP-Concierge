@@ -453,6 +453,60 @@ canary requirement alone. Any track shipping it must demonstrate the test failin
 the filter removed and passing with it restored. Do not weaken that on the theory that
 two more guards are behind it.
 
+### Guard one is `is_from_me = 1` **AND NOT A TAPBACK** — corrected 3 Aug
+
+`is_from_me = 1` alone does not keep the other person's words out. **A tapback the user
+sent carries `is_from_me = 1` and a body of `Loved "<their sentence>"`** — inbound prose,
+verbatim, inside a row the user genuinely wrote.
+
+Every other layer is blind to it:
+
+- The serializer's re-assertion checks `isFromMe` only. Remove the tapback filter and the
+  pack is written without complaint.
+- **Guard two** finds no PII in `Loved "see you thursday"` and returns `202`.
+- **Guard three** compares verbatim against inbound rows; `Loved "…"` is not byte-equal
+  to the message it quotes, so it passes.
+- **No fixture can generate the case.** `make_synthetic_chatdb.py` emitted every tapback
+  as `is_from_me = 0` with `text = NULL`, so no test could have caught it. Fixed — the
+  generator now produces a user-sent tapback quoting a distinctive inbound string.
+
+So the single most sensitive path in the system was protected by one unasserted, untested
+line that the other two guards could not see. The `is_from_me` canary was satisfied and
+the property it existed to guarantee — *no inbound prose reaches an exemplar* — was not.
+
+**Required, in the query and asserted again at the serializer:**
+
+```sql
+WHERE is_from_me = 1
+  AND COALESCE(associated_message_type, 0) NOT BETWEEN 2000 AND 3999
+```
+
+and a canary that builds a mirror containing a user-sent tapback quoting a distinctive
+inbound string, asserts that string is absent from every exemplar, and is verified to
+fail with the filter removed.
+
+*Note for whoever reads this later:* the tapback filter existed in more than one track as
+a **statistics** guard — tapbacks poison length and burst metrics. Its privacy role was
+incidental and undocumented, which is exactly why a future cleanup would have removed it
+for statistical reasons and taken the last real protection with it.
+
+### Guard three reads the MIRROR, not `chat.db` — corrected 3 Aug
+
+It used to read `chat.db` and build its sent-set from `text IS NOT NULL`. On a real Mac
+only about a third of rows have a `text` column — **9,940 of 30,998** on the corpus that
+found this — because the rest live in `attributedBody`. So a phrase the user genuinely
+sent was missing from the sent-set, and if anyone had ever said the same words back to
+them, the checker called it a leak. **47 of 174 packs flagged, every one a false
+positive.**
+
+That is the ~47%-of-the-corpus trap the typedstream decoder exists to solve, reproduced
+inside the script written to guard the corpus. And a guard that cries wolf on a quarter
+of real users is worse than no guard — it teaches people to ignore it, which is exactly
+how the real leak gets waved through.
+
+`--mirror` is now the correct input. Pointed at a raw `chat.db`, the script measures the
+NULL-text share and **refuses** rather than reporting a number it cannot stand behind.
+
 ### What guard three does and does not do
 
 `scripts/check_voice_pack_leak.py` compares exemplars against inbound messages
