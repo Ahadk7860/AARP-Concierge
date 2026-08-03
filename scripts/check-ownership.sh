@@ -45,7 +45,12 @@ FROZEN='^(contracts/|prompts/(CONTRACTS|MERGE-POLICY|TRACK-REVIEW|WORKTREE-PROTO
 #
 # The second is deliberately not narrowed to the union — a regex cannot tell a widened
 # union from a deleted field. It is narrowed by review instead: the merge reads the diff.
-ALLOWED_FROZEN='^(contracts/transcripts/spectrum/|cloud/shared/src/contracts\.ts$)'
+ALLOWED_FROZEN='^(contracts/transcripts/spectrum/|cloud/shared/src/contracts\.ts$|contracts/schema/digest\.v1\.json$|contracts/fixtures/digest/|mac/Sources/BoiKit/Contracts\.swift$|intelligence/boi_intel/contracts\.py$)'
+
+# Prompt 03 (AMENDMENT-001) additionally lets Track E edit the gist producer and the two
+# checkers, which belong to Tracks A and B. Those tracks have merged and stopped, and the
+# amendment names these files explicitly. Not frozen, just not normally track E's.
+AMENDMENT_001='^(mac/Sources/BoiKit/(DigestBuilder|Fact[A-Za-z]*)\.swift$|mac/Tests/BoiKitTests/(Digest|Fact[A-Za-z]*)Tests\.swift$|intelligence/boi_intel/(gist|threads)\.py$|intelligence/tests/test_(gist|threads|facts)\.py$|scripts/(check_voice_pack_leak|validate_fixtures)\.py$|cloud/api/src/(schemas\.ts|schemas\.test\.ts|differential\.test\.ts)$)'
 
 if ! git rev-parse --verify --quiet "$BASE" >/dev/null; then
   echo "cannot resolve base ref '$BASE' — refusing to report a pass I cannot justify" >&2
@@ -79,6 +84,10 @@ while IFS= read -r f; do
   [ -z "$f" ] && continue
   if echo "$f" | grep -Eq "$OWNED"; then continue; fi
   if echo "$f" | grep -Eq "$OWN_NOTES"; then continue; fi
+  if [ "$LETTER" = "e" ] && echo "$f" | grep -Eq "$AMENDMENT_001"; then
+    echo "AMENDMENT-001 (another track's file, granted by the amendment): $f"
+    continue
+  fi
   if echo "$f" | grep -Eq "$SHARED"; then
     echo "SHARED (append-only, must be recorded in NOTES.md): $f"
     continue

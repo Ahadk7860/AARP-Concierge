@@ -246,10 +246,14 @@ case "digest":
         let library = MetricLibrary(resolver: resolver,
                                     options: .init(now: generatedAt, callHistory: calls))
         let result = try library.compute(mirror: mirror)
+        // AMENDMENT-001: the digest now carries the fabrication-gate allowlist.
+        let signals = try FactExtractor.signalsByContact(
+            mirror: mirror, identities: result.relationships.map(\.identity))
         let digest = DigestBuilder(
             resolver: resolver,
             options: .init(generatedAt: generatedAt,
-                           system: systemState(contacts: contacts))).build(from: result)
+                           system: systemState(contacts: contacts),
+                           signalsByContact: signals)).build(from: result)
         let bytes = try DigestBuilder.write(digest, to: outPath)
 
         StructuredLog.emit("digest.complete", at: generatedAt, fields: [

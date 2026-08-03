@@ -54,6 +54,18 @@
         "total_seconds": 7420,
         "initiated_by_user": 5,
         "missed": 1
+      },
+      "last_from_me": false,
+      "max_gap_days": 30,
+      "unanswered_question": true,
+      "facts": {
+        "dates": [
+          "the 14th"
+        ],
+        "times": [],
+        "places": [],
+        "amounts": [],
+        "names": []
       }
     }
   ],

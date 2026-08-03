@@ -846,3 +846,122 @@ final class DigestGuardTests: XCTestCase {
             "this worktree's .env must carry the shared dev salt — copy .env.example")
     }
 }
+
+// MARK: - AMENDMENT-001
+
+/// The four fields the gist producer needs, and the agreement the amendment turns on.
+///
+/// The DoD asks that a digest built from the synthetic corpus carry values that MATCH
+/// what the Python SQL producer computes from the same corpus — asserted, not eyeballed.
+/// That is the whole risk of this amendment in one test: two implementations of the same
+/// statistics, one in Swift over the mirror and one in Python over `chat.db`.
+final class DigestAmendment001Tests: XCTestCase {
+
+    override func setUpWithError() throws {
+        try Fixture.ensureChatDatabase()
+    }
+
+    /// Builds a real digest from the synthetic corpus, the way `sync-run` does.
+    func buildDigest() throws -> (Digest, MirrorDatabase) {
+        let root = "/tmp/boi-a/tests/amendment-\(UUID().uuidString)"
+        try FileManager.default.createDirectory(atPath: root, withIntermediateDirectories: true)
+        let mirror = try MirrorDatabase(path: root + "/mirror.db")
+        let reader = try MessageReader(path: Fixture.chatDatabasePath)
+        _ = try MirrorSync(reader: reader, mirror: mirror).run()
+
+        let salt = "boi-dev-salt-do-not-ship-0001"
+        let resolver = ContactResolver(salt: salt, directory: .empty)
+        let metrics = try MetricLibrary(resolver: resolver, options: .init(now: Date()))
+            .compute(mirror: mirror)
+        let signals = try FactExtractor.signalsByContact(
+            mirror: mirror, identities: metrics.relationships.map(\.identity))
+        let digest = DigestBuilder(resolver: resolver,
+                                   options: .init(generatedAt: Date(), signalsByContact: signals))
+            .build(from: metrics)
+        return (digest, mirror)
+    }
+
+    func testEveryRelationshipCarriesAllFourFields() throws {
+        let (digest, _) = try buildDigest()
+        XCTAssertFalse(digest.relationships.isEmpty)
+        // Required means required: every relationship, not most of them.
+        for relationship in digest.relationships {
+            XCTAssertGreaterThanOrEqual(relationship.max_gap_days, 0)
+            // `facts` is structurally complete even when empty — five lists, always.
+            let facts = relationship.facts
+            XCTAssertEqual(
+                [facts.dates, facts.times, facts.places, facts.amounts, facts.names].count, 5)
+            for token in facts.allTokens {
+                XCTAssertLessThanOrEqual(token.count, 40, token)
+                XCTAssertLessThanOrEqual(token.split(separator: " ").count, 3, token)
+            }
+        }
+    }
+
+    /// **THE AGREEMENT ASSERTION.** Swift's digest vs Python's `ThreadStats`, same corpus.
+    func testTheFourFieldsMatchWhatPythonComputesFromTheSameCorpus() throws {
+        let (digest, _) = try buildDigest()
+
+        let script = """
+            import json, sys
+            sys.path.insert(0, sys.argv[1])
+            from boi_intel import chatdb
+            from boi_intel.threads import load_threads
+            con = chatdb.connect(sys.argv[2])
+            threads = load_threads(con)
+            con.close()
+            salt = sys.argv[3].encode()
+            print(json.dumps({
+                chatdb.contact_id(h, salt): {
+                    "last_from_me": bool(s.last_from_me),
+                    "max_gap_days": int(s.max_gap_days),
+                    "unanswered_question": bool(s.unanswered_question),
+                }
+                for h, s in threads.items()
+            }))
+            """
+        let raw = try FactExtractorTests.run(script, arguments: [
+            Fixture.repositoryRoot.appendingPathComponent("intelligence").path,
+            Fixture.chatDatabasePath,
+            "boi-dev-salt-do-not-ship-0001",
+        ])
+        struct Expected: Decodable {
+            let last_from_me: Bool
+            let max_gap_days: Int
+            let unanswered_question: Bool
+        }
+        let python = try JSONDecoder().decode(
+            [String: Expected].self, from: Data(raw.utf8))
+
+        var compared = 0
+        for relationship in digest.relationships {
+            guard let expected = python[relationship.contact_id] else { continue }
+            compared += 1
+            XCTAssertEqual(relationship.last_from_me, expected.last_from_me,
+                           "last_from_me disagrees for \(relationship.contact_id)")
+            XCTAssertEqual(relationship.unanswered_question, expected.unanswered_question,
+                           "unanswered_question disagrees for \(relationship.contact_id)")
+            XCTAssertEqual(relationship.max_gap_days, expected.max_gap_days,
+                           "max_gap_days disagrees for \(relationship.contact_id)")
+        }
+        // An agreement over zero contacts is not an agreement.
+        XCTAssertGreaterThan(compared, 0, "no contact_id matched between Swift and Python")
+    }
+
+    /// The digest must not become a place message prose can hide.
+    func testNoInboundProseReachesTheDigest() throws {
+        let (digest, mirror) = try buildDigest()
+        var inbound: [String] = []
+        try mirror.forEachMessage { message in
+            guard !message.isFromMe, let text = message.text, text.count >= 12 else { return }
+            inbound.append(text)
+        }
+        XCTAssertGreaterThan(inbound.count, 0)
+
+        let serialized = String(
+            data: try JSONEncoder().encode(digest.relationships), encoding: .utf8)!.lowercased()
+        for message in inbound.prefix(200) where serialized.contains(message.lowercased()) {
+            XCTFail("an inbound message appears verbatim in the digest: \(message.prefix(20))…")
+        }
+    }
+}

@@ -60,6 +60,35 @@ public struct Relationship: Codable, Sendable {
     /// the signal is. Reciprocity (sd 0.034) is not.
     public var momentum_90d: Double
     public var initiation_ratio: Double
+
+    // MARK: AMENDMENT-001 — what the gist producer needs and could not get
+    //
+    // These four exist so `boi_intel.gist` can build a `ThreadStats` from a digest
+    // instead of from a `chat.db`. Before them the producer had to be handed a corpus
+    // path, which put the corpus in the cloud — the one thing the design forbids.
+    //
+    // `momentum` is deliberately absent: `ThreadStats.momentum` is a property over
+    // `messages_last_90d / messages_prior_90d`, and `momentum_90d` above already carries
+    // exactly that ratio.
+
+    /// Who sent the last message before the thread went quiet.
+    ///
+    /// **`classify()` gates `action_needed` on `not last_from_me`,** so without this the
+    /// state the entire daily brief exists to deliver can never be produced — a
+    /// digest-driven producer emits only `fading` and `dormant`, silently. Also the
+    /// largest single term in `priority()`, at +0.35.
+    public var last_from_me: Bool
+    /// The longest silence this thread has ever had. `classify()` gates `revived` on it.
+    public var max_gap_days: Int
+    /// The other person asked something the user has not answered. +0.20 in `priority()`,
+    /// and it selects the specific `sql_gist_text` branches.
+    public var unanswered_question: Bool
+    /// **THE FABRICATION-GATE ALLOWLIST.** Same shape and same rule as `gist.v1.facts`:
+    /// 3 words and 40 characters per token, no verbatim spans, enforced by the same code
+    /// path rather than a second one that can drift. These tokens under these caps were
+    /// already licensed to leave the Mac inside a `gist.v1`; carrying them here changes
+    /// the envelope, not the information.
+    public var facts: Facts
     public var median_reply_latency_s: LatencyPair?
     public var p90_reply_latency_s: LatencyPair?
     public var tapbacks: Tapbacks?
@@ -68,6 +97,33 @@ public struct Relationship: Codable, Sendable {
     public var calls: CallStats?
     public var archetype: Archetype?
     public var as_of: String
+}
+
+/// The fabrication-gate allowlist, identical in shape to `gist.v1.facts`.
+///
+/// Five keys, always present, empty lists allowed — a thread that mentions nothing
+/// specific is a valid and common answer, and the drafter reading an absent key is not a
+/// case anybody should have to handle.
+public struct Facts: Codable, Sendable, Equatable {
+    public var dates: [String]
+    public var times: [String]
+    public var places: [String]
+    public var amounts: [String]
+    public var names: [String]
+
+    public init(dates: [String] = [], times: [String] = [], places: [String] = [],
+                amounts: [String] = [], names: [String] = []) {
+        self.dates = dates
+        self.times = times
+        self.places = places
+        self.amounts = amounts
+        self.names = names
+    }
+
+    public static let empty = Facts()
+
+    /// Every token, for the cap and no-verbatim checks that run over all five lists.
+    public var allTokens: [String] { dates + times + places + amounts + names }
 }
 
 public struct CorpusSummary: Codable, Sendable {

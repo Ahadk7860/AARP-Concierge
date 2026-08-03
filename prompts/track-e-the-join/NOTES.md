@@ -8,9 +8,10 @@ ambiguity found, and every place a prompt's stated assumption turned out to be w
 | Prompt | File | What | Why it could not be track-local |
 |---|---|---|---|
 | 01 | — | none | `BOI_API_BASE` already existed in `.env.example`; see the first row of "Prompt assumptions that were wrong". Two new variables are read but neither is appended — see "Open". |
+| review | `scripts/generate_fact_vocabulary.py` | New script: regenerates `FactVocabulary.swift` from `facts.py` and `redact.py`. Append. | AMENDMENT-001 puts a second fact extractor in Swift, and ~800 vocabulary words copied by hand is the obvious way for the two to stop agreeing. `scripts/` is foundation-owned append-only, so this needs no grant — recorded here per the rule. |
 | review | `.gitignore` | Appended `review-capture-*.md`, with a comment saying why. Append only. | `review-capture-e.md` was committed in `9f2d2b8` and `check-ownership.sh e` correctly called it `OUT OF BOUNDS` — Tracks A–D all left theirs untracked, but nothing enforced that. The file is a snapshot of one machine at one moment, not a project artifact, and it is still on disk for the reviewers; only the tracking is gone. Foundation defect rather than a track one: the rule should always have been there, and this makes it the default instead of something each track has to remember. |
 | review | `scripts/review-capture.sh` | Appended an `e)` case to the track switch, an `e)` line to the interpreter `require` switch, and `e` to the usage string. Nothing reordered or removed. | **The script had no case for `e` and exited 2 on `unknown track: e`.** Track E was added to `gate.sh` and `check-ownership.sh` but not to this one, so Pass 1 could not run at all. The commands mirror `gate.sh`'s `e` case exactly — all four toolchains — rather than inventing a narrower suite. Flagged for the reviewer: **this is the working agent editing the script that captures evidence about its own work**, which is not ideal. The change is a copy of an existing case and is the smallest thing that makes Pass 1 possible; read it first. |
-| 02 | `.env.example` | Appended a `# ---- Track E: the join ----` block: `BOI_CORPUS_DB`, `BOI_CORPUS_DIR`, `BOI_PYTHON`, `BOI_INTEL_TIMEOUT_MS`. Append only; nothing reordered or removed. | The bridge cannot run without a corpus path and cannot pick an interpreter safely without one being nameable. The corpus variables carry a comment saying they are the seam that should not exist in production, so nobody reads them as the intended topology. Unlike the prompt-01 token variables these are paths, not secrets, so a named-but-empty value does not read as "configured somewhere else". |
+| 02, then 03 | `.env.example` | Appended a `# ---- Track E: the join ----` block. **Prompt 03 removed `BOI_CORPUS_DB` and `BOI_CORPUS_DIR` again** — AMENDMENT-001 deleted the seam they configured. `BOI_PYTHON` and `BOI_INTEL_TIMEOUT_MS` remain. | The bridge cannot run without a corpus path and cannot pick an interpreter safely without one being nameable. The corpus variables carry a comment saying they are the seam that should not exist in production, so nobody reads them as the intended topology. Unlike the prompt-01 token variables these are paths, not secrets, so a named-but-empty value does not read as "configured somewhere else". |
 
 ## Contract ambiguities found
 
@@ -232,6 +233,86 @@ result that no longer described the tree.)*
   correct answer.
 
 Each fix was verified by reintroducing the defect and watching the new test fail.
+
+
+## AMENDMENT-001 — prompt 03
+
+The seam prompt `02` was told to build is gone. `grep -rn "BOI_CORPUS" cloud/ intelligence/ .env.example`
+returns nothing, and `gistsFor` produces `action_needed` gists from a digest that arrived
+over HTTP with no corpus reachable from the cloud at all.
+
+### What the amendment's cost line understated, raised before starting
+
+The amendment rejects "move gist production to the Mac" partly because `facts.py` is
+"the worst possible thing to port — 349 lines of regex whose case sensitivity is
+load-bearing — and two implementations that must agree token-for-token." **Carrying
+`facts` in the digest requires that same port**, because `facts` can only be computed
+where the messages are. Option 2 is `facts.py` + four fields; option 1 was `facts.py` +
+`gist.py` + `threads.py` + a route. Still clearly the cheaper call — the decision is
+right — but the "worst possible thing" is incurred, not avoided.
+
+What makes it survivable: in the digest-driven path `facts.py` is **never called**, so
+the two implementations live in disjoint paths rather than racing in production. The
+agreement assertion is a fidelity test of the port, not a live consistency requirement.
+
+### The bug the agreement test caught on its first run
+
+`unanswered_question` was mapped to `metrics.unansweredQuestionsFromThem > 0` — every
+question they ever asked that went unanswered inside a window. `threads.py` means
+something different and narrower: **is the LAST message one of theirs that wants an
+answer.** The two disagree on any thread where they asked something months ago, the user
+never answered *that*, and the conversation moved on. `sql_gist_text` would then render
+"they asked you a question 3 days ago and you have not replied" about a question from
+March — a confident wrong statement about somebody's friend, which is the exact failure
+class `CONTRACTS.md` § 6 puts under "degrade, never fabricate".
+
+`FactExtractor.hasPendingQuestion` now ports the real rule. **This is what the DoD's
+"assert the agreement, do not eyeball it" was for**, and it found a real defect rather
+than confirming a comfortable one.
+
+### A gap in `facts.py`, reproduced rather than fixed
+
+`_lowercase_names` scans with non-overlapping `finditer`, so in `"ask john smith about
+it"` the first match consumes `"ask john"` and `"john smith"` is never considered. A
+lowercase name is found only when the word before it is not itself lowercase-word-shaped
+— which in real texting is most of the time it is *not* found.
+
+It fails **closed**: a name absent from the allowlist is a name the fabrication gate
+refuses to let a draft assert. So it is safe, but `names` covers less than it looks like
+it covers, and `CONTRACTS.md` § 1's "known and bounded" list should say so alongside
+spelled-out numbers and single first names. Not fixed here — prompt `03` moves the
+producer's input, it does not tune the producer. Asserted in
+`FactExtractorTests.testALowercaseNameMidSentenceIsMissed_knownGapNotFixedHere`, which
+also pins that Swift and Python agree about the gap.
+
+### Two structural things worth naming
+
+**The guard rail distorted the code, and I complied instead of saying so.** `FactExtractor`
+and `FactVocabulary` are new files under `mac/Sources/BoiKit/`, which Track E does not
+own, so I folded 805 generated vocabulary words into `DigestBuilder.swift` to satisfy the
+regex. That was the wrong instinct — the user extended the grant and the files are their
+own again. A rule that forces a structure nobody would otherwise choose is a bug in the
+rule.
+
+**Input and output shared a directory, and it turned "fine" into "broken".** The bridge
+wrote `digest.json` into the same workdir the producer writes gists to, so the input came
+back on the read side, failed `gist.v1` validation, and was reported as `no_answer` — a
+healthy user rendered as a broken bridge. Separate directories now.
+
+### `build_gists` is untouched
+
+Verified by extracting the function from `git show main:…` and from `HEAD` and comparing:
+identical. It stays the tested path a Mac-side producer will use if the local-model port
+ever happens.
+
+### What degraded, and is not in the amendment
+
+`gist.topic` is `None` on the digest-driven path. `infer_topic` reads
+`recent_inbound_text`, which is empty by design — the other person's prose does not
+travel. `topic` is optional in `gist.v1` and no gate depends on it, so this is a real but
+bounded loss of colour in the gist string. The amendment names four fields and this
+prompt adds nothing to it; a fifth field carrying a category label would be a separate
+amendment.
 
 ## Runtime resources
 

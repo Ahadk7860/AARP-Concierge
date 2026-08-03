@@ -53,6 +53,18 @@
         "total_seconds": 7420,
         "initiated_by_user": 5,
         "missed": 1
+      },
+      "last_from_me": false,
+      "max_gap_days": 30,
+      "unanswered_question": true,
+      "facts": {
+        "dates": [
+          "the 14th"
+        ],
+        "times": [],
+        "places": [],
+        "amounts": [],
+        "names": []
       }
     },
     {
@@ -88,6 +100,16 @@
         "total_seconds": 1180,
         "initiated_by_user": 1,
         "missed": 0
+      },
+      "last_from_me": true,
+      "max_gap_days": 51,
+      "unanswered_question": false,
+      "facts": {
+        "dates": [],
+        "times": [],
+        "places": [],
+        "amounts": [],
+        "names": []
       }
     },
     {
@@ -123,6 +145,16 @@
         "total_seconds": 48200,
         "initiated_by_user": 19,
         "missed": 7
+      },
+      "last_from_me": true,
+      "max_gap_days": 64,
+      "unanswered_question": false,
+      "facts": {
+        "dates": [],
+        "times": [],
+        "places": [],
+        "amounts": [],
+        "names": []
       }
     },
     {
@@ -158,6 +190,16 @@
         "total_seconds": 0,
         "initiated_by_user": 0,
         "missed": 0
+      },
+      "last_from_me": true,
+      "max_gap_days": 198,
+      "unanswered_question": false,
+      "facts": {
+        "dates": [],
+        "times": [],
+        "places": [],
+        "amounts": [],
+        "names": []
       }
     },
     {
@@ -193,6 +235,16 @@
         "total_seconds": 240,
         "initiated_by_user": 1,
         "missed": 0
+      },
+      "last_from_me": true,
+      "max_gap_days": 98,
+      "unanswered_question": false,
+      "facts": {
+        "dates": [],
+        "times": [],
+        "places": [],
+        "amounts": [],
+        "names": []
       }
     }
   ],

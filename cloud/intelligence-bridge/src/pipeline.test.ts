@@ -40,7 +40,7 @@ function fixture<T>(...parts: string[]): T {
 }
 
 function baseConfig(over: Record<string, unknown> = {}) {
-  return { corpusDb: CORPUS, salt: SALT, provider: "fake", timeoutMs: 60_000, ...over };
+  return { provider: "fake", timeoutMs: 60_000, ...over };
 }
 
 /** 08:00 local in this timezone, which is the only instant the scheduler acts on. */
@@ -273,24 +273,34 @@ describe("the brief, over a real bridge", () => {
   }, 300_000);
 
   it("renders a dead bridge as nothing_to_say to the user AND as an alarm to an operator", async () => {
-    // This test used to assert that `unavailable` rendering as `nothing_to_say` was
-    // correct, full stop. Half of that is right and it is the dangerous half: the
-    // composer must not know why there are no gists, but somebody has to. A bridge that
-    // has been down since Tuesday and a user who had a quiet week are indistinguishable
-    // from the brief, and only one of them is fine.
+    // Half of this is right and it is the dangerous half: the composer must not know why
+    // there are no gists, but somebody has to. A bridge that has been down since Tuesday
+    // and a user who had a quiet week are indistinguishable from the brief.
+    //
+    // AMENDMENT-001 changed how you kill the bridge. There is no corpus path to withhold
+    // any more — the digest is the input and it is always there — so the dead bridge is
+    // now a missing interpreter, which is a real operator failure rather than a
+    // configuration one.
     const scope = await seedThroughTheAPI();
     const channel = new StubChannel();
     const degraded: Array<{ status: string }> = [];
 
-    const outcome = await runForUser(
-      { user_id: scope.user_id, timezone: TZ },
-      {
-        now: eightAmLocal(TZ),
-        channel,
-        // No corpus configured at all.
-        ...bridgeDeps({ onDegraded: (o: { status: string }) => degraded.push(o) } as never),
-      },
-    );
+    const saved = process.env["BOI_PYTHON"];
+    process.env["BOI_PYTHON"] = "/nonexistent/python-that-is-not-here";
+    let outcome;
+    try {
+      outcome = await runForUser(
+        { user_id: scope.user_id, timezone: TZ },
+        {
+          now: eightAmLocal(TZ),
+          channel,
+          ...bridgeDeps({ onDegraded: (o: { status: string }) => degraded.push(o) } as never),
+        },
+      );
+    } finally {
+      if (saved === undefined) delete process.env["BOI_PYTHON"];
+      else process.env["BOI_PYTHON"] = saved;
+    }
 
     // To the user: a quiet morning, never a wrong answer and never a crash.
     expect(outcome.status).toBe("skipped");
@@ -301,5 +311,76 @@ describe("the brief, over a real bridge", () => {
     }
     // To an operator: the actual reason, exactly once for the tick.
     expect(degraded.map((d) => d.status)).toEqual(["unavailable"]);
+  }, 300_000);
+});
+
+// AMENDMENT-001 ----------------------------------------------------------------------
+//
+// The four fields are REQUIRED, and this asserts the ENDPOINT says so rather than only
+// the schema. Accepted-and-degraded is the failure the requirement exists to prevent: an
+// un-updated Mac whose digests validate, and a morning brief that quietly stops
+// containing `action_needed` items with nothing anywhere reporting it.
+//
+// These live here rather than in `cloud/api/src/ingest.test.ts` because that file is
+// Track D's and is not in this amendment's grant. The server is real either way — this
+// posts to one listening on a loopback port, exactly as `seedThroughTheAPI` does.
+describe("POST /v1/digest rejects a digest the gist producer could not use", () => {
+  const FIELDS = ["last_from_me", "max_gap_days", "unanswered_question", "facts"] as const;
+
+  async function postDigest(mutate: (rel: Record<string, unknown>) => void): Promise<number> {
+    const phone = `+1555${Math.floor(Math.random() * 9_000_000 + 1_000_000)}`;
+    const { scope } = await createUser({ phone_e164: phone, timezone: TZ });
+    const deviceId = newDeviceId();
+    const app = buildServer({ channel: new StubChannel() });
+    await app.listen({ port: 0, host: "127.0.0.1" });
+    try {
+      const address = app.server.address();
+      const port = typeof address === "object" && address !== null ? address.port : 0;
+      const base = `http://127.0.0.1:${port}`;
+
+      const code = newPairingCode();
+      await issuePairingCode(scope, { code, ttl_seconds: 600 });
+      const paired = await fetch(`${base}/v1/pair`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ code, device_id: deviceId }),
+      });
+      const { device_token } = (await paired.json()) as { device_token: string };
+
+      const digest = macDigest();
+      digest.user_id = scope.user_id;
+      digest.device_id = deviceId;
+      digest.generated_at = new Date().toISOString();
+      digest.corpus.as_of = digest.generated_at;
+      mutate(digest.relationships[0] as unknown as Record<string, unknown>);
+
+      const response = await fetch(`${base}/v1/digest`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${device_token}` },
+        body: JSON.stringify(digest),
+      });
+      return response.status;
+    } finally {
+      await app.close();
+    }
+  }
+
+  it("accepts a conforming digest, so the rejections below mean something", async () => {
+    expect(await postDigest(() => {})).toBe(202);
+  }, 300_000);
+
+  for (const field of FIELDS) {
+    it(`rejects one missing ${field} with 400`, async () => {
+      expect(await postDigest((rel) => delete rel[field]), `${field} was accepted`).toBe(400);
+    }, 300_000);
+  }
+
+  it("rejects a facts token that is somebody's sentence rather than a fact", async () => {
+    // The cap `gist.v1.facts` holds, held here too. Four capitalised words is the exact
+    // shape that got through when the cap was 60 characters.
+    const status = await postDigest((rel) => {
+      (rel["facts"] as { places: string[] }).places = ["Jenny And Marks Wedding"];
+    });
+    expect(status).toBe(400);
   }, 300_000);
 });

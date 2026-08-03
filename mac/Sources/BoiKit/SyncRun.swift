@@ -144,9 +144,16 @@ public struct SyncRun {
         // whole health check exists to prevent, and writing the file anyway would let a
         // later step pick it up and send it.
         if health.producesReport {
+            // AMENDMENT-001. The allowlist is extracted here, from the mirror, because
+            // `MetricLibrary.Result` deliberately carries no messages — the corpus is
+            // the thing that must not travel. Only `facts` leaves; the messages it was
+            // derived from stay on this machine.
+            let signals = try FactExtractor.signalsByContact(
+                mirror: mirror, identities: metrics.relationships.map(\.identity))
             let built = DigestBuilder(resolver: resolver,
                                       options: .init(userID: identity?.user_id,
-                                                     generatedAt: now, system: system))
+                                                     generatedAt: now, system: system,
+                                                     signalsByContact: signals))
                 .build(from: metrics)
             let digestPath = URL(fileURLWithPath: paths.outputDirectory)
                 .appendingPathComponent("digest.json").path

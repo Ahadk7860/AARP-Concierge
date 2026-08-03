@@ -231,7 +231,9 @@ class SqlGistProducer:
         return True
 
     def produce(self, contact_id: str, stats: ThreadStats, state: str, as_of: str) -> dict:
-        facts = extract_facts(stats.recent_inbound_text)
+        # AMENDMENT-001: prefer the allowlist the Mac already extracted. On the chat.db
+        # path `stats.facts` is None and this re-extracts from the tail, unchanged.
+        facts = stats.facts if stats.facts is not None else extract_facts(stats.recent_inbound_text)
         topic = infer_topic(stats.recent_inbound_text)
         deadline = deadline_for(stats, facts)
 
@@ -450,6 +452,91 @@ def select_producer(model_id: str | None = None) -> tuple[GistProducer, str | No
 # --------------------------------------------------------------------------- build
 
 
+def stats_from_digest_relationship(
+    relationship: dict,
+    facts: dict | None = None,
+) -> ThreadStats:
+    """AMENDMENT-001. A `ThreadStats` built from a `digest.v1` relationship.
+
+    **Additive.** `build_gists(db_path, …)` below is untouched and stays the tested path
+    a Mac-side producer will use if the port ever happens; deleting it to "simplify"
+    would throw that away.
+
+    The mapping is deliberately total — every field `classify`, `priority` and
+    `sql_gist_text` read comes from the digest, and nothing is invented:
+
+    - `momentum` is a property over `messages_last_90d / messages_prior_90d`, and
+      `momentum_90d` already carries exactly that ratio. Rather than fabricate two
+      window counts, set the prior window to a fixed 1 and the recent window to the
+      ratio, which reproduces the property exactly.
+    - `recent_inbound_text` stays **empty**, always. It is the other person's prose, it
+      never leaves the Mac, and `facts` crossing instead is the whole point of the
+      amendment. A digest-driven producer runs without it.
+    - `handle` is the `contact_id`. The producer only uses `handle` to derive a
+      `contact_id`, and here it is already derived — on the Mac, under the user's salt.
+    """
+    facts = facts if facts is not None else relationship.get("facts") or {}
+    momentum = float(relationship.get("momentum_90d", 1.0))
+    total = int(relationship.get("message_count", 0))
+    sent = int(relationship.get("sent_count", 0))
+
+    return ThreadStats(
+        handle=relationship["contact_id"],
+        total_messages=total,
+        sent_messages=sent,
+        received_messages=int(relationship.get("received_count", total - sent)),
+        days_silent=int(relationship.get("days_since_last_contact", 0)),
+        last_from_me=bool(relationship["last_from_me"]),
+        unanswered_question=bool(relationship["unanswered_question"]),
+        max_gap_days=int(relationship["max_gap_days"]),
+        median_reply_latency_seconds=(relationship.get("median_reply_latency_s") or {}).get("them"),
+        # The property is recent/prior; 1.0 prior makes recent the ratio itself.
+        messages_last_90d=momentum,
+        messages_prior_90d=1.0,
+        recent_inbound_text=[],
+        facts=_facts_with_all_keys(facts),
+    )
+
+
+def _facts_with_all_keys(facts: dict) -> dict:
+    """Five keys, always, so downstream reads need no `.get` dance."""
+    return {k: list(facts.get(k) or []) for k in ("dates", "times", "places", "amounts", "names")}
+
+
+def gists_from_digest(
+    digest: dict,
+    top: int | None = None,
+    as_of: str | None = None,
+    producer: GistProducer | None = None,
+) -> list[dict]:
+    """Ranked gists from a `digest.v1` document. The cloud-side entry point.
+
+    Mirrors `build_gists`' ordering and degradation exactly: `classify` returning `None`
+    omits the thread, ties break on `contact_id`, and a `ModelUnavailable` falls back to
+    the SQL producer rather than dropping the item.
+    """
+    as_of = as_of or digest.get("generated_at") or datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if producer is None:
+        producer, _ = select_producer()
+
+    gists: list[dict] = []
+    for relationship in sorted(digest.get("relationships", []), key=lambda r: r["contact_id"]):
+        if relationship.get("is_group"):
+            continue
+        stats = stats_from_digest_relationship(relationship)
+        state = classify(stats)
+        if state is None:
+            continue
+        cid = relationship["contact_id"]
+        try:
+            gists.append(producer.produce(cid, stats, state, as_of))
+        except ModelUnavailable:
+            gists.append(SqlGistProducer().produce(cid, stats, state, as_of))
+
+    gists.sort(key=lambda g: (-g["priority"], g["contact_id"]))
+    return gists[:top] if top else gists
+
+
 def build_gists(
     db_path: str,
     top: int | None = None,
@@ -506,7 +593,12 @@ def main(argv: list[str] | None = None) -> int:
         prog="python -m boi_intel.gist",
         description="Produce gist.v1 documents from a chat.db. SQL by default.",
     )
-    ap.add_argument("--db", required=True, help="path to a Messages chat.db, read-only")
+    # AMENDMENT-001. Exactly one source. `--digest` is the cloud path and reads a
+    # stored `digest.v1`; `--db` is the Mac path and is unchanged. Mutually exclusive
+    # and required, so "which one did it use?" is never a question.
+    src = ap.add_mutually_exclusive_group(required=True)
+    src.add_argument("--db", help="path to a Messages chat.db, read-only")
+    src.add_argument("--digest", help="path to a digest.v1 document (no corpus needed)")
     ap.add_argument("--out", required=True, help="output directory")
     ap.add_argument("--top", type=int, default=None, help="keep only the N highest priority")
     ap.add_argument("--salt", default=None, help="user_salt for the contact_id HMAC")
@@ -518,7 +610,13 @@ def main(argv: list[str] | None = None) -> int:
         # Structured JSON to stdout, per CONTRACTS.md § 6. Never the prompt, never text.
         print(json.dumps({"event": "gist.producer_degraded", "to": "sql", "reason": reason}))
 
-    gists = build_gists(a.db, top=a.top, salt=resolve_salt(a.salt), as_of=a.as_of, producer=chosen)
+    if a.digest:
+        digest = json.loads(pathlib.Path(a.digest).read_text())
+        gists = gists_from_digest(digest, top=a.top, as_of=a.as_of, producer=chosen)
+    else:
+        gists = build_gists(
+            a.db, top=a.top, salt=resolve_salt(a.salt), as_of=a.as_of, producer=chosen
+        )
     for path in write_gists(gists, a.out):
         g = json.loads(path.read_text())
         print(f"{path}  {g['state']}  priority={g['priority']}  producer={g['producer']}")

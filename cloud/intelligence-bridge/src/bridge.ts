@@ -5,26 +5,16 @@
 //     /** Track B produces these. Supplied per user; this track consumes fixtures. */
 //     gistsFor: (scope: UserScope) => Promise<Gist[]>;
 //
-// ---------------------------------------------------------------------------------
-// WHERE THE GIST PRODUCER ACTUALLY BELONGS, stated here because the code below looks
-// wrong without it.
+// AMENDMENT-001 removed the seam this file used to open with.
 //
-// `boi_intel.gist` reads a `chat.db`. Its only entry point is `build_gists(db_path, …)`
-// and `ThreadStats` needs `last_from_me`, `unanswered_question` and `max_gap_days` —
-// none of which are in `digest.v1`. Without the first two, `classify()` can never return
-// `action_needed`, which is the state the entire daily brief exists to deliver.
+// The gist producer needs `last_from_me`, `max_gap_days`, `unanswered_question` and
+// `facts`, and `digest.v1` did not carry them — so the bridge was handed a corpus path
+// and read a `chat.db` from the cloud, which is the one thing the design forbids. The
+// digest carries all four now. `boi_intel.gist.gists_from_digest` reads the stored
+// document and the corpus never leaves the Mac.
 //
-// So gists cannot be produced from a stored digest, and there is no `/v1/gists` route to
-// carry them from the Mac. `BOI_ARCHITECTURE.md` § 6 is explicit that T1 gists are
-// generated locally and "uploaded with the daily brief" — the producer belongs on the
-// Mac and the contract has no edge for its output.
-//
-// This bridge therefore invokes the producer against a corpus path it is *given*. That
-// is a real cross-process invocation of Track B's code producing real gists, and it is
-// the honest shape of the join today. It is NOT the production topology. The resolution
-// is a contract amendment: gist production moves to the Mac's sync and a `/v1/gists`
-// ingest route carries the result. Recorded in NOTES.md; it is the user's to make.
-// ---------------------------------------------------------------------------------
+// `build_gists(db_path, …)` is untouched and still the tested path a Mac-side producer
+// would use if the local-model port ever happens.
 
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -44,17 +34,6 @@ import { check } from "./validate.js";
 export type BridgeLog = (event: Record<string, unknown>) => void;
 
 export type BridgeConfig = {
-  /**
-   * Where the corpus for a user lives. See the note above: this is the seam that
-   * should not exist in production.
-   *
-   * `BOI_CORPUS_DIR/<user_id>.db` if set, else `BOI_CORPUS_DB` for a single-user dev
-   * machine. Absent means **no gists**, which is a degraded brief rather than an error.
-   */
-  corpusDir?: string | undefined;
-  corpusDb?: string | undefined;
-  /** The HMAC key the Mac used, so `contact_id`s agree with the digest's. */
-  salt?: string | undefined;
   /** `fake` in CI. CONTRACTS.md § 9: live calls are Track B's, and never in a suite. */
   provider?: string | undefined;
   timeoutMs?: number | undefined;
@@ -82,9 +61,6 @@ export const DEFAULT_MAX_ITEMS = 3;
 
 export function configFromEnvironment(env: NodeJS.ProcessEnv = process.env): BridgeConfig {
   return {
-    corpusDir: env["BOI_CORPUS_DIR"],
-    corpusDb: env["BOI_CORPUS_DB"],
-    salt: env["BOI_DEV_USER_SALT"],
     provider: env["BOI_MODEL_PROVIDER"] ?? "fake",
     timeoutMs: env["BOI_INTEL_TIMEOUT_MS"] ? Number(env["BOI_INTEL_TIMEOUT_MS"]) : undefined,
     maxItems: env["BOI_BRIEF_MAX_ITEMS"] ? Number(env["BOI_BRIEF_MAX_ITEMS"]) : undefined,
@@ -129,16 +105,9 @@ export async function gistOutcomeFor(
   config: BridgeConfig = configFromEnvironment(),
 ): Promise<GistOutcome> {
   const log = config.log ?? (() => {});
-  const corpus = corpusPathFor(scope, config);
-  if (corpus === null) {
-    log({ msg: "bridge.gists.no_corpus", user_id: scope.user_id });
-    return { status: "unavailable", gists: [], detail: "no corpus configured" };
-  }
 
-  // The digest is read even though the producer does not consume it, because a brief
-  // about a Mac that has never reported is a brief about nothing — and `runForUser`
-  // already refuses in that case. Reading it here keeps the bridge from producing gists
-  // for a scope the composer will discard, and it is where `as_of` comes from.
+  // THE DIGEST IS THE INPUT NOW. It used to be read only as a gate — "has this Mac ever
+  // reported?" — while the gists came from a corpus the cloud should never have had.
   const digest = await latestDigest(scope);
   if (digest === null) {
     log({ msg: "bridge.gists.no_digest", user_id: scope.user_id });
@@ -147,8 +116,19 @@ export async function gistOutcomeFor(
 
   const workdir = await mkdtemp(path.join(tmpdir(), "boi-bridge-"));
   try {
-    const args = ["--db", corpus, "--out", workdir, "--top", String(config.maxItems ?? DEFAULT_MAX_ITEMS)];
-    if (config.salt !== undefined && config.salt !== "") args.push("--salt", config.salt);
+    // The digest goes to the child as a 0600 file, never on argv. It is smaller than a
+    // voice pack and carries no prose, but `facts` is content-derived and argv is
+    // world-readable on macOS.
+    // INPUT AND OUTPUT IN SEPARATE DIRECTORIES. Writing the digest into the directory
+    // the producer writes gists to made it come back as a `*.json` on the read side and
+    // get dropped as a malformed gist — which turned "this user is fine" into
+    // `no_answer`, the exact confusion the two statuses exist to prevent.
+    const outDir = path.join(workdir, "out");
+    await mkdir(outDir, { recursive: true });
+    const digestPath = path.join(workdir, "digest.json");
+    await writeFile(digestPath, JSON.stringify(digest.payload), { mode: 0o600 });
+    const args = ["--digest", digestPath, "--out", outDir,
+                  "--top", String(config.maxItems ?? DEFAULT_MAX_ITEMS)];
 
     let result: InvokeResult;
     try {
@@ -199,7 +179,7 @@ export async function gistOutcomeFor(
       return { status: "no_answer", gists: [], detail: describeFailure(result) };
     }
 
-    const files = (await readdir(workdir)).filter((f) => f.endsWith(".json")).sort();
+    const files = (await readdir(outDir)).filter((f) => f.endsWith(".json")).sort();
     if (files.length === 0) {
       // A zero exit with no output. `gist.py` prints `gist.none_needed` in exactly one
       // situation — every thread classified as `None`, which is a healthy corpus.
@@ -214,7 +194,7 @@ export async function gistOutcomeFor(
         : { status: "no_answer", gists: [], detail: "zero exit, no documents written" };
     }
 
-    const gists = await collectGists(workdir, files, log, scope.user_id);
+    const gists = await collectGists(outDir, files, log, scope.user_id);
 
     if (gists.length === 0) {
       return { status: "no_answer", gists: [], detail: `${files.length} document(s), none valid` };
@@ -520,10 +500,3 @@ export function draftArgv(input: {
   ];
 }
 
-function corpusPathFor(scope: UserScope, config: BridgeConfig): string | null {
-  if (config.corpusDir !== undefined && config.corpusDir !== "") {
-    return path.join(config.corpusDir, `${scope.user_id}.db`);
-  }
-  if (config.corpusDb !== undefined && config.corpusDb !== "") return config.corpusDb;
-  return null;
-}

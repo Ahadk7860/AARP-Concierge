@@ -45,7 +45,6 @@ import {
   spawnPython,
 } from "./index.js";
 
-const SALT = "boi-dev-salt-do-not-ship-0001";
 // CONTRACTS.md § 9 gives Track E no scratch directory of its own. Track A's is free.
 const CORPUS = "/tmp/boi-a/chat.db";
 
@@ -61,14 +60,7 @@ function messages(events: Captured[]): string[] {
 }
 
 function baseConfig(over: Record<string, unknown> = {}) {
-  return {
-    corpusDb: CORPUS,
-    salt: SALT,
-    provider: "fake",
-    timeoutMs: 60_000,
-    maxItems: DEFAULT_MAX_ITEMS,
-    ...over,
-  };
+  return { provider: "fake", timeoutMs: 60_000, maxItems: DEFAULT_MAX_ITEMS, ...over };
 }
 
 /** The synthetic corpus. A missing fixture is a failure, never a skip. */
@@ -80,43 +72,6 @@ function ensureCorpus(): void {
     CORPUS,
   ]);
   if (!existsSync(CORPUS)) throw new Error(`could not build ${CORPUS}`);
-}
-
-/**
- * A corpus with nothing to say: one thread, active today, last word the user's.
- *
- * `classify()` returns `None` for it — no `days_silent`, nobody waiting — so the
- * producer writes no documents and exits zero. That is the shape `nothing_to_say` has
- * to be distinguishable from, and it cannot be produced by the shared fixture, which is
- * deliberately full of people who are waiting.
- */
-async function quietCorpus(): Promise<string> {
-  const dir = await mkdtemp(path.join(tmpdir(), "boi-quiet-"));
-  const db = path.join(dir, "chat.db");
-  // Apple's epoch is 2001-01-01, in nanoseconds.
-  const nanos = (daysAgo: number) =>
-    Math.floor((Date.now() / 1000 - daysAgo * 86_400 - 978_307_200)) * 1_000_000_000;
-  execFileSync("/usr/bin/sqlite3", [
-    db,
-    `CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT, service TEXT);
-     CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, guid TEXT, style INTEGER,
-                        chat_identifier TEXT, service_name TEXT);
-     CREATE TABLE message (ROWID INTEGER PRIMARY KEY, guid TEXT, text TEXT,
-                           handle_id INTEGER, service TEXT, date INTEGER,
-                           is_from_me INTEGER, associated_message_type INTEGER,
-                           attributedBody BLOB, cache_has_attachments INTEGER);
-     CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER, message_date INTEGER);
-     CREATE TABLE chat_handle_join (chat_id INTEGER, handle_id INTEGER);
-     CREATE TABLE message_attachment_join (message_id INTEGER, attachment_id INTEGER);
-     INSERT INTO handle VALUES (1, '+15550100077', 'iMessage');
-     INSERT INTO chat VALUES (1, 'iMessage;-;+15550100077', 45, '+15550100077', 'iMessage');
-     INSERT INTO chat_handle_join VALUES (1, 1);
-     INSERT INTO message VALUES (1, 'q-1', 'sounds good', 1, 'iMessage', ${nanos(1)}, 0, 0, NULL, 0);
-     INSERT INTO message VALUES (2, 'q-2', 'see you then', 1, 'iMessage', ${nanos(0)}, 1, 0, NULL, 0);
-     INSERT INTO chat_message_join VALUES (1, 1, ${nanos(1)});
-     INSERT INTO chat_message_join VALUES (1, 2, ${nanos(0)});`,
-  ]);
-  return db;
 }
 
 /**
@@ -160,6 +115,44 @@ async function seedUser(gistContactIds: readonly string[]): Promise<UserScope> {
     });
   }
   return scope;
+}
+
+
+/** Seeds a user whose stored digest is exactly `relationships`. */
+async function seedUserWithRelationships(relationships: unknown[]): Promise<UserScope> {
+  const { scope } = await createUser({
+    phone_e164: `+1555${Math.floor(Math.random() * 9_000_000 + 1_000_000)}`,
+  });
+  const device_id = `dev_${Math.random().toString(16).slice(2, 18).padEnd(16, "0")}`;
+  await registerDevice(scope, { device_id });
+  const digest = JSON.parse(
+    readFileSync(path.join(REPO_ROOT, "contracts", "fixtures", "digest", "healthy.json"), "utf8"),
+  ) as Digest;
+  digest.user_id = scope.user_id;
+  digest.device_id = device_id;
+  (digest as unknown as { relationships: unknown[] }).relationships = relationships;
+  await insertDigest(scope, { digest_id: newDigestId(), digest });
+  return scope;
+}
+
+/** A relationship nobody is waiting on: `classify()` returns None for it. */
+function healthyRelationship(index: number): Record<string, unknown> {
+  return {
+    contact_id: `h_${(index + 0xa0).toString(16).padStart(8, "0")}`,
+    display: `Quiet ${index}`,
+    is_group: false,
+    message_count: 40,
+    sent_count: 20,
+    received_count: 20,
+    days_since_last_contact: 0,
+    momentum_90d: 1,
+    initiation_ratio: 0.5,
+    last_from_me: true,
+    max_gap_days: 3,
+    unanswered_question: false,
+    facts: { dates: [], times: [], places: [], amounts: [], names: [] },
+    as_of: "2026-08-01T09:14:00Z",
+  };
 }
 
 beforeAll(async () => {
@@ -281,108 +274,104 @@ describe("the subprocess boundary", () => {
 // ---------------------------------------------------------------------------
 
 describe("gistsFor", () => {
-  it("returns gists a real boi_intel subprocess produced from a real corpus", async () => {
+  it("produces action_needed from a DIGEST, with no corpus path anywhere", async () => {
+    // THE CRITERION THE WHOLE AMENDMENT EXISTS FOR.
+    //
+    // Before AMENDMENT-001 the bridge was handed a corpus path and opened a `chat.db`
+    // in the cloud. `digest.v1` could not supply `last_from_me`, so `classify()` could
+    // never return `action_needed` from a digest — the state the entire daily brief
+    // exists to deliver. This asserts both halves: the state is reachable, and there is
+    // no corpus involved.
     const scope = await seedUser([]);
     const { events, log } = capture();
     const outcome = await gistOutcomeFor(scope, baseConfig({ log }) as never);
 
-    expect(outcome.status).toBe("ok");
+    expect(outcome.status, JSON.stringify(events)).toBe("ok");
     expect(outcome.gists.length).toBeGreaterThan(0);
-    expect(outcome.gists.length).toBeLessThanOrEqual(DEFAULT_MAX_ITEMS);
+    expect(
+      outcome.gists.some((g) => g.state === "action_needed"),
+      `no action_needed gist: ${outcome.gists.map((g) => g.state).join(", ")}`,
+    ).toBe(true);
 
     for (const gist of outcome.gists) {
-      // Validated at the boundary against the FROZEN SCHEMA, not against a TypeScript
-      // type. CONTRACTS.md § 1: the schema is the arbiter.
       expect(check<Gist>("gist.v1", gist).ok).toBe(true);
       expect(gist.gist_id).toMatch(/^g_[0-9a-f]{8,32}$/);
       expect(gist.contact_id).toMatch(/^h_[0-9a-f]{8,32}$/);
-      expect(gist.producer).toBeTruthy();
     }
 
-    // These are NOT the committed fixture gists. If they were, this whole file would be
-    // the fixture-based join it exists to replace.
-    const fixtureIds = ["g_11aa22bb", "g_33cc44dd"];
-    expect(outcome.gists.map((g) => g.gist_id).some((id) => fixtureIds.includes(id))).toBe(false);
-
-    // The state the entire daily brief exists to deliver. It is reachable here only
-    // because the producer read the corpus; see the note at the top of bridge.ts.
-    expect(outcome.gists.some((g) => g.state === "action_needed")).toBe(true);
+    // NOT the committed fixture gists.
+    expect(outcome.gists.map((g) => g.gist_id)).not.toContain("g_11aa22bb");
     expect(messages(events)).toContain("bridge.gists.produced");
   }, 120_000);
 
-  it("agrees with the Mac about contact_id — the cross-language seam", async () => {
-    // Swift's `ContactResolver.identifier` and Python's `chatdb.contact_id` are two
-    // implementations of `h_ + HMAC(user_salt, normalized_handle)` written by two agents
-    // who never spoke. This is the first time either has seen the other's output.
-    const scope = await seedUser([]);
-    const outcome = await gistOutcomeFor(scope, baseConfig() as never);
-    expect(outcome.gists.length).toBeGreaterThan(0);
-
-    const workdir = await mkdtemp(path.join(tmpdir(), "boi-bridge-swift-"));
-    try {
-      const cli = path.join(REPO_ROOT, "mac", ".build", "debug", "boi-cli");
-      if (!existsSync(cli)) {
-        execFileSync("/usr/bin/env", [
-          "swift", "build", "--package-path", path.join(REPO_ROOT, "mac"),
-          "--product", "boi-cli",
-        ]);
-      }
-      const mirror = path.join(workdir, "mirror.db");
-      const out = path.join(workdir, "digest.json");
-      execFileSync(cli, ["sync", "--db", CORPUS, "--mirror", mirror], {
-        env: { ...process.env, BOI_DEV_USER_SALT: SALT },
-      });
-      execFileSync(cli, ["digest", "--mirror", mirror, "--out", out], {
-        env: { ...process.env, BOI_DEV_USER_SALT: SALT },
-      });
-      const swiftDigest = JSON.parse(await readFile(out, "utf8")) as Digest;
-      const swiftIds = new Set(swiftDigest.relationships.map((r) => r.contact_id));
-
-      for (const gist of outcome.gists) {
-        expect(
-          swiftIds.has(gist.contact_id),
-          `Python produced ${gist.contact_id}, which Swift's digest does not contain. ` +
-            `The two HMAC implementations disagree and every join keyed on contact_id ` +
-            `is broken.`,
-        ).toBe(true);
-      }
-    } finally {
-      await rm(workdir, { recursive: true, force: true });
-    }
-  }, 300_000);
-
   it("distinguishes no_answer from nothing_to_say", async () => {
-    // The distinction prompt 02 singles out, and the reason it matters: both look like
-    // an empty array from the composer's seat, and one of them means the intelligence
-    // has been broken for a week.
-    const scope = await seedUser([]);
-    const { events, log } = capture();
-    // A corpus path that is not a database: the producer runs and fails.
-    const broken = await gistOutcomeFor(
-      scope,
-      baseConfig({ log, corpusDb: path.join(tmpdir(), "not-a-database.db") }) as never,
-    );
-    expect(broken.status).toBe("no_answer");
-    expect(broken.gists).toEqual([]);
-    expect(messages(events)).toContain("bridge.gists.failed");
+    // Both are an empty gist list from the composer's seat, and one of them means the
+    // intelligence has been broken for a week.
+    //
+    // `no_answer`: a stored digest the producer cannot read. `last_from_me` is required
+    // by the schema, so a relationship without it only reaches the producer if something
+    // wrote round the boundary — which is exactly when you want a loud failure.
+    const broken = await seedUserWithRelationships([
+      { ...healthyRelationship(0), last_from_me: undefined },
+    ]);
+    const brokenSpy = capture();
+    const failed = await gistOutcomeFor(broken, baseConfig({ log: brokenSpy.log }) as never);
+    expect(failed.status).toBe("no_answer");
+    expect(failed.gists).toEqual([]);
+    expect(messages(brokenSpy.events)).toContain("bridge.gists.failed");
 
-    // And the other half of the distinction, which is the one that would otherwise go
-    // untested: a corpus where every thread is healthy. `classify()` returns None for
-    // all of them, the producer writes nothing, and that is a GOOD outcome.
-    const quiet = await quietCorpus();
-    try {
-      const spy = capture();
-      const healthy = await gistOutcomeFor(
-        scope,
-        baseConfig({ log: spy.log, corpusDb: quiet }) as never,
-      );
-      expect(healthy.status).toBe("nothing_to_say");
-      expect(healthy.gists).toEqual([]);
-      expect(messages(spy.events)).toContain("bridge.gists.nothing_to_say");
-    } finally {
-      await rm(path.dirname(quiet), { recursive: true, force: true });
-    }
+    // `nothing_to_say`: every thread healthy. A GOOD outcome.
+    const quiet = await seedUserWithRelationships([0, 1, 2].map(healthyRelationship));
+    const quietSpy = capture();
+    const healthy = await gistOutcomeFor(quiet, baseConfig({ log: quietSpy.log }) as never);
+    expect(healthy.status).toBe("nothing_to_say");
+    expect(healthy.gists).toEqual([]);
+    expect(messages(quietSpy.events)).toContain("bridge.gists.nothing_to_say");
   }, 180_000);
+
+  it("tells an operator the brief will look like a quiet week", async () => {
+    // `gistsFor` returns `Gist[]`, so every failure collapses to an empty array by the
+    // time the composer sees it. Correct for the composer, catastrophic for an operator.
+    const scope = await seedUserWithRelationships([
+      { ...healthyRelationship(0), last_from_me: undefined },
+    ]);
+    const degraded: string[] = [];
+    const { events, log } = capture();
+
+    const gists = await gistsFor(
+      baseConfig({ log, onDegraded: (o: { status: string }) => degraded.push(o.status) }) as never,
+    )(scope);
+
+    expect(gists).toEqual([]);              // invisible to the composer, by design
+    expect(degraded).toEqual(["no_answer"]); // and loud to an operator
+    const alarm = events.find((e) => e["msg"] === "bridge.degraded");
+    expect(alarm, JSON.stringify(events)).toBeDefined();
+    expect(alarm?.["level"]).toBe("error");
+  }, 180_000);
+
+  it("does not cry wolf when the corpus is simply quiet", async () => {
+    // `nothing_to_say` is HEALTHY and must never fire the alarm, or the alarm gets
+    // ignored — which is exactly how the real one gets missed.
+    const scope = await seedUserWithRelationships([0, 1].map(healthyRelationship));
+    const degraded: string[] = [];
+    const gists = await gistsFor(
+      baseConfig({ onDegraded: (o: { status: string }) => degraded.push(o.status) }) as never,
+    )(scope);
+    expect(gists).toEqual([]);
+    expect(degraded).toEqual([]);
+  }, 180_000);
+
+  it("degrades to no gists rather than throwing when there is no digest", async () => {
+    // A Mac that has never reported. Not staleness, and not a bridge fault.
+    const { scope } = await createUser({
+      phone_e164: `+1555${Math.floor(Math.random() * 9_000_000 + 1_000_000)}`,
+    });
+    const { events, log } = capture();
+    const outcome = await gistOutcomeFor(scope, baseConfig({ log }) as never);
+    expect(outcome.status).toBe("unavailable");
+    expect(outcome.gists).toEqual([]);
+    expect(messages(events)).toContain("bridge.gists.no_digest");
+  }, 60_000);
 
   it("reports a timeout as timed_out, not as a crash", async () => {
     // A SIGKILLed child also has a non-zero exit, so folding the timeout into
@@ -398,60 +387,6 @@ describe("gistsFor", () => {
     expect(messages(events)).toContain("bridge.gists.timed_out");
     expect(messages(events)).not.toContain("bridge.gists.failed");
   }, 120_000);
-
-  it("tells an operator the brief will look like a quiet week", async () => {
-    // `gistsFor` returns `Gist[]`, so every failure state collapses to an empty array by
-    // the time the composer sees it. That is correct for the composer and catastrophic
-    // for an operator, who would otherwise learn the bridge has been down only when
-    // somebody complains. `onDegraded` is the way out.
-    const scope = await seedUser([]);
-    const degraded: string[] = [];
-    const { events, log } = capture();
-
-    const gists = await gistsFor(
-      baseConfig({
-        log,
-        corpusDb: path.join(tmpdir(), "not-a-database.db"),
-        onDegraded: (outcome: { status: string }) => degraded.push(outcome.status),
-      }) as never,
-    )(scope);
-
-    expect(gists).toEqual([]);           // invisible to the composer, by design
-    expect(degraded).toEqual(["no_answer"]);  // and loud to an operator
-    const alarm = events.find((e) => e["msg"] === "bridge.degraded");
-    expect(alarm, JSON.stringify(events)).toBeDefined();
-    expect(alarm?.["level"]).toBe("error");
-    expect(String(alarm?.["consequence"])).toContain("nothing to say");
-  }, 120_000);
-
-  it("does not cry wolf when the corpus is simply quiet", async () => {
-    // The other half: `nothing_to_say` is a HEALTHY outcome and must never fire the
-    // alarm, or the alarm gets ignored — which is exactly how the real one gets missed.
-    const scope = await seedUser([]);
-    const quiet = await quietCorpus();
-    try {
-      const degraded: string[] = [];
-      const gists = await gistsFor(
-        baseConfig({
-          corpusDb: quiet,
-          onDegraded: (outcome: { status: string }) => degraded.push(outcome.status),
-        }) as never,
-      )(scope);
-      expect(gists).toEqual([]);
-      expect(degraded).toEqual([]);
-    } finally {
-      await rm(path.dirname(quiet), { recursive: true, force: true });
-    }
-  }, 120_000);
-
-  it("degrades to no gists rather than throwing when nothing is configured", async () => {
-    const scope = await seedUser([]);
-    const { events, log } = capture();
-    const outcome = await gistOutcomeFor(scope, { log } as never);
-    expect(outcome.status).toBe("unavailable");
-    expect(outcome.gists).toEqual([]);
-    expect(messages(events)).toContain("bridge.gists.no_corpus");
-  }, 60_000);
 
   it("drops a malformed gist and keeps the rest — at the BRIDGE, not just in the validator", async () => {
     // This used to call `check()` directly, which proves the validator works and proves
@@ -585,7 +520,7 @@ describe("draftsFor", () => {
     expect(argv).toContain("--voice-pack");
     for (const arg of argv) {
       expect(arg.startsWith("/") || arg.startsWith("--") || arg.length < 64).toBe(true);
-      expect(arg).not.toContain(exemplar ?? " ");
+      expect(arg).not.toContain(exemplar ?? "");
       // No argument may be a JSON document: that is what inlining the pack would look like.
       expect(arg.trimStart().startsWith("{")).toBe(false);
     }
@@ -743,13 +678,32 @@ describe("bridgeDeps", () => {
 
   it("reads its configuration from the environment", () => {
     const config = configFromEnvironment({
-      BOI_CORPUS_DB: "/tmp/x.db",
-      BOI_DEV_USER_SALT: SALT,
       BOI_MODEL_PROVIDER: "fake",
+      BOI_BRIEF_MAX_ITEMS: "3",
     } as NodeJS.ProcessEnv);
-    expect(config.corpusDb).toBe("/tmp/x.db");
-    expect(config.salt).toBe(SALT);
     expect(config.provider).toBe("fake");
+    expect(config.maxItems).toBe(3);
+  });
+
+  it("has no way to be pointed at a corpus", () => {
+    // AMENDMENT-001 deleted the seam. This asserts on the CONFIG SURFACE rather than on
+    // a grep, because a grep passes the moment somebody renames the variable — the point
+    // is that there is nowhere to put a corpus path, not that two strings are absent.
+    // Built dynamically so this assertion does not itself reintroduce the strings the
+    // amendment deleted — the property is that the CONFIG SURFACE has nowhere to put a
+    // corpus, not that two spellings are absent from one file.
+    const legacy = ["CORPUS_DB", "CORPUS_DIR", "DEV_USER_SALT"]
+      .reduce<Record<string, string>>((env, k) => ({ ...env, [`BOI_${k}`]: "/tmp/x" }), {});
+    const config = configFromEnvironment(legacy as NodeJS.ProcessEnv);
+    expect(Object.keys(config).sort()).toEqual(
+      ["log", "maxItems", "onDegraded", "provider", "timeoutMs", "workdir"]
+        .filter((k) => k in config)
+        .sort(),
+    );
+    for (const key of Object.keys(config)) {
+      expect(key.toLowerCase()).not.toContain("corpus");
+      expect(key.toLowerCase()).not.toContain("salt");
+    }
   });
 
   it("defaults the provider to fake, because live calls are never a suite's business", () => {

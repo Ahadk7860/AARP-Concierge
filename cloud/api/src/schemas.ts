@@ -24,11 +24,30 @@ const nullableInt = z.number().int().nullable();
 // `digest.v1.json`'s `$defs/relationship.required` is exactly:
 //   contact_id, display, is_group, message_count, sent_count, received_count,
 //   days_since_last_contact, momentum_90d, initiation_ratio, as_of
+// plus, since AMENDMENT-001: last_from_me, max_gap_days, unanswered_question, facts
 // Everything else — including `archetype`, `first_contact_at` and `last_contact_at` —
 // may be ABSENT. Marking them `.nullable()` without `.optional()` made this validator
 // reject documents the frozen schema calls valid, and no test caught it because every
 // committed fixture is fully populated. Track A would have got a 400 for a conforming
 // digest. `schemas.test.ts` now differentials this against ajv over the frozen schema.
+
+// AMENDMENT-001. `facts` in a digest is the SAME subschema as `gist.v1.facts`: 3 words,
+// 40 characters, per token. The cap is spelled here because this is a hand-written
+// mirror, and `differential.test.ts` is what proves the spelling matches the frozen
+// schema rather than merely resembling it — a cap enforced in one container and not the
+// other is not a cap.
+const factToken = z.string().max(40).regex(/^\S+(?:\s+\S+){0,2}$/);
+const factList = z.array(factToken);
+const facts = z
+  .object({
+    dates: factList,
+    times: factList,
+    places: factList,
+    amounts: factList,
+    names: factList,
+  })
+  .strict();
+
 const relationship = z
   .object({
     contact_id: z.string().regex(ID_PATTERNS.contact),
@@ -42,6 +61,14 @@ const relationship = z
     days_since_last_contact: z.number().int().min(0),
     momentum_90d: z.number().min(0),
     initiation_ratio: z.number().min(0).max(1),
+    // AMENDMENT-001, all four REQUIRED. Optional would mean an un-updated Mac uploads a
+    // digest that validates and produces gists that can never be `action_needed` — no
+    // error, and a morning brief that quietly stops saying the only thing it exists to
+    // say. Required means that Mac is rejected here, loudly, on the first upload.
+    last_from_me: z.boolean(),
+    max_gap_days: z.number().int().min(0),
+    unanswered_question: z.boolean(),
+    facts,
     median_reply_latency_s: z
       .object({ user: nullableInt.optional(), them: nullableInt.optional() })
       .strict()
