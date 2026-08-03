@@ -144,12 +144,12 @@ report rather than picking a default that another track may also pick.
 
 | # | File | Outcome | Depends on | Status |
 |---|---|---|---|---|
-| 01 | `01-schema.md` | Postgres schema, migrations, partitioning, salted IDs | none | not started |
-| 02 | `02-ingest.md` | digest, voice-pack and heartbeat endpoints | 01 | not started |
-| 03 | `03-pairing.md` | signup, outbound-first with a contact card, pairing exchange | 01 | not started |
-| 04 | `04-card.md` | a server-rendered share card from a digest | 01 | not started |
-| 05 | `05-brief.md` | brief composition with drafts attached and staleness gating | 01 | not started |
-| 06 | `06-scheduler.md` | per-timezone scheduling and inbound draft selection | 05 | not started |
+| 01 | `01-schema.md` | Postgres schema, migrations, partitioning, salted IDs | none | done |
+| 02 | `02-ingest.md` | digest, voice-pack and heartbeat endpoints | 01 | done |
+| 03 | `03-pairing.md` | signup, outbound-first with a contact card, pairing exchange | 01 | done |
+| 04 | `04-card.md` | a server-rendered share card from a digest | 01 | done |
+| 05 | `05-brief.md` | brief composition with drafts attached and staleness gating | 01 | done |
+| 06 | `06-scheduler.md` | per-timezone scheduling and inbound draft selection | 05 | done |
 
 **Read the `Depends on` column, not the numbering.** Numbering implies a sequence and
 most of that sequence is imaginary. A prompt whose dependencies are complete is ready,
