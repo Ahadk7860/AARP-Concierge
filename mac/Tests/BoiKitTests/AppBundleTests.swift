@@ -366,6 +366,47 @@ final class SyncRunTests: XCTestCase {
         XCTAssertNotNil(outcome.heartbeatPath)
     }
 
+    /// **`full_disk_access` has to be able to be `false`, or the alarm built on it is
+    /// built on a constant.**
+    ///
+    /// It used to be a literal `true`, written only after a successful run — so the one
+    /// state that matters most, *access denied*, could never be recorded. That is the
+    /// signature of a grant dropped by an auto-update, and it is the whole reason
+    /// NOTES.md asks Track D to build a fleet-wide alarm on this field.
+    ///
+    /// A Mac that cannot read `chat.db` must still say so rather than go silent: silent
+    /// alone is a laptop in a drawer, silent-and-denied is a diagnosis.
+    func testAFailedRunStillLeavesAHeartbeatSayingAccessWasDenied() throws {
+        let root = "/tmp/boi-a/tests/denied-\(UUID().uuidString)"
+        try FileManager.default.createDirectory(atPath: root, withIntermediateDirectories: true)
+        let paths = SyncRun.Paths(chatDatabase: root + "/there-is-no-chat-db-here.db",
+                                  mirror: root + "/mirror.db",
+                                  outputDirectory: root + "/out",
+                                  stateDirectory: root)
+
+        XCTAssertThrowsError(try SyncRun(paths: paths, salt: MetricsFixture.salt)
+            .runReportingFailures(now: MetricsFixture.now),
+            "an unreadable chat.db must still be an error")
+
+        let heartbeat = try XCTUnwrap(Heartbeat.read(fromDirectory: root),
+                                      "a failed run went completely silent — indistinguishable "
+                                      + "from a laptop in a drawer")
+        XCTAssertFalse(heartbeat.full_disk_access,
+                       "the field the fleet-wide alarm correlates on must be able to be false")
+        XCTAssertNil(heartbeat.last_successful_sync_at)
+        XCTAssertTrue(heartbeat.isStale(now: MetricsFixture.now))
+    }
+
+    /// And the successful path reports it as probed, not asserted.
+    func testASuccessfulRunProbesRatherThanAssertingAccess() throws {
+        let paths = try paths(label: "probed")
+        _ = try SyncRun(paths: paths, salt: MetricsFixture.salt).run(now: MetricsFixture.now)
+        let heartbeat = try XCTUnwrap(Heartbeat.read(fromDirectory: paths.stateDirectory))
+        XCTAssertTrue(heartbeat.full_disk_access)
+        // The probe really did open the database this run read from.
+        XCTAssertEqual(FullDiskAccess.probe(path: paths.chatDatabase), .granted)
+    }
+
     /// An installed app keeps its data in Application Support, not in `/tmp`, and the
     /// LaunchAgent's working directory is `/` so nothing may depend on the cwd.
     func testInstalledPathsLiveInApplicationSupport() {

@@ -62,6 +62,52 @@ Anything `prompts/CONTRACTS.md` does not specify, specifies wrongly, or specifie
 way that does not work in practice. You may not edit it — record it here and report.
 Every entry names the prompt where it surfaced.
 
+`[prompt 07 / Pass 2] THE SENT-TAPBACK HOLE — the reviewer's finding, and the most
+serious defect in this track.` A tapback the **user** sent carries `is_from_me = 1` and a
+body of `Loved "<their sentence>"`: the other person's words, verbatim, inside a row the
+user genuinely wrote. My serializer re-asserted `isFromMe` only. Guard two sees no PII in
+`Loved "see you thursday"`. Guard three cannot match `Loved "…"` against the row it
+quotes. Until the generator was fixed on 3 Aug no fixture could produce the case, so no
+test could catch it.
+
+**The only thing standing there was one `.filter { !$0.isTapback }` in
+`selectExemplars` — unasserted, untested, and documented elsewhere in this codebase as a
+*statistics* guard** because tapbacks poison length and burst metrics. A cleanup done for
+statistical reasons would have removed the last real privacy protection and nothing would
+have gone red.
+
+Fixed per CONTRACTS § 7 (3 Aug):
+
+- `forEachSentMessage` now filters
+  `is_from_me = 1 AND COALESCE(associated_message_type, 0) NOT BETWEEN 2000 AND 3999`,
+  in the SQL, so it cannot be routed around by a caller.
+- The serializer re-asserts **both halves** and throws `tapbackInExemplars`. Asserting
+  rather than filtering is deliberate: filtering here would make the SQL clause redundant
+  and therefore deletable.
+- The `selectExemplars` filter is relabelled in the source as a statistics filter, with an
+  explicit note that it is no longer the privacy guard — so the next person to clean it up
+  knows exactly what they are and are not touching.
+
+Canaried twice, because proving the guards throw is not the same as proving the test
+would catch a leak:
+
+```
+CANARY A  SQL clause removed, serializer assertion kept
+          -> 2 failures: "a sent tapback survived the guard-one query"
+                         "1 row(s) are tapbacks the user sent ... Refusing to serialize."
+
+CANARY B  SQL clause AND serializer assertion AND the statistics filter all removed
+          -> "inbound prose reached a contact exemplar via a tapback"
+             "inbound prose reached a global exemplar via a tapback"
+
+restored  -> 16/16 VoicePackTests pass
+```
+
+Canary B is the load-bearing one: it shows the canary string genuinely reaches an
+exemplar when nothing stops it. The test also asserts the fixture still contains a
+user-sent tapback quoting the canary, so it fails loudly rather than vacuously if the
+generator stops emitting it.
+
 `[prompt 07] CONTRACT GAP — guard three is unusable on any real corpus, and the fix is
 not in the repo yet.` `scripts/check_voice_pack_leak.py` builds its `sent` set from
 `SELECT text FROM message WHERE is_from_me = 1 AND text IS NOT NULL`. On this Mac that is
@@ -84,13 +130,23 @@ traceable_to_inbound_only          0   <- the only bucket that is a leak
 sent_and_also_seen_inbound       517   <- the bucket guard three misreports
 ```
 
-**Status: the user reported this fixed on main (`--mirror` as input, a raw `chat.db`
-refused). It is not in this worktree.** `git log --oneline --all --
-scripts/check_voice_pack_leak.py` returns only the foundation commit `d95d215`, the file
-at HEAD is byte-identical to it, and the merge titled `43deb7c merge main: guard three
-reads the mirror` carried Track B and Track D work but no change to that file. So this
-gap is still open here and the 47 false positives still reproduce. Re-running is a
-one-liner once the fix actually lands.
+**Status after Pass 2: STILL NOT IN THIS WORKTREE, checked again after merging
+`03b0a31`.** That merge did bring the § 7 tapback amendment and the generator canary, both
+of which I have used. It did not bring the leak-checker change:
+
+```
+$ git log --oneline --all -- scripts/check_voice_pack_leak.py
+d95d215 foundation: contracts, stubs, fixtures, harness, and track prompts
+$ grep -n add_argument scripts/check_voice_pack_leak.py
+33:    ap.add_argument("--db", required=True)
+34:    ap.add_argument("--pack", required=True)
+```
+
+So the corrected `--mirror` form cannot be run here. I ran the form that exists against
+all seven regenerated fixture packs and **all seven pass** — but that green is from the
+pre-correction script and therefore does **not** satisfy the anchor as Pass 2 defines it.
+Recording it as unsatisfied rather than claiming a pass the reviewer has already ruled
+out. Re-running is one command once the fix lands.
 
 `[prompt 05] CONTRACT GAP — § 6 pins the canonical JSON for voice_pack_version but not
 float formatting, and Foundation and Python disagree by default.` § 6 specifies sorted
@@ -914,6 +970,66 @@ generator's user lines contain no emoji, no greeting and no sign-off, so `emoji_
 `top_emoji`, `greeting_rate` and `signoff_rate` are all 0 or empty on every fixture pack.
 The extraction logic is covered by purpose-built unit tests, but nothing on the shared
 fixture would notice if it broke. Third item for the same generator change.
+
+`[prompt 07] THE DEFINITION-OF-DONE EVIDENCE, VERBATIM. Revoke -> grant -> auto-relaunch,
+recorded as a timestamped log because Screen Recording is not granted to this session and
+I did not ask for it.` Captured from
+`~/Library/Application Support/Boi/boi.log`, second run, after the Pass 2 corrections:
+
+```
+16:29:12  fda.waiting     polls=1     poll_interval_s=0.5
+16:29:12  app.launched    responsible_bundle=~/Applications/Boi.app  bundle_path_stable=true
+16:29:21  fda.waiting     polls=20
+16:29:31  fda.waiting     polls=40
+16:29:41  fda.waiting     polls=60
+16:29:51  fda.waiting     polls=80
+16:30:01  fda.waiting     polls=100
+16:30:11  fda.waiting     polls=120
+16:30:12  fda.granted     polls=121   waited_s=60.006   relaunch_budget_s=2
+16:30:12  fda.relaunching reason="macOS does not apply a TCC grant to an already-running process"
+16:30:12  app.launched    responsible_bundle=~/Applications/Boi.app  bundle_path_stable=true
+```
+
+**`fda.granted` -> `fda.relaunching` -> `app.launched` all land in the same second**, well
+inside the two-second budget. Timestamps are second-resolution, so the honest claim is
+`<= 1s`, not a millisecond figure.
+
+**The poll cadence is independently checkable from this log rather than taken on trust:**
+poll 1 at 16:29:12 to poll 121 at 16:30:12 is 120 intervals in 60.006 s — 0.50005 s each.
+That also bounds the checkmark: detection happens within one poll interval of the toggle
+flipping, so the status flips in **<= 0.5 s**, comfortably inside the DoD's 1 s.
+
+`launchctl list | grep -i boi`, same session:
+
+```
+89955   0   application.app.boi.mac.30422106.30422174
+-       0   app.boi.mac.sync
+```
+
+And the granted path end to end, from the bundle that holds the grant:
+
+```
+sync.complete  ran=true  mirror_message_count=94897  health=fixable
+               voice_packs=170  elapsed_s=15.596  app_version=0.1.0
+$ python3 scripts/validate_fixtures.py digest.v1 ~/Library/Application\ Support/Boi/out/digest.json
+OK — 1 document(s) valid against contracts/schema/
+```
+
+**One thing I cannot fully explain and am not smoothing over:** a third `app.launched`
+appeared at 16:30:26, 14 s after the relaunch. Only one process survives
+(`pgrep` shows a single pid) and the granted-to-relaunched sequence at 16:30:12 is clean,
+but two instances were started. `Relauncher` has both an `openApplication` completion
+handler and a 1.2 s belt-and-braces `terminate`, and a race between them is the likeliest
+cause. Harmless here — the surviving instance is correct and holds the grant — but it is
+an extra launch nobody asked for and it should be understood before this ships.
+
+`[prompt 07] The first attempt at this evidence was thrown away because the DoD item was
+satisfied by the wrong process.` The relaunched instance did **not** write a fresh digest:
+`last_full_run_at` was 1h40m old and the six-hour idempotent guard skipped, correctly. The
+digest on disk was from an earlier forced run. Rather than report the granted-path item
+green on a file some other invocation wrote, I forced a run from the granted bundle and
+recorded that. Worth stating because "a valid digest exists on disk" and "this launch
+produced it" are different claims and only the second one is the criterion.
 
 `[prompt 07] RUNNING THE APP BINARY FROM A SHELL DOES NOT PROVE THE APP HAS THE GRANT —
 IT PROVES THE TERMINAL'S APP DOES.` This bit during verification itself, which is the

@@ -70,6 +70,30 @@ final class RedactionTests: XCTestCase {
         }
     }
 
+    /// A contact named Will, Grace or April must not eat the ordinary word in every
+    /// exemplar that uses it. NOTES.md declined a built-in first-name list precisely
+    /// because `will`, `mark` and `grace` are words — and then the AddressBook path
+    /// reintroduced the same list through the back door.
+    ///
+    /// The FULL name is still redacted; only the bare given name is spared, so the
+    /// exposure is "Grace" alone and never "Grace Kim".
+    func testAContactWhoseNameIsAlsoAnOrdinaryWordDoesNotEatTheWord() {
+        let redactor = Redactor(knownNames: ["Will Baxter", "Grace Kim", "April Nolan"])
+        XCTAssertEqual(redactor.redact("i will be there"), "i will be there")
+        XCTAssertEqual(redactor.redact("say grace before we eat"), "say grace before we eat")
+        XCTAssertEqual(redactor.redact("see you in april"), "see you in april")
+
+        // The full name is redacted in every case, which is where the real exposure is.
+        for full in ["ill ask will baxter about it", "grace kim said no",
+                     "april nolan is coming"] {
+            XCTAssertTrue(redactor.redact(full).contains(Redactor.namePlaceholder),
+                          "the full name survived: \(redactor.redact(full))")
+        }
+
+        // And a surname that is not an ordinary word is still redacted on its own.
+        XCTAssertFalse(redactor.redact("baxter said no").contains("baxter"))
+    }
+
     func testOrdinaryTextIsLeftAlone() {
         let redactor = Redactor(knownNames: ["Maya Ortiz"])
         for line in ["sorry been mia this week, work has been insane",
@@ -136,6 +160,83 @@ final class VoicePackTests: XCTestCase {
         var inboundInMirror = 0
         try mirror.forEachMessage { if $0.text == Self.distinctInbound { inboundInMirror += 1 } }
         XCTAssertEqual(inboundInMirror, 40)
+    }
+
+    /// **THE SENT-TAPBACK CANARY.** CONTRACTS.md § 7, corrected 3 Aug.
+    ///
+    /// `is_from_me = 1` alone does not keep the other person's words out. A tapback the
+    /// user sent carries `is_from_me = 1` and a body of `Loved "<their sentence>"` —
+    /// inbound prose, verbatim, in a row the user genuinely wrote. Every other layer is
+    /// blind to it: the old serializer assertion checked `isFromMe` only, guard two finds
+    /// no PII in `Loved "see you thursday"`, and guard three compares verbatim so
+    /// `Loved "…"` never matches the row it quotes.
+    ///
+    /// The shared fixture now emits exactly this row, which is what makes the test
+    /// possible at all — until 3 Aug every synthetic tapback was `is_from_me = 0` with
+    /// `text = NULL`, so no fixture could produce the case and no test could catch it.
+    func testASentTapbackQuotingInboundProseNeverReachesAnExemplar() throws {
+        try MetricsFixture.ensureCappedChatDatabase()
+        let mirror = try MetricsFixture.mirror(of: MetricsFixture.cappedChatDatabasePath,
+                                               label: "tapback-canary")
+
+        // The row really is in the mirror, sent by the user, quoting the other person —
+        // so the assertions below are about the filter and not about an absent fixture.
+        var sentTapbacksQuotingInbound = 0
+        try mirror.forEachMessage { message in
+            guard let text = message.text,
+                  text.contains(MetricsFixture.inboundProseCanary) else { return }
+            XCTAssertTrue(message.isFromMe, "the canary row must be one the user sent")
+            XCTAssertTrue(message.isTapback, "the canary row must be a tapback")
+            sentTapbacksQuotingInbound += 1
+        }
+        XCTAssertEqual(sentTapbacksQuotingInbound, 1,
+                       "the fixture no longer emits a user-sent tapback quoting inbound "
+                       + "prose, so this canary would assert nothing")
+
+        // And guard one keeps it out of the SQL result entirely.
+        var reachedGuardOne = 0
+        try mirror.forEachSentMessage { message in
+            if message.text?.contains(MetricsFixture.inboundProseCanary) == true {
+                reachedGuardOne += 1
+            }
+        }
+        XCTAssertEqual(reachedGuardOne, 0, "a sent tapback survived the guard-one query")
+
+        let resolver = ContactResolver(salt: MetricsFixture.salt)
+        let identities = try MetricLibrary(resolver: resolver,
+                                           options: .init(now: MetricsFixture.now))
+            .compute(mirror: mirror).relationships.map(\.identity)
+        let packs = try VoicePackBuilder(options: .init(now: MetricsFixture.now))
+            .build(mirror: mirror, identities: identities)
+
+        XCTAssertFalse(packs.isEmpty)
+        for pack in packs {
+            for exemplar in pack.exemplars {
+                XCTAssertFalse(exemplar.contains(MetricsFixture.inboundProseCanary),
+                               "inbound prose reached a \(pack.scope) exemplar via a tapback")
+            }
+            for opener in pack.register.apology_openers ?? [] {
+                XCTAssertFalse(opener.contains(MetricsFixture.inboundProseCanary), opener)
+            }
+        }
+    }
+
+    /// The serializer's second re-assertion, in isolation: a tapback handed straight to
+    /// `pack` must be refused, not filtered. Refusing is what turns a mirror query that
+    /// lost its `WHERE` into a loud failure instead of a quiet leak.
+    func testTheSerializerRefusesAPackBuiltFromSentTapbacks() {
+        let tapback = MirrorDatabase.StoredMessage(
+            guid: "g1", text: "Loved \u{201C}\(MetricsFixture.inboundProseCanary)\u{201D}",
+            handle: nil, service: "iMessage", sentAt: MetricsFixture.now,
+            isFromMe: true, associatedMessageType: 2000,
+            chatIdentifier: "+15550100001", chatStyle: 45, wasDeliveredQuietly: false)
+        let builder = VoicePackBuilder(options: .init(now: MetricsFixture.now))
+        XCTAssertThrowsError(try builder.pack(from: [tapback], contactID: "h_00000000",
+                                              scope: "contact")) { error in
+            guard case VoicePackBuilder.Error.tapbackInExemplars = error else {
+                return XCTFail("wrong error: \(error)")
+            }
+        }
     }
 
     /// The serializer's own re-assertion. Reachable only if the SQL filter is gone, and

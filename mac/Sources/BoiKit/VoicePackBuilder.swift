@@ -14,10 +14,18 @@ import Foundation
 /// regexes cannot tell a message the user wrote from one they received, and a redacted
 /// inbound message passes it with a `202`. The leak checker is a verbatim string match,
 /// so anything redaction rewrote no longer matches. Neither is a second opinion on
-/// `is_from_me`. So the SQL filter below is a single point of failure and it carries the
-/// canary alone: `VoicePackTests` demonstrates its test failing with the filter removed
-/// and passing with it restored. Do not weaken it on the theory that two more guards are
-/// behind it. There are not two more.
+/// `is_from_me`. So guard one is a single point of failure and it carries the canary
+/// alone. Do not weaken it on the theory that two more guards are behind it. There are
+/// not two more.
+///
+/// **Corrected 3 Aug: guard one is `is_from_me = 1` AND NOT A TAPBACK.** `is_from_me`
+/// alone does not keep the other person's words out — a tapback the user sent carries
+/// `is_from_me = 1` and a body of `Loved "<their sentence>"`, which is inbound prose
+/// verbatim inside a row the user genuinely wrote. Guard two finds no PII in it. Guard
+/// three cannot match `Loved "…"` against the row it quotes. And until the generator was
+/// fixed no fixture could produce the case, so the property was protected by one
+/// unasserted line that nothing else could see. Both conditions are now in the SQL and
+/// both are re-asserted here.
 public struct VoicePackBuilder {
 
     // MARK: - Tunables, all stated
@@ -49,6 +57,10 @@ public struct VoicePackBuilder {
         /// The serializer's own re-assertion of guard one. Unreachable unless the SQL
         /// filter has been removed, which is exactly when it must not be silent.
         case inboundMessageInExemplars(count: Int)
+        /// **The re-assertion that was missing.** Checking `isFromMe` alone let a tapback
+        /// the user sent through, carrying the other person's sentence verbatim inside
+        /// `Loved "…"`. CONTRACTS.md § 7, corrected 3 Aug.
+        case tapbackInExemplars(count: Int)
         case unredactedSpecific(field: String)
 
         public var description: String {
@@ -57,6 +69,12 @@ public struct VoicePackBuilder {
                 return "\(count) exemplar(s) did not come from a row the user wrote. "
                     + "This is the failure that makes every privacy claim in the "
                     + "architecture false. Refusing to serialize."
+            case .tapbackInExemplars(let count):
+                return "\(count) row(s) are tapbacks the user sent. A tapback carries "
+                    + "is_from_me = 1 and a body of Loved \"<their sentence>\" — the other "
+                    + "person's words, verbatim, in a row the user wrote. Neither the "
+                    + "upload boundary nor the leak checker can see it. Refusing to "
+                    + "serialize."
             case .unredactedSpecific(let field):
                 return "\(field) still contains something redaction should have removed. "
                     + "Refusing to serialize a pack that carries specifics."
@@ -111,13 +129,22 @@ public struct VoicePackBuilder {
     func pack(from messages: [MirrorDatabase.StoredMessage],
               contactID: String?,
               scope: String) throws -> VoicePack {
-        // GUARD ONE, RE-ASSERTED AT THE SERIALIZER. Cheap, and it is the check that
-        // turns a deleted SQL filter from a silent leak into a refusal.
+        // GUARD ONE, RE-ASSERTED AT THE SERIALIZER — **BOTH HALVES OF IT**.
+        //
+        // The `isFromMe` half was here from the start. The tapback half was not, and its
+        // absence was the hole: a tapback the user sent satisfies `isFromMe` and carries
+        // `Loved "<their sentence>"`, so this assertion passed while the property it
+        // exists to guarantee — no inbound prose in an exemplar — did not.
+        //
+        // Asserting rather than filtering is deliberate. Filtering here would make the
+        // SQL clause redundant and therefore deletable; refusing means a mirror query
+        // that lost its `WHERE` turns into a loud failure instead of a quiet leak.
         let inbound = messages.filter { !$0.isFromMe }.count
         guard inbound == 0 else { throw Error.inboundMessageInExemplars(count: inbound) }
+        let tapbacks = messages.filter(\.isTapback).count
+        guard tapbacks == 0 else { throw Error.tapbackInExemplars(count: tapbacks) }
 
         let bodies = messages
-            .filter { !$0.isTapback }
             .compactMap { $0.text }
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
@@ -322,6 +349,14 @@ public struct VoicePackBuilder {
         from messages: [MirrorDatabase.StoredMessage]
     ) -> [(order: Int, text: String)] {
         let candidates = messages
+            // A STATISTICS FILTER, AND NOTHING MORE. Say so out loud: this same line used
+            // to be the only thing keeping a user-sent tapback's `Loved "<their
+            // sentence>"` out of an exemplar, and its privacy role was incidental and
+            // undocumented — so a cleanup done for statistical reasons would have removed
+            // the last real protection without anyone noticing. The privacy guard now
+            // lives in the SQL (`forEachSentMessage`) and in the serializer's assertion,
+            // both of which run before this. Deleting this line costs accuracy in the
+            // length and burst statistics; it no longer costs anybody their privacy.
             .filter { !$0.isTapback }
             .compactMap { message -> (Date, String, String)? in
                 guard let text = message.text?.trimmingCharacters(in: .whitespacesAndNewlines),

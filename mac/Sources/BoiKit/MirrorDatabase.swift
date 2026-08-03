@@ -259,20 +259,32 @@ public final class MirrorDatabase {
         }
     }
 
-    /// Streams only the messages the **user wrote**, in send order.
+    /// GUARD ONE: the messages the user wrote, **and that are not tapbacks**.
     ///
-    /// GUARD ONE, AND SINCE THE 2 AUG CORRECTION TO CONTRACTS.md § 7 IT IS THE ONLY
-    /// GUARD THAT CAN SEE PROVENANCE. The upload boundary is a redaction scan — it
-    /// cannot tell a message the user wrote from one they received, and a redacted
-    /// inbound message passes it. The leak checker is a verbatim string match, so
-    /// anything redaction rewrote no longer matches. Neither is a second opinion on this
-    /// `WHERE` clause.
+    /// CONTRACTS.md § 7, corrected 3 Aug. `is_from_me = 1` alone does **not** keep the
+    /// other person's words out:
     ///
-    /// It is a separate query rather than a filter applied by the caller precisely so
-    /// that it cannot be refactored away by someone who does not know what it is for.
-    /// Deleting it is a privacy incident that produces no error and no wrong number.
+    /// > **A tapback the user sent carries `is_from_me = 1` and a body of
+    /// > `Loved "<their sentence>"`** — inbound prose, verbatim, inside a row the user
+    /// > genuinely wrote.
+    ///
+    /// Every other layer is blind to it. Guard two finds no PII in
+    /// `Loved "see you thursday"` and returns `202`. Guard three compares verbatim, and
+    /// `Loved "…"` is not byte-equal to the message it quotes, so it passes. And no
+    /// fixture could produce the case until the generator was fixed, so no test could
+    /// have caught it.
+    ///
+    /// **Both conditions are in the SQL, not applied by the caller**, so neither can be
+    /// refactored away by someone who does not know what they are for. That is not
+    /// hypothetical: the tapback filter exists in more than one place in this codebase as
+    /// a *statistics* guard — tapbacks poison length and burst metrics — and a cleanup
+    /// done for statistical reasons would have taken the last real privacy protection
+    /// with it without anyone noticing.
     public func forEachSentMessage(_ consume: (StoredMessage) -> Void) throws {
-        try forEachMessage(where: "is_from_me = 1", consume)
+        try forEachMessage(where: """
+            is_from_me = 1
+              AND COALESCE(associated_message_type, 0) NOT BETWEEN 2000 AND 3999
+            """, consume)
     }
 
     /// Streams every mirrored message in send order.

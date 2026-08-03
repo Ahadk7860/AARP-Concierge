@@ -43,13 +43,36 @@ public struct Redactor: Sendable {
             expanded.insert(cleaned)
             let parts = cleaned.split(separator: " ").map(String.init)
             // A single part is only redacted when it is long enough not to be a word
-            // somebody might have meant. "Al" would eat the middle of "already".
+            // somebody might have meant, AND is not an ordinary English word in its own
+            // right. Length alone is not enough: a contact named Will, Mark, Hope, Grace
+            // or April turns "i will be there" into "i [name] be there" in every
+            // exemplar, which is a name list smuggled in through the AddressBook — the
+            // very thing NOTES.md declined to build directly and for exactly this reason.
             if parts.count > 1 {
-                for part in parts where part.count >= 4 { expanded.insert(part) }
+                for part in parts where part.count >= 4 && !alsoOrdinaryWords.contains(part) {
+                    expanded.insert(part)
+                }
             }
         }
         return Array(expanded)
     }
+
+    /// Given names that are also common English words.
+    ///
+    /// Redacting one of these costs the register a real word in every message that uses
+    /// it; **not** redacting it costs a first name that the full-name pattern still
+    /// catches whenever both parts appear together. The full name is always redacted —
+    /// only the bare given name is spared — so the exposure is "Grace" alone, not
+    /// "Grace Kim".
+    static let alsoOrdinaryWords: Set<String> = [
+        "will", "mark", "hope", "grace", "april", "may", "june", "july", "august",
+        "art", "bill", "chase", "dawn", "drew", "faith", "frank", "gene", "hunter",
+        "jack", "joy", "mercy", "miles", "olive", "page", "paige", "pat", "penny",
+        "rich", "rose", "ruby", "sky", "summer", "sunny", "wade", "ward", "young",
+        "brook", "brooke", "carol", "cliff", "dale", "dean", "don", "earl", "guy",
+        "holly", "jean", "jay", "lane", "mason", "nick", "noel", "pearl", "reed",
+        "rob", "royal", "sage", "sonny", "sterling", "stone", "van", "victor", "wren",
+    ]
 
     public static let placeholder = "[redacted]"
     public static let namePlaceholder = "[name]"

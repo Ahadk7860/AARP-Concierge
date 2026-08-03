@@ -69,7 +69,8 @@ enum HeadlessSync {
         let paths = SyncRun.Paths.installed()
         let force = CommandLine.arguments.contains("--force")
         do {
-            let outcome = try SyncRun(paths: paths, salt: salt).run(force: force)
+            let outcome = try SyncRun(paths: paths, salt: salt)
+                .runReportingFailures(force: force)
             if outcome.ran {
                 StructuredLog.emit("sync.complete", fields: [
                     "ran": true,

@@ -15,6 +15,10 @@ enum MetricsFixture {
 
     static let salt = "boi-dev-salt-do-not-ship-0001"
 
+    /// The string the generator puts inside a user-sent tapback, so a test can prove the
+    /// other person's words never reach an exemplar. See CONTRACTS.md § 7, 3 Aug.
+    static let inboundProseCanary = "CANARY-INBOUND-PROSE-SHOULD-NEVER-REACH-AN-EXEMPLAR"
+
     static func appleNanos(secondsAgo: Double) -> Int64 {
         Int64(now.addingTimeInterval(-secondsAgo).timeIntervalSinceReferenceDate) * 1_000_000_000
     }

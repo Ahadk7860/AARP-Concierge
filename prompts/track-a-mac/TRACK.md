@@ -145,7 +145,7 @@ report rather than picking a default that another track may also pick.
 | 04 | `04-metrics-digest.md` | a valid digest.v1 written to disk from real message history | 02, 03 | **done** — DoD green (the `reciproc` grep criterion was retired by the 3 Aug CONTRACTS § 6 amendment) |
 | 05 | `05-voice-pack.md` | valid voice_pack.v1 with zero inbound leakage | 02, 03 | **done** — 7 packs validate + pass the leak checker; guard-one canary 4 red / 0 green |
 | 06 | `06-health-check.md` | healthy / fixable / thin, with a repair path | 04 | **done** — all three cases classify; 131 tests pass |
-| 07 | `07-app-bundle.md` | a launchable .app with FDA onboarding and a working LaunchAgent | 06 | **done** — revoke→grant→auto-relaunch in 1s of a 2s budget; 158 tests pass |
+| 07 | `07-app-bundle.md` | a launchable .app with FDA onboarding and a working LaunchAgent | 06 | **done, Pass 2 corrections applied** — sent-tapback hole closed and double-canaried; relaunch log in NOTES; 163 tests pass |
 
 **Read the `Depends on` column, not the numbering.** Numbering implies a sequence and
 most of that sequence is imaginary. A prompt whose dependencies are complete is ready,

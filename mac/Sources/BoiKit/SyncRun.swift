@@ -132,20 +132,64 @@ public struct SyncRun {
         }
 
         try mirror.setMeta(Self.lastRunKey, StructuredLog.timestamp(now))
-
-        outcome.heartbeatPath = try Heartbeat.write(
-            Heartbeat.current(now: now,
-                              appVersion: AppInfo.version,
-                              bundlePath: ResponsibleBundle.current(),
-                              fullDiskAccess: true,
-                              lastSuccessfulSyncAt: now,
-                              mirrorMessageCount: outcome.mirrorMessageCount,
-                              corpusHealth: health.health),
-            toDirectory: paths.stateDirectory)
+        outcome.heartbeatPath = try writeHeartbeat(now: now,
+                                                   lastSuccessfulSyncAt: now,
+                                                   mirrorMessageCount: outcome.mirrorMessageCount,
+                                                   health: health.health)
 
         outcome.ran = true
         outcome.elapsed = Date().timeIntervalSince(started)
         return outcome
+    }
+
+    /// Records a heartbeat **whether or not the run succeeded**.
+    ///
+    /// `full_disk_access` used to be passed a literal `true`, written only after a
+    /// successful run — so the field could not vary, and the fleet-wide alarm Track D is
+    /// asked to build on it would have been built on a constant. The one state that
+    /// matters most is exactly the one that never got recorded: **access denied**, which
+    /// is the signature of a grant dropped by an auto-update.
+    ///
+    /// So the value is probed, not asserted, and `runReportingFailures` writes one on the
+    /// failure path too. A Mac that cannot read `chat.db` must still be able to say so.
+    @discardableResult
+    func writeHeartbeat(now: Date,
+                        lastSuccessfulSyncAt: Date?,
+                        mirrorMessageCount: Int,
+                        health: CorpusHealth) throws -> String {
+        try Heartbeat.write(
+            Heartbeat.current(now: now,
+                              appVersion: AppInfo.version,
+                              bundlePath: ResponsibleBundle.current(),
+                              fullDiskAccess: FullDiskAccess.probe(path: paths.chatDatabase)
+                                  .isGranted,
+                              lastSuccessfulSyncAt: lastSuccessfulSyncAt,
+                              mirrorMessageCount: mirrorMessageCount,
+                              corpusHealth: health),
+            toDirectory: paths.stateDirectory)
+    }
+
+    /// `run`, but a failure still leaves a heartbeat behind.
+    ///
+    /// This is the path the LaunchAgent takes. A Mac whose grant was revoked throws on
+    /// the first read, and if that simply propagated the machine would go **silent** —
+    /// indistinguishable from a laptop in a drawer. Silent-and-denied is the diagnosis;
+    /// silent alone is not.
+    public func runReportingFailures(now: Date = Date(), force: Bool = false) throws -> Outcome {
+        do {
+            return try run(now: now, force: force)
+        } catch {
+            let previous = try? MirrorDatabase(path: paths.mirror)
+            let lastRun = (try? previous?.meta(Self.lastRunKey))
+                .flatMap { $0 }
+                .flatMap(StructuredLog.date(from:))
+            let count = (try? previous?.messageCount()).flatMap { $0 } ?? 0
+            _ = try? writeHeartbeat(now: now,
+                                    lastSuccessfulSyncAt: lastRun,
+                                    mirrorMessageCount: count,
+                                    health: .thin)
+            throw error
+        }
     }
 }
 
