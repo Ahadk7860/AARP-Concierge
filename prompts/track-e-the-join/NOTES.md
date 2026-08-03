@@ -408,6 +408,19 @@ so it also asserts the `messages_out` rows are byte-identical before and after.
 the channel received rather than re-parsing the artifact files. Same reason the artifact was
 changed to the real brief document: the assertion has to be able to see the defect.
 
+### `gate.sh e` is green, and it needs the venv activated
+
+`GATE GREEN — track e` at `1fbb97e`, all six checks: typecheck, the three suites
+(448 vitest, pytest, `swift test`), lint in both languages, fixtures, ownership, and no
+skipped suites. Ownership reports the sanctioned-frozen and AMENDMENT-001 files as
+designed and `deliver.ts` passes under the extended `e)` case.
+
+Operationally: the gate's `e` case calls `python -m pytest` and `ruff`, neither of which
+exists on a bare `PATH` here — the first run came back `GATE RED` with two
+`command not found`s and nothing actually wrong. `source .venv/bin/activate` first. Worth a
+line because "red for an environment reason" and "red for a code reason" print identically
+in that report, and the wrong conclusion from it is to start editing code.
+
 ### What the gate caught the moment it was finally run
 
 `b3229cc` was **lint-red**, and had been since it was written: `cloud/e2e/src/run.ts`
