@@ -41,12 +41,42 @@ export type TickOutcome =
 export type TickDeps = {
   now: Date;
   channel: Channel;
-  /** Track B produces these. Supplied per user; this track consumes fixtures. */
+  /**
+   * Track B produces these, and until Track E prompt `02` nothing ever called it: this
+   * comment used to read "this track consumes fixtures", which was an honest
+   * description of a hole. `cloud/intelligence-bridge` fills it by invoking
+   * `boi_intel` in a subprocess — see `tickDeps` below.
+   *
+   * They stay injected rather than imported here. The composer must not know whether a
+   * gist came from a model, from SQL, or from nothing at all, and a brief has to remain
+   * testable without a Python interpreter.
+   *
+   * **`draftsFor` is keyed on `gist_id`**, which `compose.ts` relies on
+   * (`input.drafts.get(gist.gist_id)`).
+   */
   gistsFor: (scope: UserScope) => Promise<Gist[]>;
   draftsFor: (scope: UserScope) => Promise<Map<string, DraftBundle>>;
   log?: (event: Record<string, unknown>) => void;
   attempt?: number;
 };
+
+/**
+ * The production `TickDeps`, and the only place the brief meets the intelligence.
+ *
+ * There was no construction site before this: `TickDeps` was declared here and built
+ * only inside tests, which is precisely why gap 2 survived four merged tracks and a
+ * thousand green tests. A type with no producer cannot be wrong.
+ *
+ * The bridge is passed in rather than imported so this module keeps no dependency on a
+ * Python toolchain — `cloud/brief`'s own suite still runs with fixtures, and the wiring
+ * is the caller's choice.
+ */
+export function tickDeps(
+  bridge: Pick<TickDeps, "gistsFor" | "draftsFor">,
+  rest: Omit<TickDeps, "gistsFor" | "draftsFor">,
+): TickDeps {
+  return { ...rest, gistsFor: bridge.gistsFor, draftsFor: bridge.draftsFor };
+}
 
 export async function runForUser(
   schedule: UserSchedule,
