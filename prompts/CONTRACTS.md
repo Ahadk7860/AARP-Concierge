@@ -93,6 +93,21 @@ bidirectional `in` check licenses every prefix of every specific, which turns th
 fabrication gate into a generator of *wrong* commitments in the user's own name — worse
 than the invented ones it was built to stop.
 
+**Vague temporal hedges are not specifics.** Decided 3 Aug after the gate rejected
+`"ill get back to u this week"` on every model run — a 5% ceiling nobody could reach,
+and prompt `05` rightly forbade touching a gate to improve a score.
+
+The line: **a specific is falsifiable against a calendar; a hedge is not.** `Thursday`,
+`the 14th`, `at 7`, `tomorrow` all commit the user to something that can turn out to be
+wrong. `this week`, `soon`, `later`, `sometime`, `in a bit` commit to nothing checkable.
+The gate exists to stop a plausible *wrong* commitment being sent in the user's name, and
+a hedge cannot be wrong — it can only be vague, which is the entire point of the `defer`
+stance.
+
+So: a closed allowlist of hedges passes without needing a match in `facts`. Keep it
+closed and keep it short; anything naming a day, a date, a time or a number is a
+specific and stays gated.
+
 **Known and bounded:** spelled-out numbers (`seven`, `the fourteenth`), abbreviated
 weekdays (`next thurs`), lowercase places (`the ferry building`) and single first names
 (`Sarah`) are not extracted today, so a draft can name them freely. Those are the four
@@ -659,7 +674,7 @@ unresolved contract code against the placeholder and flag the dependency in `NOT
 | 9 | Does the three-click grant survive macOS 26 (Tahoe)? | MVP ships **Full Disk Access**, which works everywhere | user | before launch, not before merge |
 | 10 | Does an FDA grant survive a Sparkle auto-update? | assume it may not; ship the fleet-wide heartbeat alarm regardless | user | before shipping auto-update |
 | 11 | Can a 3–4B local model produce gists good enough to draft from? | **SQL-only gists ship first** and are the permanent fallback | Track B | prompt `02` |
-| 12 | Gemini Flash-Lite vs Kimi K2.5 on register fidelity | **default `gemini-3.5-flash-lite`** (see below) | Track B | prompt `05`, on the eval harness |
+| 12 | ~~Gemini Flash-Lite vs Kimi K2.5 on register fidelity~~ | **RESOLVED 3 Aug on the harness: `gemini-3.1-flash-lite`.** It answered 20/20 with a 100% validator pass rate across every run; `3.5-flash-lite` answered 15/20 and landed at 60/70/75/75% across five. Cost is a wash ($0.000223 vs $0.000209 per draft). **The cheaper, older model won.** | Track B | done |
 | 12b | ~~`gemini-2.5-flash-lite` as the pinned default~~ | **RESOLVED 2 Aug: retired for new API keys** — returns `404 NOT_FOUND, no longer available to new users`, while still appearing in `models.list()`, so only a real request detects it. Pinned to `gemini-3.5-flash-lite`. | — | done |
 
 **Items 4 through 7 are sales-call questions, not research questions.** Track C must be
