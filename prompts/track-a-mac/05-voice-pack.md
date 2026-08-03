@@ -64,7 +64,13 @@ verify these yourself before reporting — see the next section.
 
 - [ ] `boi-cli voice-pack --mirror /tmp/boi-a/mirror.db --out /tmp/boi-a/out/` writes one file per ranked contact plus `global_fallback.json`
 - [ ] **`python3 scripts/validate_fixtures.py voice_pack.v1 <each file>` exits zero for every file**
-- [ ] **`python3 scripts/check_voice_pack_leak.py --db /tmp/boi-a/chat.db --pack <each file>` exits zero for every file.** This is the third guard and it is a frozen anchor: do not weaken it, skip it, or narrow its input to make it pass.
+- [ ] **`python3 scripts/check_voice_pack_leak.py --mirror /tmp/boi-a/mirror.db --pack <each file>` exits zero for every file.** This is the third guard and it is a frozen anchor: do not weaken it, skip it, or narrow its input to make it pass.
+
+> *Corrected 3 Aug: this line said `--db /tmp/boi-a/chat.db`. That was wrong. The script
+> built its sent-set from `text IS NOT NULL`, but on a real Mac two thirds of rows keep
+> their body in `attributedBody`, so genuine exemplars were reported as leaks — 47 of 174
+> packs on the corpus that found it. The mirror holds decoded text; a raw `chat.db` is now
+> refused rather than answered.*
 - [ ] A test constructs a mirror where a distinctive inbound string exists, builds a pack, and asserts that string is **absent** from the exemplars. This test must fail if the `is_from_me` filter is removed — verify that by temporarily removing it, watching the test fail, and restoring it.
 - [ ] A redaction test: exemplars built from messages containing a phone number, an email address, and a dollar amount contain none of the three
 - [ ] No pack exceeds 40 exemplars or 200 characters per exemplar — asserted in a test
