@@ -18,15 +18,20 @@ public struct DigestBuilder {
         /// A single exchanged text is not a relationship, and padding the digest with
         /// them makes concentration meaningless.
         public var minimumMessages: Int
+        /// State the mirror cannot supply — Messages in iCloud, Low Power Mode. Passed
+        /// through to the one health function, never re-derived here.
+        public var system: HealthCheck.SystemState
 
         public init(userID: String? = nil,
                     deviceID: String? = nil,
                     generatedAt: Date = Date(),
-                    minimumMessages: Int = 1) {
+                    minimumMessages: Int = 1,
+                    system: HealthCheck.SystemState = HealthCheck.SystemState()) {
             self.userID = userID
             self.deviceID = deviceID
             self.generatedAt = generatedAt
             self.minimumMessages = minimumMessages
+            self.system = system
         }
     }
 
@@ -75,7 +80,11 @@ public struct DigestBuilder {
                 )
             }
 
-        let health = Self.provisionalHealth(result.corpus)
+        // ONE HEALTH FUNCTION, TWO CALLERS. `boi-cli health` calls the same
+        // `HealthCheck.evaluate`, so the classification the user is shown on the
+        // onboarding screen and the one that ships inside `corpus.health` cannot
+        // disagree — there is no second implementation for them to disagree with.
+        let health = HealthCheck.evaluate(corpus: result.corpus, system: options.system)
         let corpus = CorpusSummary(
             message_count: result.corpus.messageCount,
             thread_count: result.corpus.threadCount,
@@ -83,9 +92,10 @@ public struct DigestBuilder {
             last_message_at: result.corpus.lastMessageAt.map(StructuredLog.timestamp),
             span_days: result.corpus.spanDays,
             green_share: Self.round(result.corpus.greenShare),
-            // Whether Messages in iCloud is on cannot be read from chat.db. Null is the
-            // honest answer and the schema allows it; prompt 06 has the account state.
-            messages_in_icloud: nil,
+            // Not from chat.db — it does not know. Prompt 06 reads it from
+            // `com.apple.madrid`, and nil when that is absent is the honest answer
+            // rather than a guess in either direction.
+            messages_in_icloud: options.system.messagesInICloud,
             retention_boundary: result.corpus.retentionBoundary,
             days_since_newest: result.corpus.daysSinceNewest,
             health: health.health,
@@ -114,46 +124,6 @@ public struct DigestBuilder {
                       relationships: relationships,
                       whole_life: wholeLife)
     }
-
-    /// **Provisional, and prompt 06 replaces it.**
-    ///
-    /// `digest.v1` requires `corpus.health`, so something has to be written here, and
-    /// the alternative — defaulting to `healthy` — would be a confident claim made by
-    /// code that does not check anything. This uses only what the mirror can prove and
-    /// errs toward `fixable`, which is the state with a remedy attached.
-    public static func provisionalHealth(
-        _ corpus: MetricLibrary.CorpusMetrics
-    ) -> (health: CorpusHealth, reasons: [String]) {
-        var reasons: [String] = []
-        var health = CorpusHealth.healthy
-
-        if corpus.messageCount < thinMessageCount || corpus.spanDays < thinSpanDays {
-            health = .thin
-            reasons.append("new_mac")
-        }
-
-        switch corpus.retentionBoundary {
-        case "1y_exact", "365d":
-            if health != .thin { health = .fixable }
-            reasons.append("keep_messages_1y")
-        case "30d_exact", "30d":
-            if health != .thin { health = .fixable }
-            reasons.append("keep_messages_30d")
-        default:
-            break
-        }
-
-        if corpus.daysSinceNewest >= staleSyncDays {
-            if health == .healthy { health = .fixable }
-            reasons.append("stale_sync")
-        }
-
-        return (health, reasons.isEmpty ? ["none"] : reasons)
-    }
-
-    public static let thinMessageCount = 500
-    public static let thinSpanDays = 30
-    public static let staleSyncDays = 7
 
     /// `display` is capped at 64 characters by the schema. Truncating beats emitting a
     /// document that fails validation because somebody's contact card has a long name.

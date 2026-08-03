@@ -62,6 +62,40 @@ Anything `prompts/CONTRACTS.md` does not specify, specifies wrongly, or specifie
 way that does not work in practice. You may not edit it — record it here and report.
 Every entry names the prompt where it surfaced.
 
+`[prompt 05] CONTRACT GAP — § 6 pins the canonical JSON for voice_pack_version but not
+float formatting, and Foundation and Python disagree by default.` § 6 specifies sorted
+keys, no whitespace, and `ensure_ascii=false`. It does not say how a float is rendered,
+and that is enough to produce two different hashes from identical packs:
+
+```
+Double 1.0   Python repr -> "1.0"    JSONSerialization -> "1"
+Double 0.0   Python repr -> "0.0"    JSONSerialization -> "0"
+```
+
+`emoji_rate`, `greeting_rate` and `signoff_rate` are all legitimately 0.0 or 1.0, so
+this is not a corner case — it fires on the very first pack. I hand-rolled
+`CanonicalJSON` rather than using `JSONSerialization`, formatting Doubles with Swift's
+shortest-round-trip printer, which matches Python's `repr` for every value these fields
+can take. Also escapes exactly what Python escapes: quotes, backslashes and C0 controls,
+**not** forward slashes. Pinned by `testTheCanonicalFormMatchesWhatPythonWouldProduce`.
+
+Worth adding one line to § 6: *floats are rendered as the shortest string that
+round-trips, with a trailing `.0` on whole numbers*. Without it, Track B using
+`json.dumps` and Track A using `JSONSerialization` would both be following the contract
+and still disagree.
+
+`[prompt 06] CONTRACT GAP — there is no health_reasons value for a denied Full Disk
+Access grant.` The frozen enum is `icloud_off, keep_messages_30d, keep_messages_1y,
+new_mac, low_green_share, stale_sync, low_power_mode, none`. Prompt 06's Definition of
+Done requires the FDA deep link, but FDA denial is a precondition failure rather than a
+property of the corpus, and with no grant there is no corpus to classify at all.
+
+Resolved locally: FDA is a **`Remedy`**, not a `health_reason`. `HealthCheck.Remedy` is
+this track's own type — it carries the id, title, body, deep link, plain-text fallback
+and whether a re-scan is worth offering — and prompt 07 renders it. Nothing outside
+`mac/` sees it, so this needs no contract change unless the FDA state is meant to reach
+Track D, in which case the enum needs a value.
+
 `[prompt 04] § 10's first_contact_at rule reproduces exactly on the retention-capped
 fixture. No gap in the rule itself.` Regenerated with `--retention-cap-days 365`, three
 of six threads floor on the boundary and three do not, with clean separation — the
@@ -141,6 +175,11 @@ Every append to a foundation-owned shared file: dependency manifests, lint confi
 
 Format: `[prompt NN] <file> — added <what> because <why>`
 
+`[prompt 05, 06]` None. No shared file was touched by either prompt; every path is under
+`mac/`, plus this `NOTES.md` and the `Status` column of `TRACK.md`. No dependency added —
+HMAC and SHA-256 come from CryptoKit in the macOS SDK, and the Messages-in-iCloud probe
+uses `CFPreferencesCopyAppValue` from Foundation.
+
 `[prompt 04]` None. No shared file was touched: every path in
 `git diff --name-only main...HEAD` for this prompt is under `mac/`, plus this `NOTES.md`
 and the `Status` column of `TRACK.md`. No dependency was added — HMAC comes from
@@ -205,8 +244,84 @@ Format: `[prompt NN] → Track <X>: <what you need and why>`
 Anywhere the implementation departs from what the prompt described, and why. A
 deviation is not a failure — an unrecorded one is.
 
+`[prompt 06] I READ THE 364/365/366 CRITERION AS BEING ABOUT THE EXACT-BOUNDARY
+SIGNATURE, AND KEPT A SEPARATE LOWER-CONFIDENCE PATH THAT A LITERAL READING WOULD HAVE
+DELETED.` Recorded because it is the one place in this batch where I did not implement a
+Definition of Done item literally.
+
+The criterion: *"Boundary detection is tested at the edges: 364, 365, and 366 days
+classify as not-boundary, boundary, not-boundary."* `RetentionBoundary.isExactBoundary`
+does exactly that and is asserted at all six edges (365 and 30, plus the days either
+side). But `detect` — which decides the `retention_boundary` value in the digest, and
+therefore whether `first_contact_at` is nulled — still returns the **non-exact** `365d`
+for a span one day off the cap *when several threads pile up on the same day*.
+
+Why I kept it: the pile-up is the real evidence and the span is the weaker signal.
+Prompt 06's own scope says so — *"Four top-25 conversations starting at exactly the
+boundary is truncation, not coincidence."* A corpus whose oldest surviving message sits a
+few hours inside the cap rounds to 364 and is still capped, and treating it as uncapped
+means emitting a first-contact date that is an artefact — the exact false claim § 10
+exists to prevent. Deleting the loose path would have made the checklist simpler and the
+product wrong in a direction that is silent.
+
+The two are distinguished by test rather than blurred:
+`detect(365, piled) == "1y_exact"` but `detect(364, piled) == "365d"`, and
+`detect(364, notPiled) == nil`. The fixture hits the strict path — its span is exactly
+365 — so nothing was widened to make this batch pass.
+
+`[prompt 06] `spanDays` now ROUNDS instead of truncating, and the exact-boundary
+criterion depends on it.` The capped fixture spans 364.9963 days — the cap, less the few
+hours between the oldest surviving message and the deletion cutoff. Truncating reported
+**364**, which is not the boundary and is not what any human would call that span either.
+Rounding reports 365, which is what the foundation's own reference fixture says
+(`"span_days": 365`) for the same corpus. `digest.corpus.span_days` therefore changed
+from 364 to 365 in this batch. Flagged because it is a visible output change made in
+service of a later prompt's criterion, which is exactly the shape of thing a reviewer
+should check rather than take on trust.
+
+`[prompt 05] TWO SERIALIZATION DEFECTS FOUND, ONE OF THEM IN PROMPT 04'S ALREADY-GREEN
+OUTPUT.` `JSONEncoder` omits nil optionals, and both schemas want the key present:
+
+1. **`voice_pack.v1` lists `contact_id` in `required` and permits null** — that is how
+   the global fallback is spelled. The omitted key failed validation outright, so this
+   one announced itself.
+2. **`digest.v1`'s `first_contact_at` is optional, so omitting it validated silently** —
+   and prompt 04 shipped it omitted. CONTRACTS § 10 says to *emit* `first_contact_at:
+   null`. Those are not the same statement to Track D: a missing key reads as "this build
+   did not compute it", an explicit null reads as "computed, and the honest answer is
+   that we cannot know". The rule exists to say the second thing. **Prompt 04's
+   checklist was green with this wrong**, because the validator cannot catch it and my
+   round-trip test compared `JSONEncoder` output against `JSONEncoder` output.
+
+Fixed by `ExplicitNullJSON`, with the keys listed explicitly per document rather than
+blanket-filling every optional. The round-trip test now writes through the real writer
+and additionally asserts the three nulls are present as `NSNull`, so the weaker version
+of that test cannot come back.
+
+`[prompt 05] The lowercase-name redaction gap is real, bounded, and pinned by a test
+that asserts the leak.` § 7 requires that name redaction not assume capitalization.
+Covered two ways: AddressBook display names matched **case-insensitively** (the only
+thing that catches `"ill ask john smith about it"` in a lowercase corpus), and a
+capitalized `First Last` shape for the sentence-case half.
+
+**With no AddressBook — which is the state right now, since Full Disk Access is
+revoked — a lowercase name of somebody not in Contacts is not redacted.**
+`testWithNoContactsALowercaseNameIsNotCaughtWhichIsTheKnownLimit` asserts the leak
+survives, so the limitation is a failing-when-fixed test rather than a comment somebody
+deletes. I did not add a built-in first-name list: `will`, `mark`, `grace`, `may` and
+`art` are ordinary words, and a list that redacts them damages the register on every
+corpus to catch a name on a few.
+
 `[prompt 04] THE `grep -rin 'reciproc' mac/` CRITERION CANNOT PASS, AND NOT BECAUSE OF
-ANYTHING THIS TRACK WROTE.` It returns two matches, both already on `main` before this
+ANYTHING THIS TRACK WROTE.` **RESOLVED 3 Aug by the user's amendment to CONTRACTS § 6:
+the criterion was unsatisfiable and is retired.** The real test is that no code computes
+the metric and nothing renders it, verified by reading the metric library rather than by
+grepping — a comment naming a refused metric is evidence of judgement, not a violation.
+`MetricLibrary` computes no such ratio and `DigestBuilder` renders none; the in-suite
+guard test remains, still exempting the two foundation files by name. Original entry
+follows.
+
+ It returns two matches, both already on `main` before this
 worktree existed, both in files I am forbidden to edit:
 
 ```
@@ -506,6 +621,45 @@ Choices the prompt left open that you had to resolve: a library, a data structur
 error-handling approach. The user needs to see these before merge, because another
 track may have chosen differently.
 
+`[prompt 06] One health function, two callers — so the CLI and the digest cannot
+disagree.` `DigestBuilder` no longer has its own provisional classifier; both it and
+`boi-cli health` call `HealthCheck.evaluate`. The Definition of Done asks for a test
+that they cannot diverge, and the honest way to satisfy that is to delete the second
+implementation rather than to assert that two implementations agree.
+`testTheDigestsHealthIsAlwaysTheHealthCheckSAnswer` still checks it across six corpus
+shapes, because "there is only one function" is a claim a refactor can quietly falsify.
+
+`[prompt 06] Messages in iCloud is read from `com.apple.madrid.CloudKitSyncingEnabled`,
+which needs no Full Disk Access.` That is what makes it usable *before* the grant, on the
+onboarding screen where this decision is actually made. Absent means `nil`, never
+`false`: a Mac that has never opened Messages has no key, and telling that user to switch
+on something already on is the kind of wrong answer that costs the trust the whole
+onboarding is spending. Verified against this machine, which reports `1`.
+
+`[prompt 06] `thin` outranks every fixable signal and carries no remedy.` A corpus of 412
+messages cannot be made trustworthy by changing a setting, and attaching a remedy would
+imply it could. The reasons are still recorded — the classification is simplified, the
+evidence is not — so a thin corpus that is *also* retention-capped reports both
+`new_mac` and `keep_messages_1y` while offering nothing to tap.
+
+`[prompt 06] Deep links only where one genuinely exists.` Full Disk Access and Battery
+have real System Settings panes. Keep Messages, Messages in iCloud and Text Message
+Forwarding live in the Messages app or on the iPhone and have no link, so those remedies
+carry plain instructions and `deepLink: nil`. A link that opens the wrong pane is worse
+than no link: the user follows it, finds no such setting, and concludes the app is
+confused about their own Mac.
+
+`[prompt 05] Exemplars are redacted, then deduped, then capped — in that order.` Capping
+first fills a pack with forty near-copies of `"ok that works for me"` and teaches the
+drafter nothing; deduping after redaction also collapses two messages that differed only
+in the phone number now removed from both. On the fixture this is the difference between
+7 and 10 distinct exemplars in the global pack.
+
+`[prompt 05] The global fallback pack is always written, even when every contact has
+one.` A brand-new contact still needs a voice, and "no pack" would mean the drafter
+writes in nobody's voice at all. Contacts below 5 sent messages get no per-contact pack
+and their words still reach the fallback, so nothing is lost.
+
 `[prompt 04] Contacts and calls are read through their own real schemas, and both
 degrade to nil rather than throwing.` `AddressBookDirectory` reads Core Data's
 `ZABCDRECORD` / `ZABCDPHONENUMBER` / `ZABCDEMAILADDRESS`, merging on `ZOWNER` — the
@@ -599,6 +753,30 @@ re-scan and dedup by `guid`.
 
 Anything you noticed that the plan did not anticipate, including work that should exist
 but is not in any track's scope. This is often the most useful section at review time.
+
+`[prompt 05] THE SAME UNIFORM-SPACING PROBLEM BREAKS `avg_msgs_per_burst`, AND TRACK B
+WILL HIT IT ON THE SAME GENERATOR.` Every per-contact pack from the fixture reports
+`avg_msgs_per_burst: 1.0` — the schema's floor — because the generator spaces messages
+2.4 to 13 hours apart and nothing ever lands inside the 5-minute burst window. Real
+texting is bursty; the reference fixture says 2.3 for Maya.
+
+This matters more than it looks. CONTRACTS § 1's length gate is
+`max(median_len * avg_msgs_per_burst, p90_len) + 30`, so a burst value pinned at 1.0
+collapses the gate to `max(median, p90) + 30` and quietly makes it far stricter than
+intended — on the fixture, 74 instead of the ~118 the Maya numbers give. Track B's
+drafter validates against that gate. **Two tracks, both correct, both fed a fixture that
+silently narrows the thing they are meant to be testing.**
+
+Same root cause as the initiation finding below, same fix: draw inter-message gaps from a
+heavy-tailed distribution rather than spacing them evenly. `question_rate` is also 0.0
+across every pack because none of the generator's ten `USER_LINES` contains a question
+mark, which is worth a one-line fix whoever touches the generator next.
+
+`[prompt 05] Emoji, greetings and sign-offs are untested against real data.` The
+generator's user lines contain no emoji, no greeting and no sign-off, so `emoji_rate`,
+`top_emoji`, `greeting_rate` and `signoff_rate` are all 0 or empty on every fixture pack.
+The extraction logic is covered by purpose-built unit tests, but nothing on the shared
+fixture would notice if it broke. Third item for the same generator change.
 
 `[prompt 04] THE SYNTHETIC FIXTURE CANNOT EXERCISE INITIATION AT ALL, AND THE NUMBER IT
 PRODUCES IS JUNK IN A WAY THAT LOOKS PLAUSIBLE.` The generator spaces each thread's

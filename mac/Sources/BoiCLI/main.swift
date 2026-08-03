@@ -31,6 +31,7 @@ usage: boi-cli scan --db <path> [options]
                     [--contacts <abcddb>] [--calls <storedata>]
                     [--top <n>]
        boi-cli voice-pack --mirror <path> --out <dir> [--contacts <abcddb>]
+       boi-cli health --mirror <path> [--contacts <abcddb>]
 
   --db <path>                 chat.db to read. Opened file:<path>?mode=ro, always.
   --snapshot                  copy the db and both sidecars first, then read the copy
@@ -55,6 +56,17 @@ usage: boi-cli scan --db <path> [options]
 
 guard let command = arguments.first, !command.hasPrefix("--") else {
     fail(usage)
+}
+
+/// State that lives outside the mirror. Read once, passed to the one health function.
+///
+/// The green-share signal only means something when the AddressBook confirms the user
+/// has somebody to text green; with no contacts readable this stays nil, which the
+/// health check treats as no evidence rather than as evidence of absence.
+func systemState(contacts: AddressBookDirectory?) -> HealthCheck.SystemState {
+    var state = HealthCheck.SystemState.read()
+    state.hasNonIMessageContacts = contacts.map { $0.recordCount > 0 ? true : false }
+    return state
 }
 
 switch command {
@@ -228,8 +240,10 @@ case "digest":
         let library = MetricLibrary(resolver: resolver,
                                     options: .init(now: generatedAt, callHistory: calls))
         let result = try library.compute(mirror: mirror)
-        let digest = DigestBuilder(resolver: resolver,
-                                   options: .init(generatedAt: generatedAt)).build(from: result)
+        let digest = DigestBuilder(
+            resolver: resolver,
+            options: .init(generatedAt: generatedAt,
+                           system: systemState(contacts: contacts))).build(from: result)
         let bytes = try DigestBuilder.write(digest, to: outPath)
 
         StructuredLog.emit("digest.complete", at: generatedAt, fields: [
@@ -276,6 +290,64 @@ case "digest":
         }
     } catch {
         StructuredLog.emit("digest.failed", level: .error, fields: ["detail": "\(error)"])
+        exit(1)
+    }
+
+case "health":
+    guard let mirrorPath = value("mirror") else { fail(usage) }
+    guard let salt = ContactResolver.developmentSalt() else {
+        fail("\(ContactResolver.developmentSaltVariable) is not set. Copy .env.example to "
+             + ".env in this worktree.")
+    }
+    do {
+        let mirror = try MirrorDatabase(path: mirrorPath)
+        let contacts = value("contacts").flatMap(AddressBookDirectory.read(path:))
+            ?? AddressBookDirectory.discover()
+        let now = Date()
+        let corpus = try MetricLibrary(resolver: ContactResolver(salt: salt,
+                                                                 directory: contacts ?? .empty),
+                                       options: .init(now: now)).compute(mirror: mirror).corpus
+        let system = systemState(contacts: contacts)
+        let health = HealthCheck.evaluate(corpus: corpus, system: system)
+
+        StructuredLog.emit("health.checked", at: now, fields: [
+            "health": health.health.rawValue,
+            "reasons": health.reasons,
+            "produces_report": health.producesReport,
+            "headline": health.headline,
+            "message_count": corpus.messageCount,
+            "thread_count": corpus.threadCount,
+            "span_days": corpus.spanDays,
+            "days_since_newest": corpus.daysSinceNewest,
+            "green_share": corpus.greenShare,
+            "retention_boundary": corpus.retentionBoundary ?? "none",
+            "exact_boundary_signature": RetentionBoundary.isExactBoundary(spanDays: corpus.spanDays),
+            "threads_on_boundary": corpus.threadsOnBoundary,
+            "messages_in_icloud": system.messagesInICloud.map(String.init) ?? "unknown",
+            "low_power_mode": system.lowPowerMode,
+        ])
+
+        for remedy in health.remedies {
+            StructuredLog.emit("health.remedy", at: now, fields: [
+                "id": remedy.id,
+                "title": remedy.title,
+                "body": remedy.body,
+                "deep_link": remedy.deepLink ?? "none",
+                "instructions": remedy.fallbackInstructions,
+                "rescan_available": remedy.rescanAvailable,
+            ])
+        }
+
+        if !health.producesReport {
+            // The thin path. No report, and the copy says why in the user's terms.
+            // Never hand somebody a bad report and call it their year in messages.
+            StructuredLog.emit("health.no_report", at: now, fields: [
+                "headline": HealthCheck.thinHeadline,
+                "body": HealthCheck.thinBody,
+            ])
+        }
+    } catch {
+        StructuredLog.emit("health.failed", level: .error, fields: ["detail": "\(error)"])
         exit(1)
     }
 

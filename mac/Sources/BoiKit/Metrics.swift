@@ -388,7 +388,12 @@ public struct MetricLibrary {
         corpus.firstMessageAt = dates.first
         corpus.lastMessageAt = dates.last
         if let first = dates.first, let last = dates.last {
-            corpus.spanDays = max(0, Int(last.timeIntervalSince(first) / 86_400))
+            // ROUNDED, NOT TRUNCATED, and the exact-boundary signature depends on it. A
+            // retention-capped corpus spans 364.996 days — the cap, less the few hours
+            // between the oldest surviving message and the deletion cutoff. Truncating
+            // reports 364, which is not the boundary and is not what any human would
+            // call that span either.
+            corpus.spanDays = max(0, Int((last.timeIntervalSince(first) / 86_400).rounded()))
         }
         corpus.daysSinceNewest = dates.last.map(daysBetween) ?? 0
 
@@ -530,10 +535,29 @@ public enum RetentionBoundary {
     /// tautology — some thread has to be the oldest.
     public static let minimumThreadsOnBoundary = 2
 
+    public static let oneYearDays = 365
+    public static let thirtyDayDays = 30
+    /// How far off the cap a span may land and still be called a boundary — but only
+    /// with the pile-up behind it. A rolling deletion window produces a span that lands
+    /// on the cap; a day or two of slack covers a corpus whose oldest surviving message
+    /// sits a few hours inside it.
+    public static let nearBoundarySlackDays = 2
+
+    /// `1y_exact` / `30d_exact` are the confident answer: the span lands on the cap
+    /// **and** several unrelated threads begin on the same day. `365d` / `30d` are the
+    /// hedge — one of the two signals, not both.
     public static func detect(spanDays: Int, threadsOnBoundary: Int) -> String? {
         let piledUp = threadsOnBoundary >= minimumThreadsOnBoundary
-        if (364...366).contains(spanDays) { return piledUp ? "1y_exact" : "365d" }
-        if (29...31).contains(spanDays) { return piledUp ? "30d_exact" : "30d" }
+        for (cap, exact, loose) in [(oneYearDays, "1y_exact", "365d"),
+                                    (thirtyDayDays, "30d_exact", "30d")] {
+            let onCap = spanDays == cap
+            let near = abs(spanDays - cap) <= nearBoundarySlackDays
+            if onCap && piledUp { return exact }
+            // A span landing exactly on the cap with no pile-up is suspicious but
+            // unproven; a pile-up a day off the cap is proven but not exact. Both are
+            // real, and neither is the confident answer.
+            if onCap || (near && piledUp) { return loose }
+        }
         return nil
     }
 }
