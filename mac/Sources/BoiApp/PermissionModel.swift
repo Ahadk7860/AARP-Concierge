@@ -45,6 +45,8 @@ final class PermissionModel: ObservableObject {
     /// Set only for `.notInApplications`, so the screen can show where the copy they
     /// opened actually lives.
     @Published private(set) var bundlePath: String?
+    /// The way into the thread. Resolved once the scan completes.
+    @Published private(set) var handoff: ThreadHandoff.State = .lineUnresolved
 
     private var timer: Timer?
     private var relaunchWatchdog: Timer?
@@ -57,6 +59,15 @@ final class PermissionModel: ObservableObject {
     private let install: () -> InstallLocation.Verdict
     private let narrator: GrantNarrator
     private let stateDirectory: String
+    /// Where the user's assigned line comes from.
+    ///
+    /// **Injected, and per-user.** The registrar assigns a different line to every user —
+    /// a shared pool means the number is not a constant, and a hard-coded one would open a
+    /// thread with a line that is not theirs. Nothing on the Mac resolves it today
+    /// (`cloud/api/src/` owns the registrar), so this returns nil and the handoff says so
+    /// plainly rather than rendering a broken `sms:` link. Recorded in `NOTES.md`.
+    private let assignedLine: () -> String?
+    private let pairingToken: () -> String?
 
     static let consentKey = "app.boi.mac.consent.accepted.v1"
     /// **The marker that makes "still denied after relaunch" a distinguishable state.**
@@ -69,12 +80,16 @@ final class PermissionModel: ObservableObject {
          probe: @escaping () -> FullDiskAccess.Status = { FullDiskAccess.probe() },
          relaunch: @escaping () -> Void = Relauncher.relaunchNow,
          install: @escaping () -> InstallLocation.Verdict = InstallLocation.current,
-         stateDirectory: String = SyncRun.Paths.installed().stateDirectory) {
+         stateDirectory: String = SyncRun.Paths.installed().stateDirectory,
+         assignedLine: @escaping () -> String? = { PairingHandles.assignedLine() },
+         pairingToken: @escaping () -> String? = { PairingHandles.pairingToken() }) {
         self.defaults = defaults
         self.probe = probe
         self.relaunch = relaunch
         self.install = install
         self.stateDirectory = stateDirectory
+        self.assignedLine = assignedLine
+        self.pairingToken = pairingToken
         self.watcher = GrantWatcher(probe: probe)
         // Persisted, because the happy path relaunches this process: an in-memory limiter
         // would signal the grant, restart, come back empty and signal again.
@@ -221,43 +236,43 @@ final class PermissionModel: ObservableObject {
             enter(.noDatabase)
 
         case .granted(let polls, let elapsed):
+            // **The non-deterministic case: the probe occasionally succeeds before any
+            // relaunch. Proceed SILENTLY.**
+            //
+            // No acknowledgement screen, no pause, no automatic relaunch. All three were
+            // in `01` and all three were wrong once the manual run landed:
+            //
+            // - The acknowledgement screen appeared at the exact moment macOS puts up its
+            //   own "Boi will not have full disk access until it is quit" dialog, and Boi
+            //   popping up alongside it was the friction the run found. The system dialog
+            //   is authoritative and performs the relaunch; the best thing Boi can do is
+            //   be quiet behind it.
+            // - Congratulating the user for reaching this state tells them they skipped a
+            //   step they never knew existed, and presents a different flow from the one
+            //   they were reading thirty seconds earlier.
+            // - Relaunching ourselves here competes with the dialog for the same job.
+            //
+            // So this path is indistinguishable, from the user's side, from the ordinary
+            // post-relaunch launch: straight to reading their messages.
             pollCount = polls
-            statusLine = "Access granted — restarting Boi so macOS applies it…"
-            // Mark it FIRST so the checkmark is already on screen, then stop polling and
-            // get out. Everything from here is on the two-second clock.
             accessGranted = true
             stopPolling()
-            enter(.granted)
+            defaults.set(false, forKey: Self.relaunchedKey)
             StructuredLog.emit("fda.granted", fields: [
                 "polls": polls,
                 "waited_s": (elapsed * 1000).rounded() / 1000,
                 "poll_interval_s": FullDiskAccess.pollInterval,
-                "relaunch_budget_s": FullDiskAccess.relaunchBudget,
+                "pre_relaunch": true,
+                "detail": "probe succeeded without a relaunch — non-deterministic, proceeding silently",
             ])
+            enter(.syncing)
 
             // **The heartbeat leaves now, not on the next scheduled sync.** Under
             // AMENDMENT-002 the iMessage thread already exists, so this is what lets the
             // cloud tell the user the grant landed while they are still standing in
-            // System Settings.
+            // System Settings. Silent on screen is not silent to the cloud.
             signalGrant(true)
-
-            // The marker the next process reads. Written before the relaunch, because
-            // after it there is no "us" left to write anything.
-            defaults.set(true, forKey: Self.relaunchedKey)
-
-            // A beat so the flipped checkmark actually renders before the window goes
-            // away — an app that vanishes without acknowledging the click reads as a
-            // crash. Well inside the budget; `GrantWatcher` asserts that arithmetic.
-            Task { @MainActor in
-                try? await Task.sleep(
-                    nanoseconds: UInt64(GrantWatcher.acknowledgementPause * 1_000_000_000))
-                self.enter(.relaunching)
-                StructuredLog.emit("fda.relaunching", fields: [
-                    "reason": "macOS does not apply a TCC grant to an already-running process",
-                ])
-                self.armRelaunchWatchdog()
-                self.relaunch()
-            }
+            Task { await runScan() }
 
         case .relaunching:
             break
@@ -286,12 +301,19 @@ final class PermissionModel: ObservableObject {
         relaunchWatchdog = watchdog
     }
 
-    /// Quit and reopen, by hand. Offered wherever the automatic relaunch may not arrive —
-    /// including the stalled *waiting* screen, because if this process cannot observe the
-    /// grant it made, no automatic relaunch is ever triggered and this is the only exit.
+    /// Quit and reopen, by hand — **the only relaunch Boi performs, and only when the user
+    /// asks for it.**
+    ///
+    /// Offered from `waiting` onwards rather than after a timer, because the probe never
+    /// observes the grant from inside the process that was running when it was made. It is
+    /// also the resume path for somebody who chose **Later** on the system dialog, which is
+    /// a state nothing can detect.
     func relaunchManually() {
         defaults.set(true, forKey: Self.relaunchedKey)
         StructuredLog.emit("fda.relaunch_manual", fields: ["stage": stage.rawValue])
+        stopPolling()
+        enter(.relaunching)
+        armRelaunchWatchdog()
         relaunch()
     }
 
@@ -330,6 +352,23 @@ final class PermissionModel: ObservableObject {
                 signaller.send(granted: value, digestGeneratedAt: digestGeneratedAt)
             }
         }
+    }
+
+    /// **Paired or unpaired is knowable, not guessed** — ask the token store. Under
+    /// AMENDMENT-002 the thread is opened before the app is ever installed, so paired is
+    /// the normal path and unpaired means a direct download or a pairing that never
+    /// completed.
+    private func resolveHandoff() -> ThreadHandoff.State {
+        let state = ThreadHandoff.resolve(handle: assignedLine(),
+                                          pairingToken: pairingToken(),
+                                          isPaired: EnvironmentTokenStore().identity() != nil)
+        if state == .lineUnresolved {
+            StructuredLog.emit("handoff.line_unresolved", level: .warn, fields: [
+                "detail": "no assigned line for this user; rendering the honest message "
+                    + "rather than a malformed sms: link",
+            ])
+        }
+        return state
     }
 
     private func makeSignaller() -> GrantSignaller? {
@@ -388,11 +427,42 @@ final class PermissionModel: ObservableObject {
                                     messageCount: metrics.corpus.messageCount,
                                     digestPath: outcome.digestPath,
                                     producesReport: health.producesReport)
-            enter(.ready)
+
+            // **The last screen is the handoff, not the health list.** The findings still
+            // render — below it. What worked, then what to do next, then what could be
+            // better. Ending on two things that are wrong is the wrong reward for having
+            // just granted full disk access.
+            handoff = resolveHandoff()
+            enter(handoff == .lineUnresolved ? .ready : .handoff)
         } catch {
             failureDetail = "\(error)"
             enter(.failed)
         }
+    }
+}
+
+/// Where the Mac reads the two values the handoff link needs.
+///
+/// **Both are per-user and neither is derivable here.** The registrar assigns the line and
+/// issues the pairing token, and both live in `cloud/api/src/` — there is no Mac-side
+/// client for either, exactly as there was none for the device token in prompt `01`. So
+/// these read the environment and `.env`, and return nil when the value is absent, which
+/// the handoff renders as an honest message rather than a broken link.
+///
+/// This is a seam, not a resting place. See `NOTES.md`.
+enum PairingHandles {
+
+    static let assignedLineVariable = "BOI_ASSIGNED_LINE"
+    static let pairingTokenVariable = "BOI_PAIRING_TOKEN"
+
+    static func assignedLine() -> String? { value(assignedLineVariable) }
+    static func pairingToken() -> String? { value(pairingTokenVariable) }
+
+    private static func value(_ key: String) -> String? {
+        if let value = ProcessInfo.processInfo.environment[key], !value.isEmpty {
+            return value
+        }
+        return DotEnv.value(of: key, searchingFrom: FileManager.default.currentDirectoryPath)
     }
 }
 

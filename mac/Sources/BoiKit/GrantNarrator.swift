@@ -37,20 +37,29 @@ public enum GrantStage: String, CaseIterable, Sendable, Equatable {
     case notInApplications
 
     /// The deep link is open and we are polling.
+    ///
+    /// **The relaunch is named here, at the start, not after thirty seconds.** The manual
+    /// run settled that `GrantWatcher` never observes the grant: the app does not
+    /// auto-advance, so restarting is not a safety net, it is the only path. A screen that
+    /// waits half a minute before mentioning the one thing that works is half a minute of
+    /// the product looking broken while a counter climbs to `checked 43×`.
     case waiting
     /// **Failure paths 2 and 3, which the platform cannot tell apart.** A grant given to
     /// the wrong entry and a user who never flipped anything both leave the probe
     /// `denied`, byte-identical. So this stage does not *claim* a diagnosis — it escalates
     /// with the two things worth checking and a way out that does not depend on us
     /// detecting anything.
+    ///
+    /// No longer where the relaunch is first offered — `waiting` does that now. This is
+    /// only the "you have been here a while, check the row says Boi" escalation.
     case waitingStalled
     /// The user came back to Boi with the switch still off. A real signal — the app became
     /// frontmost again — and distinct from never having left.
     case returnedWithoutGranting
 
-    /// The toggle flipped. Shown before the relaunch, because an app that vanishes without
-    /// acknowledging the click is indistinguishable from a crash.
-    case granted
+    /// The user asked Boi to restart itself, from the button. **There is no automatic
+    /// relaunch any more** — macOS's own Quit & Reopen dialog performs it, and Boi
+    /// competing with that dialog was the friction the manual run found.
     case relaunching
     /// **Failure path 4.** The relaunch was asked for and this process is still here past
     /// `FullDiskAccess.relaunchBudget`. Distinct from `deniedAfterRelaunch` in both the UI
@@ -65,6 +74,16 @@ public enum GrantStage: String, CaseIterable, Sendable, Equatable {
     case noDatabase
     /// Granted and verified; reading the corpus.
     case syncing
+    /// **The terminal screen, and the handoff to the thread.**
+    ///
+    /// The flow used to end on the health list — *"Boi can see more than this"*, two things
+    /// that are wrong. Honest, and the wrong last impression: the user just granted full
+    /// disk access and the reward was a list of problems. The hierarchy is **what worked →
+    /// what to do next → what could be better**, and the health findings move below this
+    /// rather than being the last thing on screen.
+    case handoff
+    /// Reached only when the scan produced findings and the handoff cannot be rendered —
+    /// `ready` is no longer terminal on its own.
     case ready
     /// A genuine unexpected error — and *only* that. Every condition above has its own
     /// stage precisely so this one stops being the drain everything falls into.
@@ -77,15 +96,15 @@ public enum GrantStage: String, CaseIterable, Sendable, Equatable {
         case .checking: return "Checking this Mac"
         case .needsConsent: return "Boi reads your message history on this Mac"
         case .notInApplications: return "Move Boi to your Applications folder first"
-        case .waiting: return "Waiting for you to flip the switch"
+        case .waiting: return "Switch Boi on, then let it restart"
         case .waitingStalled: return "Still waiting — two things worth checking"
         case .returnedWithoutGranting: return "The switch is still off"
-        case .granted: return "Full Disk Access granted"
         case .relaunching: return "Restarting Boi"
         case .relaunchStalled: return "Boi could not restart itself"
         case .deniedAfterRelaunch: return "Boi restarted, and the switch is still off"
         case .noDatabase: return "This Mac has no Messages history yet"
         case .syncing: return "Reading your messages"
+        case .handoff: return "Boi is texting you"
         case .ready: return "You're all set"
         case .failed: return "Boi hit an error it did not expect"
         }
@@ -105,18 +124,21 @@ public enum GrantStage: String, CaseIterable, Sendable, Equatable {
                 + "other folder, the permission will not stick — and you would not find "
                 + "out until Boi stopped working."
         case .waiting:
-            return "System Settings is open on the Full Disk Access list. Boi is watching "
-                + "and will notice the moment you switch it on."
+            // Says the quiet part first: macOS will ask, and the answer is yes. A user who
+            // already chose Later reads the same screen and finds the way back, because
+            // "flipped it and deferred the restart" and "has not flipped it" are the same
+            // `denied` probe and nothing can tell them apart.
+            return "When you switch Boi on, macOS will ask whether to quit and reopen it. "
+                + "Choose Quit & Reopen — Boi cannot use the access until it restarts. If "
+                + "you chose Later, the button below does the same thing whenever you're "
+                + "ready."
         case .waitingStalled:
             return "Boi still cannot read your messages. Almost always this is one of two "
-                + "things: the switch went on for a different app in the list, or the "
-                + "settings window closed before it took."
+                + "things: the switch went on for a different app in the list, or Boi has "
+                + "not been restarted since you flipped it."
         case .returnedWithoutGranting:
             return "You're back, and Boi still cannot read your messages. Nothing is "
                 + "broken — the switch just is not on yet."
-        case .granted:
-            return "Boi can read your messages. macOS only applies that to an app that "
-                + "starts afterwards, so Boi has to restart before it can use it."
         case .relaunching:
             return "Boi is closing and reopening itself. This is expected, it takes about "
                 + "a second, and you do not need to do anything."
@@ -134,9 +156,11 @@ public enum GrantStage: String, CaseIterable, Sendable, Equatable {
         case .syncing:
             return "Boi is reading your message history. It stays on this Mac; only counts "
                 + "and dates ever leave."
+        case .handoff:
+            return "That's the setup done — everything from here happens in Messages, not "
+                + "in this window. You can close it."
         case .ready:
-            return "Boi can read your messages and the first report is on its way to your "
-                + "thread."
+            return "Boi can read your messages. The thread is where the rest happens."
         case .failed:
             return "This is not a permissions problem and not something you did. The "
                 + "details are below and in Boi's log."
@@ -148,8 +172,10 @@ public enum GrantStage: String, CaseIterable, Sendable, Equatable {
     /// track exists to delete.
     public var nextStep: String? {
         switch self {
-        case .checking, .syncing, .ready:
-            // Nothing is being asked. These are the only three, and the test pins that.
+        case .checking, .syncing:
+            // Nothing is being asked. These are the only two, and the test pins that.
+            // `handoff` and `ready` both ask for something now — the whole point of the
+            // handoff is that the terminal screen has a next action.
             return nil
         case .needsConsent:
             return "Read the four points above, then continue."
@@ -157,14 +183,11 @@ public enum GrantStage: String, CaseIterable, Sendable, Equatable {
             return "Drag Boi into Applications, open it from there, and come back to this "
                 + "screen."
         case .waiting:
-            return "Find Boi in the list and switch it on."
+            return "Find Boi in the list, switch it on, and choose Quit & Reopen."
         case .waitingStalled:
-            return "Check that the row you switched on says Boi, then leave System "
-                + "Settings open until Boi notices."
+            return "Check that the row you switched on says Boi, then restart Boi."
         case .returnedWithoutGranting:
             return "Reopen the settings pane and switch Boi on."
-        case .granted:
-            return "Nothing — Boi is restarting itself now."
         case .relaunching:
             return "Wait about a second."
         case .relaunchStalled:
@@ -173,6 +196,12 @@ public enum GrantStage: String, CaseIterable, Sendable, Equatable {
             return "Open the pane again and switch on the row that says Boi."
         case .noDatabase:
             return "Open Messages, sign in with your Apple Account, then come back."
+        case .handoff:
+            return "Open the thread — that's where Boi talks to you."
+        case .ready:
+            // Reached when the handoff link cannot be built. Says what will happen rather
+            // than offering a button that would go nowhere.
+            return "Keep an eye on Messages — Boi will text you there."
         case .failed:
             return "Try again. If it keeps happening, the log will say why."
         }
@@ -185,7 +214,7 @@ public enum GrantStage: String, CaseIterable, Sendable, Equatable {
         case .notInApplications, .waitingStalled, .returnedWithoutGranting,
              .relaunchStalled, .deniedAfterRelaunch, .noDatabase, .failed:
             return true
-        case .checking, .needsConsent, .waiting, .granted, .relaunching, .syncing, .ready:
+        case .checking, .needsConsent, .waiting, .relaunching, .syncing, .handoff, .ready:
             return false
         }
     }
@@ -199,27 +228,33 @@ public enum GrantStage: String, CaseIterable, Sendable, Equatable {
         switch self {
         case .waiting, .waitingStalled, .returnedWithoutGranting, .deniedAfterRelaunch:
             return true
-        case .checking, .needsConsent, .notInApplications, .granted, .relaunching,
-             .relaunchStalled, .noDatabase, .syncing, .ready, .failed:
+        case .checking, .needsConsent, .notInApplications, .relaunching, .relaunchStalled, .noDatabase, .syncing, .handoff, .ready, .failed:
             return false
         }
     }
 
     /// Whether to offer "quit and reopen Boi yourself".
     ///
-    /// Offered wherever the automatic relaunch may not arrive. `waitingStalled` is on this
-    /// list on purpose: if the probe can never observe the grant from inside the process
-    /// that was running when it was made, an automatic relaunch is never triggered and
-    /// this button is the user's only exit. See `NOTES.md`.
+    /// Offered wherever restarting is what moves the user forward.
+    ///
+    /// **`waiting` is on this list, and that is the whole correction from the manual run.**
+    /// The probe never observes the grant from inside the process that was running when it
+    /// was made, so no automatic relaunch is ever triggered and this button is the only
+    /// exit. Offering it only after thirty seconds — as `01` did — means half a minute
+    /// where the sole thing that works is hidden behind a counter.
+    ///
+    /// It is also the resume path for a user who chose **Later** on the system dialog,
+    /// which is undetectable and therefore has to be answered on the screen they are
+    /// already looking at.
     public var offersManualRelaunch: Bool {
         switch self {
-        case .waitingStalled, .relaunchStalled, .deniedAfterRelaunch:
+        case .waiting, .waitingStalled, .relaunchStalled, .deniedAfterRelaunch:
             return true
         // `returnedWithoutGranting` is false on purpose: nothing has been granted yet, so
         // restarting would accomplish exactly nothing and offering it implies otherwise.
-        case .checking, .needsConsent, .notInApplications, .waiting,
-             .returnedWithoutGranting, .granted, .relaunching, .noDatabase, .syncing,
-             .ready, .failed:
+        case .checking, .needsConsent, .notInApplications,
+             .returnedWithoutGranting, .relaunching, .noDatabase, .syncing,
+             .handoff, .ready, .failed:
             return false
         }
     }
@@ -381,6 +416,78 @@ public final class GrantNarrator {
     public static func persisted(inDirectory directory: String) -> GrantNarrator {
         GrantNarrator(memory: load(fromDirectory: directory),
                       persist: { save($0, toDirectory: directory) })
+    }
+}
+
+/// The way into the conversation, which is the last thing the user should see.
+///
+/// **Two states, one mechanism.** `sms:` opens an existing conversation or composes a new
+/// one, so the paired and unpaired paths differ in copy and in whether a pairing token
+/// rides along — not in machinery.
+///
+/// The link format is the cloud's, reproduced exactly: `cloud/api/src/welcome.ts` builds
+/// `sms:${handle}&body=${encodeURIComponent(token)}`. **`&body=` rather than `?body=`** is
+/// deliberate there — Apple's own documentation uses the ampersand form for `sms:` and
+/// both iOS and macOS Messages accept it. Diverging here would produce a link that opens
+/// Messages with an empty body and silently loses the pairing token.
+public enum ThreadHandoff {
+
+    public enum State: Sendable, Equatable {
+        /// A device token exists — the normal path under AMENDMENT-002, where the thread
+        /// was opened before the app was ever installed. The thread is already there.
+        case paired(link: String)
+        /// Direct download, or pairing never completed. The link carries the token that
+        /// creates the pairing, the same one the confirmation page renders.
+        case unpaired(link: String)
+        /// **The line could not be resolved, so there is no honest link to render.**
+        /// The number is per-user and comes from the registrar; a constant would open a
+        /// thread with somebody else's line. Saying so plainly beats a malformed `sms:`
+        /// URL that opens Messages addressed to nothing.
+        case lineUnresolved
+    }
+
+    /// - Parameters:
+    ///   - handle: the user's **assigned line**, from the registrar. Per-user — never a
+    ///     constant, and `nil` when it could not be resolved.
+    ///   - pairingToken: the token that completes pairing, for the unpaired path.
+    ///   - isPaired: whether a device token already exists. Ask the token store; this is
+    ///     knowable rather than guessed.
+    public static func resolve(handle: String?,
+                               pairingToken: String?,
+                               isPaired: Bool) -> State {
+        guard let handle, isUsable(handle) else { return .lineUnresolved }
+        if isPaired { return .paired(link: "sms:\(handle)") }
+        // Unpaired with no token is not a usable link either: it would open a thread and
+        // send nothing that pairs anything, which looks like it worked and does not.
+        guard let pairingToken, !pairingToken.isEmpty else { return .lineUnresolved }
+        return .unpaired(link: link(handle: handle, token: pairingToken))
+    }
+
+    /// `sms:<handle>&body=<percent-encoded token>` — byte-for-byte the cloud's shape.
+    public static func link(handle: String, token: String) -> String {
+        "sms:\(handle)&body=\(encode(token))"
+    }
+
+    /// A handle we are willing to put in a URL.
+    ///
+    /// The registrar hands back an E.164 number or an email address. Anything with
+    /// whitespace, a control character, or one of `sms:`'s own delimiters would produce a
+    /// URL that means something other than what it says — so it is refused rather than
+    /// escaped into something plausible.
+    static func isUsable(_ handle: String) -> Bool {
+        guard !handle.isEmpty, handle.count <= 254 else { return false }
+        let forbidden = CharacterSet.whitespacesAndNewlines
+            .union(.controlCharacters)
+            .union(CharacterSet(charactersIn: "&?#/\\<>\"'"))
+        return handle.rangeOfCharacter(from: forbidden) == nil
+    }
+
+    /// Percent-encoding for a query value. `urlQueryAllowed` permits `&` and `=`, which
+    /// would let a token split the URL, so those are removed from the allowed set.
+    static func encode(_ value: String) -> String {
+        let allowed = CharacterSet.urlQueryAllowed
+            .subtracting(CharacterSet(charactersIn: "&=?#+"))
+        return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? ""
     }
 }
 

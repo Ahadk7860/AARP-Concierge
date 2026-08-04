@@ -45,14 +45,18 @@ final class OnboardingTests: XCTestCase {
         }
     }
 
-    /// **Every stage that needs the user names the one thing to do.** The three that do
-    /// not are the three where nothing is being asked, and they are pinned by name — so
-    /// adding a fourth silent stage fails here rather than shipping as a spinner.
+    /// **Every stage that needs the user names the one thing to do.** The two that do not
+    /// are the two where nothing is being asked, and they are pinned by name — so adding a
+    /// third silent stage fails here rather than shipping as a spinner.
+    ///
+    /// *Changed by prompt 02:* `ready` used to be silent because it was the terminal
+    /// screen and terminal meant "nothing more to do". The handoff makes the terminal
+    /// screen a door, so `ready` now asks for something too.
     ///
     /// MUTATION: return `nil` from `.relaunchStalled.nextStep`. Red.
-    func testOnlyTheThreeStagesThatAskNothingHaveNoNextStep() {
+    func testOnlyTheTwoStagesThatAskNothingHaveNoNextStep() {
         let silent = GrantStage.allCases.filter { $0.nextStep == nil }
-        XCTAssertEqual(Set(silent), [.checking, .syncing, .ready])
+        XCTAssertEqual(Set(silent), [.checking, .syncing])
 
         for stage in GrantStage.allCases where !silent.contains(stage) {
             let step = try? XCTUnwrap(stage.nextStep)
@@ -122,22 +126,76 @@ final class OnboardingTests: XCTestCase {
         XCTAssertTrue(GrantStage.deniedAfterRelaunch.offersSettingsLink)
     }
 
-    /// Wherever the automatic relaunch may not arrive, the user is given the manual way
-    /// out. `waitingStalled` is on this list because if the probe cannot observe the grant
-    /// from inside the process that was running when it was made, no automatic relaunch is
-    /// ever triggered and this button is the only exit.
+    // MARK: - Prompt 02: getting out of macOS's way
+
+    /// **The relaunch is offered from the first waiting screen, not after thirty seconds.**
     ///
-    /// MUTATION: remove `.waitingStalled` from `offersManualRelaunch`. Red.
-    func testEveryStageWhereTheRelaunchMayNotArriveOffersTheManualWayOut() {
+    /// The manual run settled that `GrantWatcher` never observes the grant — the app does
+    /// not auto-advance, so restarting is the only path, not a fallback. `01` hid the one
+    /// thing that works behind a 30-second timer while a counter climbed to `checked 43×`.
+    ///
+    /// MUTATION: remove `.waiting` from `offersManualRelaunch`. Red.
+    func testTheRelaunchIsOfferedImmediatelyBecauseNothingElseAdvances() {
+        XCTAssertTrue(GrantStage.waiting.offersManualRelaunch,
+                      "restarting is the only path; it cannot be behind a timer")
         XCTAssertEqual(Set(GrantStage.allCases.filter(\.offersManualRelaunch)),
-                       [.waitingStalled, .relaunchStalled, .deniedAfterRelaunch])
+                       [.waiting, .waitingStalled, .relaunchStalled, .deniedAfterRelaunch])
+    }
+
+    /// **Boi presents nothing that competes with the macOS Quit & Reopen dialog.**
+    ///
+    /// The system dialog is authoritative, the user already trusts it, and it performs the
+    /// relaunch. `01` put an acknowledgement screen up at that exact moment, which the
+    /// manual run recorded as *"friction and confusing"*. The state machine's answer is
+    /// that there is no stage to show: `granted` no longer exists.
+    ///
+    /// MUTATION: re-add a `granted` case that renders its own screen. Red — the count and
+    /// the raw-value set both move.
+    func testThereIsNoStageThatCompetesWithTheSystemDialog() {
+        XCTAssertFalse(GrantStage.allCases.contains { $0.rawValue == "granted" },
+                       "an acknowledgement screen here competes with the system dialog")
+
+        // The stage a user sits on while macOS asks is `waiting`, and it is quiet: no
+        // remedy styling, no focus-taking action, just the explanation.
+        XCTAssertFalse(GrantStage.waiting.isFailure)
+    }
+
+    /// **A user who chooses Later is told what they deferred and how to resume** — on the
+    /// screen they are already looking at, because nothing can detect that choice. Having
+    /// flipped the switch and deferred the restart produces the same `denied` probe as
+    /// never having flipped it at all.
+    ///
+    /// MUTATION: remove the "If you chose Later" sentence from `waiting.body`. Red.
+    func testTheWaitingScreenAnswersTheDeferredUser() {
+        let copy = (GrantStage.waiting.body + " " + (GrantStage.waiting.nextStep ?? ""))
+            .lowercased()
+        XCTAssertTrue(copy.contains("quit & reopen"),
+                      "the system dialog's own wording, so the two screens agree")
+        XCTAssertTrue(copy.contains("later"), "the deferred user needs the way back")
+        XCTAssertTrue(GrantStage.waiting.offersManualRelaunch,
+                      "and the way back has to be a button, not just prose")
+    }
+
+    /// The counter must not promise an advance that never comes. `01`'s
+    /// *"Waiting for the switch… (checked 43×)"* reads as "any moment now", and the manual
+    /// run proved that moment never arrives.
+    ///
+    /// MUTATION: revert `waiting.title` to "Waiting for you to flip the switch". Red.
+    func testTheWaitingScreenDoesNotPromiseAnAutomaticAdvance() {
+        let title = GrantStage.waiting.title.lowercased()
+        XCTAssertTrue(title.contains("restart"),
+                      "the title names the restart, since that is what actually happens")
+        XCTAssertFalse(GrantStage.waiting.body.lowercased()
+            .contains("will notice the moment you switch it on"),
+                       "nothing notices; that was the false promise")
     }
 
     /// The waiting screen escalates once waiting stops being informative — but not so
-    /// early that it nags somebody still reading the settings list.
+    /// early that it nags somebody still reading the settings list. Since prompt 02 this
+    /// is only the wrong-entry escalation; the relaunch is already offered from `waiting`.
     ///
-    /// MUTATION: make `whileWaiting` always return `.waiting`. Red — the user waits
-    /// forever on a screen that says everything is fine.
+    /// MUTATION: make `whileWaiting` always return `.waiting`. Red — the user never gets
+    /// the "check the row says Boi" escalation.
     func testWaitingEscalatesOnlyAfterWaitingStopsBeingHonest() {
         XCTAssertEqual(GrantStage.whileWaiting(polls: 1), .waiting)
         XCTAssertEqual(GrantStage.whileWaiting(polls: 10), .waiting)
@@ -221,6 +279,122 @@ final class OnboardingTests: XCTestCase {
                     LaunchDisposition.stage(probe: .noDatabase, didRelaunch: didRelaunch,
                                             install: install),
                     .noDatabase)
+            }
+        }
+    }
+
+    // MARK: - Prompt 02: the handoff to the thread
+
+    /// **The terminal screen is the handoff, not the health list.** The user just granted
+    /// full disk access; ending on two things that are wrong is the wrong reward.
+    ///
+    /// MUTATION: give `.handoff` a `nil` `nextStep`, making it a dead end. Red.
+    func testTheHandoffIsTerminalAndAsksForSomething() {
+        XCTAssertNotNil(GrantStage.handoff.nextStep,
+                        "the terminal screen is a door, so it has a next action")
+        XCTAssertFalse(GrantStage.handoff.isFailure)
+
+        // The only stages that ask nothing are the two where nothing is happening yet.
+        XCTAssertEqual(Set(GrantStage.allCases.filter { $0.nextStep == nil }),
+                       [.checking, .syncing])
+    }
+
+    /// **Paired and unpaired, asserted separately against the token store.**
+    ///
+    /// MUTATION: ignore `isPaired` and always return the unpaired link. Red — the paired
+    /// case gets a token appended to a thread that already exists.
+    func testPairedAndUnpairedRenderDifferentLinks() {
+        XCTAssertEqual(
+            ThreadHandoff.resolve(handle: "+15551234567", pairingToken: "tok_abc",
+                                  isPaired: true),
+            .paired(link: "sms:+15551234567"),
+            "the thread exists; no pairing token belongs in the link")
+
+        XCTAssertEqual(
+            ThreadHandoff.resolve(handle: "+15551234567", pairingToken: "tok_abc",
+                                  isPaired: false),
+            .unpaired(link: "sms:+15551234567&body=tok_abc"))
+    }
+
+    /// **The link format is the cloud's, byte for byte.** `cloud/api/src/welcome.ts` builds
+    /// `sms:${handle}&body=${encodeURIComponent(token)}` and uses **`&body=`** rather than
+    /// `?body=` deliberately. Diverging opens Messages with an empty body and silently
+    /// loses the pairing token — a link that looks like it worked and did not.
+    ///
+    /// MUTATION: change `link` to use `?body=`. Red.
+    func testTheLinkUsesTheAmpersandBodyFormTheCloudUses() {
+        XCTAssertEqual(ThreadHandoff.link(handle: "+15551234567", token: "tok_abc"),
+                       "sms:+15551234567&body=tok_abc")
+        XCTAssertFalse(ThreadHandoff.link(handle: "+1555", token: "t").contains("?"))
+    }
+
+    /// A token with URL-significant characters must not be able to split the link.
+    ///
+    /// MUTATION: use `.urlQueryAllowed` unmodified in `encode`. Red — `&` survives and the
+    /// token becomes two query parameters.
+    func testATokenCannotSplitTheLink() {
+        let link = ThreadHandoff.link(handle: "+15551234567", token: "a&b=c?d#e")
+        XCTAssertEqual(link, "sms:+15551234567&body=a%26b%3Dc%3Fd%23e")
+        // Exactly one `&`: the one this format requires.
+        XCTAssertEqual(link.filter { $0 == "&" }.count, 1)
+    }
+
+    /// **An unresolvable line renders an honest message, never a malformed `sms:` URL.**
+    /// The number is per-user and comes from the registrar; a constant would open a thread
+    /// with a line that is not theirs.
+    ///
+    /// MUTATION: fall back to a constant number when `handle` is nil. Red.
+    func testAnUnresolvableLineIsSaidPlainlyRatherThanRenderedBroken() {
+        for handle in [nil, "", "   ", "+1555 123", "+1555&body=x", "line\nbreak"] {
+            XCTAssertEqual(
+                ThreadHandoff.resolve(handle: handle, pairingToken: "tok", isPaired: false),
+                .lineUnresolved,
+                "handle \(handle ?? "nil") must not become a link")
+        }
+    }
+
+    /// Unpaired with no token is not a usable link either: it opens a thread and sends
+    /// nothing that pairs anything, which looks like it worked and does not.
+    ///
+    /// MUTATION: drop the token check in `resolve`. Red — an `sms:…&body=` with an empty
+    /// body is produced.
+    func testUnpairedWithNoTokenIsNotOfferedAsALink() {
+        XCTAssertEqual(
+            ThreadHandoff.resolve(handle: "+15551234567", pairingToken: nil, isPaired: false),
+            .lineUnresolved)
+        XCTAssertEqual(
+            ThreadHandoff.resolve(handle: "+15551234567", pairingToken: "", isPaired: false),
+            .lineUnresolved)
+    }
+
+    /// An email handle is legitimate — the registrar registers both the phone number and
+    /// the account email — and `sms:` accepts it.
+    ///
+    /// MUTATION: require a leading `+` in `isUsable`. Red.
+    func testAnEmailHandleIsAcceptable() {
+        XCTAssertEqual(
+            ThreadHandoff.resolve(handle: "boi@example.com", pairingToken: nil, isPaired: true),
+            .paired(link: "sms:boi@example.com"))
+    }
+
+    /// Every link this type produces has to survive `URL(string:)`, or the button opens
+    /// nothing and the failure is silent.
+    ///
+    /// MUTATION: allow spaces in `isUsable`. Red.
+    func testEveryProducedLinkIsAParseableURL() {
+        let states = [
+            ThreadHandoff.resolve(handle: "+15551234567", pairingToken: nil, isPaired: true),
+            ThreadHandoff.resolve(handle: "boi@example.com", pairingToken: "tok_a b",
+                                  isPaired: false),
+            ThreadHandoff.resolve(handle: "+15551234567", pairingToken: "tok/x?y&z",
+                                  isPaired: false),
+        ]
+        for state in states {
+            switch state {
+            case .paired(let link), .unpaired(let link):
+                XCTAssertNotNil(URL(string: link), "\(link) is not a parseable URL")
+            case .lineUnresolved:
+                continue
             }
         }
     }

@@ -16,12 +16,11 @@ struct OnboardingView: View {
             switch model.stage {
             case .needsConsent:
                 ConsentScreen(model: model)
-            case .ready:
-                if let summary = model.summary {
-                    HealthScreen(model: model, summary: summary)
-                } else {
-                    StageScreen(model: model, stage: .syncing)
-                }
+            case .handoff, .ready:
+                // **What worked → what to do next → what could be better.** The handoff is
+                // the terminal screen and the health findings sit underneath it, rather
+                // than the flow ending on a list of two things that are wrong.
+                HandoffScreen(model: model, summary: model.summary)
             default:
                 StageScreen(model: model, stage: model.stage)
             }
@@ -162,11 +161,11 @@ private struct StageScreen: View {
     /// a switch that cannot help.
     private var showsLiveStatus: Bool {
         switch stage {
-        case .waiting, .waitingStalled, .returnedWithoutGranting, .granted, .relaunching,
+        case .waiting, .waitingStalled, .returnedWithoutGranting, .relaunching,
              .relaunchStalled, .deniedAfterRelaunch:
             return true
-        case .checking, .needsConsent, .notInApplications, .noDatabase, .syncing, .ready,
-             .failed:
+        case .checking, .needsConsent, .notInApplications, .noDatabase, .syncing,
+             .handoff, .ready, .failed:
             return false
         }
     }
@@ -178,7 +177,7 @@ private struct StageScreen: View {
         case .notInApplications: return "folder.badge.questionmark"
         case .waiting: return "circle.dashed"
         case .waitingStalled, .returnedWithoutGranting: return "questionmark.circle.fill"
-        case .granted, .ready: return "checkmark.circle.fill"
+        case .handoff, .ready: return "checkmark.circle.fill"
         case .relaunching: return "arrow.clockwise"
         case .relaunchStalled: return "exclamationmark.arrow.circlepath"
         case .deniedAfterRelaunch: return "xmark.circle.fill"
@@ -188,94 +187,144 @@ private struct StageScreen: View {
     }
 
     private var tint: Color {
-        if stage == .granted || stage == .ready { return .green }
+        if stage == .handoff || stage == .ready { return .green }
         return stage.isFailure ? .orange : .secondary
     }
 }
 
-/// Prompt 06's decision, rendered. Three branches, and one of them deliberately produces
-/// nothing.
-private struct HealthScreen: View {
+/// The terminal screen: the way into the conversation.
+///
+/// **The setup is over and everything from here happens in Messages**, so the last thing
+/// on screen is the door into the thread — not an inventory of what is imperfect. The
+/// health findings still ship; they sit below, under their own quieter heading.
+private struct HandoffScreen: View {
     @ObservedObject var model: PermissionModel
-    let summary: PermissionModel.HealthSummary
+    let summary: PermissionModel.HealthSummary?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(spacing: 10) {
-                Image(systemName: icon).foregroundStyle(tint).font(.title2)
-                Text(title).font(.title2).bold()
-            }
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                HStack(spacing: 10) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green).font(.title2)
+                    Text(model.stage.title).font(.title2).bold()
+                        .accessibilityIdentifier("stage-title")
+                }
 
-            Text(summary.headline)
+                Text(model.stage.body)
 
-            // THIN: no report, and it says why. Never hand somebody a bad report and
-            // call it their year in messages.
-            if !summary.producesReport {
-                Text(HealthCheck.thinBody).foregroundStyle(.secondary)
-            }
+                // ONE MECHANISM, TWO COPY VARIANTS. `sms:` opens an existing conversation
+                // or composes a new one, so paired and unpaired differ in what they say
+                // and in whether a pairing token rides along — not in machinery.
+                switch model.handoff {
+                case .paired(let link):
+                    HandoffAction(
+                        detail: "Your thread with Boi is already open. The first report is "
+                            + "on its way to it.",
+                        button: "Open the conversation",
+                        link: link)
 
-            // FIXABLE: every reveal ships with a one-tap remedy. Guilt without agency is
-            // repellent; guilt with a button is a product.
-            ForEach(summary.remedies, id: \.id) { remedy in
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(remedy.title).bold()
-                    Text(remedy.body).font(.callout).foregroundStyle(.secondary)
-                    Text(remedy.fallbackInstructions).font(.caption).foregroundStyle(.secondary)
-                    HStack {
-                        if let link = remedy.deepLink, let url = URL(string: link) {
-                            Button("Open settings") { NSWorkspace.shared.open(url) }
+                case .unpaired(let link):
+                    HandoffAction(
+                        detail: "One tap opens Messages with everything filled in. Send it "
+                            + "and Boi takes it from there.",
+                        button: "Start the conversation",
+                        link: link)
+
+                case .lineUnresolved:
+                    // **Never a malformed sms: link.** The number is per-user and comes
+                    // from the registrar; without it there is no honest link to render, so
+                    // say that instead of opening Messages addressed to nothing.
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Boi could not work out which number to text you from.")
+                            .bold()
+                        Text("Every account gets its own line, and this Mac has not been "
+                             + "told which one is yours. Boi will still text you — this "
+                             + "window just cannot open the thread for you.")
+                            .font(.callout).foregroundStyle(.secondary)
+                    }
+                    .padding(12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
+                    .accessibilityIdentifier("handoff-unresolved")
+                }
+
+                // WHAT COULD BE BETTER — below the handoff, and no longer the last word.
+                if let summary, !summary.remedies.isEmpty || !summary.producesReport {
+                    Divider().padding(.vertical, 4)
+                    Text("A couple of things could make this better")
+                        .font(.headline).foregroundStyle(.secondary)
+
+                    // THIN: no report, and it says why. Never hand somebody a bad report
+                    // and call it their year in messages.
+                    if !summary.producesReport {
+                        Text(HealthCheck.thinBody).foregroundStyle(.secondary)
+                    }
+
+                    // FIXABLE: every reveal ships with a one-tap remedy. Guilt without
+                    // agency is repellent; guilt with a button is a product.
+                    ForEach(summary.remedies, id: \.id) { remedy in
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(remedy.title).bold()
+                            Text(remedy.body).font(.callout).foregroundStyle(.secondary)
+                            Text(remedy.fallbackInstructions)
+                                .font(.caption).foregroundStyle(.secondary)
+                            HStack {
+                                if let link = remedy.deepLink, let url = URL(string: link) {
+                                    Button("Open settings") { NSWorkspace.shared.open(url) }
+                                }
+                                if remedy.rescanAvailable {
+                                    Button("Scan again") {
+                                        Task { await model.runScan(force: true) }
+                                    }
+                                }
+                            }
                         }
-                        if remedy.rescanAvailable {
-                            Button("Scan again") { Task { await model.runScan(force: true) } }
-                        }
+                        .padding(12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(.quaternary.opacity(0.4),
+                                    in: RoundedRectangle(cornerRadius: 8))
                     }
                 }
-                .padding(12)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
-            }
 
-            if let path = summary.digestPath {
-                Text("Report written to \(path)")
-                    .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
-            }
-
-            Spacer()
-            HStack {
-                Button("Turn on the daily check") {
-                    StructuredLog.emit("agent.register",
-                                       fields: ["result": ScheduledSync.register()])
+                if let path = summary?.digestPath {
+                    Text("Report written to \(path)")
+                        .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
                 }
-                Text(ScheduledSync.statusDescription)
-                    .font(.caption).foregroundStyle(.secondary)
-                Spacer()
-                Button("Scan now") { Task { await model.runScan(force: true) } }
+
+                HStack {
+                    Button("Turn on the daily check") {
+                        StructuredLog.emit("agent.register",
+                                           fields: ["result": ScheduledSync.register()])
+                    }
+                    Text(ScheduledSync.statusDescription)
+                        .font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                }
+                .padding(.top, 4)
             }
         }
     }
+}
 
-    private var icon: String {
-        switch summary.health {
-        case .healthy: return "checkmark.circle.fill"
-        case .fixable: return "wrench.adjustable.fill"
-        case .thin: return "hourglass"
-        }
-    }
+/// The door into the thread. One button, and the link behind it is visible.
+private struct HandoffAction: View {
+    let detail: String
+    let button: String
+    let link: String
 
-    private var tint: Color {
-        switch summary.health {
-        case .healthy: return .green
-        case .fixable: return .orange
-        case .thin: return .secondary
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(detail).foregroundStyle(.secondary)
+            Button(button) {
+                if let url = URL(string: link) { NSWorkspace.shared.open(url) }
+            }
+            .keyboardShortcut(.defaultAction)
+            .accessibilityIdentifier("handoff-button")
         }
-    }
-
-    private var title: String {
-        switch summary.health {
-        case .healthy: return GrantStage.ready.title
-        case .fixable: return "Boi can see more than this"
-        case .thin: return "Not enough history yet"
-        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
     }
 }
 
