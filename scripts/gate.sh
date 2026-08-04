@@ -19,7 +19,7 @@ set -uo pipefail
 
 LETTER="${1:-}"
 BASE="${BOI_BASE:-main}"
-if [ -z "$LETTER" ]; then echo "usage: gate.sh <a|b|c|d|e>" >&2; exit 2; fi
+if [ -z "$LETTER" ]; then echo "usage: gate.sh <a|b|c|d|e|f>" >&2; exit 2; fi
 
 cd "$(git rev-parse --show-toplevel)"
 
@@ -42,6 +42,9 @@ case "$LETTER" in
   e) TEST="npx vitest run --passWithNoTests cloud && python -m pytest && swift test --package-path mac"
      LINT="npx eslint . && ruff check intelligence && ruff format --check intelligence"
      TYPE="npx tsc --noEmit -p tsconfig.json" ;;
+  f) TEST="swift test --package-path mac"
+     LINT="swift build --package-path mac -Xswiftc -warnings-as-errors"
+     TYPE="" ;;
   *) echo "unknown track: $LETTER" >&2; exit 2 ;;
 esac
 

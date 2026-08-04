@@ -10,7 +10,7 @@ set -euo pipefail
 
 LETTER="${1:-}"
 BASE="${BOI_BASE:-main}"
-if [ -z "$LETTER" ]; then echo "usage: check-ownership.sh <a|b|c|d|e>" >&2; exit 2; fi
+if [ -z "$LETTER" ]; then echo "usage: check-ownership.sh <a|b|c|d|e|f>" >&2; exit 2; fi
 
 case "$LETTER" in
   a) OWNED='^mac/' ;;
@@ -28,6 +28,11 @@ case "$LETTER" in
   # listed here by name because "may edit one line of" is not a thing a path regex can
   # express. Reviewing the diff of those four files by eye is part of the merge.
   e) OWNED='^(cloud/(intelligence-bridge|e2e|scheduler)/|cloud/card/|cloud/channel/src/spectrum-[a-z-]+\.ts$|cloud/channel/test/spectrum-[a-z-]+\.test\.ts$|mac/Sources/BoiKit/(Uploader|UploadQueue)\.swift$|mac/Tests/BoiKitTests/Uploader.*Tests\.swift$|mac/Sources/BoiKit/SyncRun\.swift$|mac/Sources/BoiCLI/main\.swift$|cloud/brief/src/(run|compose|deliver)\.ts$)' ;;
+  # Track F — the onboarding surface. Disjoint from E by construction: E owns BoiCLI,
+  # SyncRun and the uploader; F owns the app target and one new BoiKit file. F may CALL
+  # Uploader and GrantWatcher and may not modify them, which a path regex cannot express
+  # — it is enforced by reading the diff at merge.
+  f) OWNED='^(mac/Sources/BoiApp/|mac/Sources/BoiKit/GrantNarrator\.swift$|mac/Tests/BoiKitTests/(GrantNarrator|Onboarding)Tests\.swift$)' ;;
   *) echo "unknown track: $LETTER" >&2; exit 2 ;;
 esac
 
@@ -60,6 +65,13 @@ FROZEN='^(contracts/|prompts/(CONTRACTS|MERGE-POLICY|TRACK-REVIEW|WORKTREE-PROTO
 # The second is deliberately not narrowed to the union — a regex cannot tell a widened
 # union from a deleted field. It is narrowed by review instead: the merge reads the diff.
 ALLOWED_FROZEN='^(prompts/CONTRACTS\.md$|contracts/transcripts/spectrum/|cloud/shared/src/contracts\.ts$|contracts/schema/(digest|brief|draft_bundle)\.v1\.json$|contracts/fixtures/digest/|mac/Sources/BoiKit/Contracts\.swift$|intelligence/boi_intel/contracts\.py$)'
+
+# AMENDMENT-002 — prompts 08 and 09, the onboarding inversion. Kept as its OWN variable
+# rather than appended to AMENDMENT_001, because a grant added to a shared line can be
+# lost when two authors edit that line concurrently. That is exactly what happened here:
+# `welcome.ts` was granted by the reviewer, track E extended the same line for its own
+# grants, and the reviewer's addition disappeared with no conflict and no error.
+AMENDMENT_002='^(cloud/api/src/welcome\.ts$|cloud/api/src/welcome\.test\.ts$|cloud/brief/src/inbound\.ts$|cloud/brief/src/inbound\.test\.ts$)'
 
 # Prompt 03 (AMENDMENT-001) additionally lets Track E edit the gist producer and the two
 # checkers, which belong to Tracks A and B. Those tracks have merged and stopped, and the
@@ -105,6 +117,10 @@ while IFS= read -r f; do
   if [ "$LETTER" = "e" ] && echo "$f" | grep -Eq "$ALLOWED_FROZEN"; then continue; fi
   if [ "$LETTER" = "e" ] && echo "$f" | grep -Eq "$AMENDMENT_001"; then
     echo "AMENDMENT-001 (another track's file, granted by the amendment): $f"
+    continue
+  fi
+  if [ "$LETTER" = "e" ] && echo "$f" | grep -Eq "$AMENDMENT_002"; then
+    echo "AMENDMENT-002 (onboarding surface, granted by the amendment): $f"
     continue
   fi
   if echo "$f" | grep -Eq "$SHARED"; then
