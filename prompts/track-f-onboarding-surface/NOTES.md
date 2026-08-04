@@ -23,6 +23,54 @@
 | 01 | DoD: "a flapping grant produces at most one signal per minute". | Taken literally this **cuts against the track's own anchor** — a limiter that applies to the first `false→true` delays the one message the track exists to send. | Ruled by the user: the first transition fires immediately; the cap governs flaps thereafter. Both halves are asserted, each with its mutation. |
 | 01 | TRACK.md fact: "the grant binds to the responsible process, which is the app bundle in `/Applications`". | **`~/Applications` holds the grant too.** This project's own `boi.log` records `~/Applications/Boi.app` holding Full Disk Access on 3 Aug and completing a sync of **94,897 messages**. The first implementation required `/Applications` exactly and would have told that user to move a working install — and moving the bundle is precisely what breaks a TCC grant. The criterion would have read green while the screen gave destructive advice. | Widened to both Applications folders, matched on the enclosing directory with symlinks resolved. `~/Downloads`, `/Volumes`, `/tmp` and Gatekeeper's randomized `AppTranslocation` paths are still rejected — translocation is the genuinely fatal one, since that path changes on every launch. Commit `ece7c33`. |
 
+## Prompt 02 — what the manual run changed
+
+| Prompt | Assumption in `01` | What the manual run showed | What was done |
+|---|---|---|---|
+| 02 | `GrantWatcher` might observe the grant; the relaunch is a safety net. | **It never does.** The pessimistic reading of FINDING 4 is the true one — `01`'s NOTES flagged this as unresolvable by test and the run settled it. | The automatic relaunch is **removed**. Relaunch is user-initiated only and offered from the *first* waiting screen. `.waitingStalled` is no longer where it first appears. |
+| 02 | An acknowledgement screen at the moment of the grant is reassuring. | macOS puts up its own *"Boi will not have full disk access until it is quit"* dialog at that instant, and Boi appearing alongside it was *"friction and confusing"*. | The `.granted` stage is **deleted**. There is no stage to show while the system dialog is up; the user stays on `waiting`, which is quiet and explains what the dialog is asking. |
+| 02 | The pre-relaunch probe either works or does not. | *"Then Boi gets access without quit and reopen sometimes."* Non-deterministic. | The success path proceeds **silently** to `syncing` — no congratulation, no different flow from the one the user was reading thirty seconds earlier. |
+| 02 | Ending on the health screen is fine because it is honest. | It is honest and it is the wrong last impression: the reward for granting full disk access was a list of two things that are wrong. | `.handoff` is the terminal stage. Health findings render below it under a quieter heading. |
+
+**The Later case is undetectable, and the screen has to answer it anyway.** A user who
+flipped the switch and chose **Later** leaves exactly the same `denied` probe as a user who
+never flipped anything — there is no API that separates them, the same shape of limit as
+the wrong-entry case in `01`. So `waiting`'s copy names the dialog, names both buttons, and
+tells the deferred user that the button below does the same job whenever they are ready.
+That is the whole remedy, and it is on screen before it is needed rather than after.
+
+**The counter was making a promise the product could not keep.** `01` rendered
+*"Waiting for the switch… (checked 43×)"*, which reads as *any moment now*. Nothing was
+ever going to notice. The title now names the restart, and the count stays only as proof
+the app is alive.
+
+## Contract gaps opened by prompt 02
+
+**The Mac cannot resolve the user's assigned line, and there is no Mac-side client for it.**
+The registrar lives entirely in `cloud/api/src/` — `git grep` over `mac/Sources` on
+`track-e` finds nothing. The line is **per-user** (shared pool), so a constant would open a
+thread with somebody else's number, and the prompt is explicit that an unresolvable line
+must render an honest message rather than a broken link. Handled the same way as the device
+token in `01`: `assignedLine` and `pairingToken` are injected, read from
+`BOI_ASSIGNED_LINE` / `BOI_PAIRING_TOKEN`, and `ThreadHandoff.lineUnresolved` renders the
+plain-language message when absent. **This is a seam, not a resting place** — a Mac-side
+pairing/registrar client is still missing, and it is the same gap `01` recorded.
+
+**The link format is duplicated across the language boundary.** `cloud/api/src/welcome.ts`
+builds `sms:${handle}&body=${encodeURIComponent(token)}`; `ThreadHandoff.link` reproduces
+it in Swift. Nothing checks the two agree — `&body=` versus `?body=` is a one-character
+divergence that opens Messages with an empty body and silently loses the pairing token, and
+both sides would still pass their own tests. It is not a shape `contracts/schema/` covers.
+Worth a fixture or a shared constant; recorded rather than solved because the fix is a
+contract change and this track does not make those.
+
+## Prompt 02 — prompt file location
+
+`02-get-out-of-the-way-and-hand-off.md` is committed on **`track-e`**, not on `main`, so it
+is not in this worktree. It was read from the main clone's checkout. Same situation as
+prompt `01` before the merge; noted only so a reviewer diffing `main...HEAD` does not go
+looking for it.
+
 ## Observations
 
 **`GrantWatcher` may never fire `.granted` in the process that was running when the grant
