@@ -34,10 +34,40 @@ import { FixedWindowLimiter, PAIR_LIMIT } from "../limiter.js";
 /** Ten minutes. `contracts/openapi/boi-api.v1.yaml`: "Single use, 10 minute expiry". */
 export const PAIRING_TTL_SECONDS = 600;
 
+/**
+ * Which country calling codes may sign up. **`1` at launch, and it is a legal invariant
+ * rather than a preference.**
+ *
+ * Both strategy documents say "US only at launch. GDPR grants non-users rights we
+ * structurally cannot fulfill" — Boi holds abstractions about people who never signed up
+ * to anything, so a European counterparty's right to erasure is one we cannot honour by
+ * construction. The regex here accepted `+[1-9]` — any country on earth — and there was
+ * no geo gate anywhere else either.
+ *
+ * **Config, not a literal**, because launch geography is a deploy decision: adding
+ * Canada is `BOI_ALLOWED_COUNTRY_CODES=1`, and adding the UK is `1,44` plus a lawyer.
+ * A hard-coded `+1` would make the next change a code change and a release.
+ */
+export function allowedCountryCodes(): string[] {
+  return (process.env["BOI_ALLOWED_COUNTRY_CODES"] ?? "1")
+    .split(",")
+    .map((code) => code.trim())
+    .filter((code) => /^[1-9][0-9]{0,2}$/.test(code));
+}
+
+/** E.164 shape first, then geography. Two questions, two messages. */
+export function countryCodeAllowed(phone: string, allowed = allowedCountryCodes()): boolean {
+  return allowed.some((code) => phone.startsWith(`+${code}`));
+}
+
 const signupSchema = z
   .object({
     // E.164. The join key for the whole account, so it is validated hard.
-    phone_e164: z.string().regex(/^\+[1-9][0-9]{6,14}$/, "must be an E.164 phone number"),
+    phone_e164: z.string()
+      .regex(/^\+[1-9][0-9]{6,14}$/, "must be an E.164 phone number")
+      .refine((phone) => countryCodeAllowed(phone), {
+        message: "Boi is US-only at launch",
+      }),
     email: z.string().email().optional(),
     // "Signup: phone, email, terms." An unchecked box is not consent.
     accept_terms: z.literal(true),

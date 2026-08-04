@@ -114,6 +114,85 @@ weekdays (`next thurs`), lowercase places (`the ferry building`) and single firs
 highest-frequency fabrications in real texting. Ship it if you ship it, but say so on
 the trust page rather than describing the gate as complete.
 
+### `as_of` reaches the drafter, and stale state is never claimed in the present tense — added 4 Aug
+
+**This rule existed in `BOI_ARCHITECTURE.md` § 6.6 from the beginning and never reached
+this file, so no track could have built it, and none did.** `prompts.py` contained the
+string `as_of` zero times: `render_gist()` emitted the situation, state, `days_silent`,
+the question flag, topic, deadline and allowed specifics, and no timestamp. `SYSTEM` had
+five rules and none concerned tense. Searching all of `prompts/` for "present tense"
+returned nothing. That is a transcription failure in planning rather than a track defect,
+and it is the reason this section exists.
+
+**What it costs.** `days_silent` is computed when the digest is built. A Mac closed for
+four days hands the model *"days since the last message: 3"* with no anchor and no
+instruction to hedge, and the model writes *"sorry, been 3 days"* into a message **the
+user sends in their own name**, on day seven. Staleness is handled correctly one layer up
+— `staleness.ts` exists and `deliver.ts` puts the caveat first — but a caveat above a
+draft that speaks confidently in the present tense is not a hedged draft. § 8 calls
+staleness "structurally impossible to lose"; a rule carried only in a system prompt is not
+structural.
+
+Three requirements, and the third is the one that makes it true rather than requested:
+
+1. **`as_of` is rendered into every drafter prompt**, with what it means beside it: every
+   number in the gist was measured then, not now.
+2. **`SYSTEM` forbids present-tense claims about stale state**, and names the remedy — "a
+   while", "ages", "too long" — because a prohibition with no alternative is one a model
+   routes around.
+3. **A gate rejects a bare day count when the gist is stale**, whatever the model did.
+   Stale is `as_of` older than `BOI_STALENESS_WARN_HOURS` (24), which is the same hour the
+   brief starts telling the user its data is old; two thresholds would mean a warning
+   above a confident draft. **A missing or unparseable `as_of` counts as stale** — wrongly
+   hedging costs a vaguer message, wrongly not hedging sends a wrong one.
+
+Hedges are untouched, per the rule above: a specific is falsifiable against a calendar and
+a hedge is not, and a stale draft *should* hedge.
+
+**`prompt_version` moves when the prompt does.** § 6 makes a bad draft reproducible from
+`(voice_pack_version, gist_id, prompt_version, model_id)` and from nothing else, because
+the prompt is never logged. Changing `SYSTEM` under a fixed version string makes that
+tuple a lie. This change is `draft.v1` → `draft.v2`, and the committed transcripts under
+`contracts/transcripts/model/` genuinely are `draft.v1` output.
+
+### The hedge allowlist is a gate concern, not an extraction concern — clarified 4 Aug
+
+The 3 Aug ruling above ("a closed allowlist of hedges passes without needing a match in
+`facts`") was never implemented, and the canonical example it quotes is the one that
+failed: `facts.RELATIVE_DAYS` extracts `this week` as a date, so **`"ill get back to u
+this week"` failed `fabrication_gate` on every run against an empty allowlist** — the
+exact 5% ceiling the ruling was written to remove.
+
+The allowlist belongs in `validator.py` and not in `facts.py`. Extraction should keep
+seeing these strings, because a gist's own `facts` may legitimately carry `this week` out
+of the other person's message; it is the **gate** that must not treat them as
+commitments. Closed and short: `this week`, `next week`, `this month`, `next month`,
+`soon`, `later`, `sometime`, `in a bit`, `a while`. `tomorrow` and `the weekend` are
+commitments and are deliberately absent.
+
+### A guard that iterates a collection must state what an EMPTY collection means — added 4 Aug
+
+`_quotes_the_corpus(text, inbound)` iterated `inbound` looking for overlap, so an empty
+corpus meant "does not quote the corpus" for every input, including a sentence a model
+invented outright. On the digest-driven path `recent_inbound_text` is **always** empty —
+correctly, because `digest.v1` carries metadata and never prose — so the only guard on a
+model-written gist besides a length check could not bite, and any hallucination under 140
+characters would have become the brief item body a user reads.
+
+It was latent only because no MLX backend is installed. **That is the argument, not the
+mitigation:** a guard whose failure mode is invisible until a dependency appears will not
+be found by testing.
+
+So, two rules:
+
+- **Every guard of the form "iterate a collection, pass if nothing matches" must say in
+  its docstring what an empty collection means, and fail closed unless there is a reason
+  not to.** The question `_quotes_the_corpus` really answers is "can I show this to
+  somebody?", and with no corpus the answer is no.
+- **Where a producer cannot work, refuse it rather than degrading into it.** The
+  digest-driven gist path raises on a model producer instead of handing it an empty corpus
+  and grading the output with a gate that cannot see anything.
+
 ### The length gate, corrected 2 Aug
 
 The original spec said "within 2× the user's median message length." That is too tight
@@ -179,6 +258,22 @@ Shared error bodies, every endpoint:
 { "error": "validation", "detail": "string" }
 { "error": "unauthorized" }
 ```
+
+### Signup is US-only at launch, and it is config — added 4 Aug
+
+Both strategy documents state it in the same words: *"US only at launch. GDPR grants
+non-users rights we structurally cannot fulfill."* Boi holds abstractions about people who
+never signed up to anything, so a counterparty's right to erasure is one the architecture
+cannot honour by construction — it cannot identify them.
+
+`POST /signup` validated `/^\+[1-9][0-9]{6,14}$/`, which is every country on earth, and no
+geo gate existed anywhere else. **The invariant was in both documents and in no code.**
+
+The allowed set is `BOI_ALLOWED_COUNTRY_CODES`, default `1`. Config rather than a literal
+because launch geography is a deploy decision: adding Canada is an env change, and adding
+the UK is an env change plus a lawyer. A malformed number and a refused country must
+produce **different messages** — otherwise a UK user is told their phone number is
+invalid, which is both wrong and untrue.
 
 ### The Linq subset
 

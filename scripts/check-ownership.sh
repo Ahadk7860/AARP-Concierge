@@ -47,10 +47,15 @@ FROZEN='^(contracts/|prompts/(CONTRACTS|MERGE-POLICY|TRACK-REVIEW|WORKTREE-PROTO
 #
 #   contracts/transcripts/spectrum/   additive; a new vendor's recorded fixtures
 #   cloud/shared/src/contracts.ts     ONE union widening: provider gains "spectrum"
+#   contracts/schema/brief.v1.json    prompt 05: card_kind, additive
+#   prompts/CONTRACTS.md              prompt 06: APPEND-ONLY, and the appends are rules
+#                                     that were lost between the architecture and this
+#                                     file -- which is why four merged tracks could not
+#                                     have built them. Granted by prompt 06 by name.
 #
 # The second is deliberately not narrowed to the union — a regex cannot tell a widened
 # union from a deleted field. It is narrowed by review instead: the merge reads the diff.
-ALLOWED_FROZEN='^(contracts/transcripts/spectrum/|cloud/shared/src/contracts\.ts$|contracts/schema/(digest|brief)\.v1\.json$|contracts/fixtures/digest/|mac/Sources/BoiKit/Contracts\.swift$|intelligence/boi_intel/contracts\.py$)'
+ALLOWED_FROZEN='^(prompts/CONTRACTS\.md$|contracts/transcripts/spectrum/|cloud/shared/src/contracts\.ts$|contracts/schema/(digest|brief)\.v1\.json$|contracts/fixtures/digest/|mac/Sources/BoiKit/Contracts\.swift$|intelligence/boi_intel/contracts\.py$)'
 
 # Prompt 03 (AMENDMENT-001) additionally lets Track E edit the gist producer and the two
 # checkers, which belong to Tracks A and B. Those tracks have merged and stopped, and the

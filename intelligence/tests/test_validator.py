@@ -15,6 +15,7 @@ import json
 import pathlib
 import subprocess
 import sys
+from datetime import UTC, datetime
 
 import pytest
 from boi_intel.contracts import FORBIDDEN_PHRASES, VALIDATOR_FAILURES
@@ -537,3 +538,92 @@ def test_the_money_case_end_to_end_through_the_gate():
         _pair("ok ill venmo you $12 tonight", "lmk tmrw"), gist, MAYA_PACK
     )
     assert "fabrication_gate" in failures, failures
+
+
+# --------------------------------------------------------------- prompt 06: staleness
+#
+# The gate the architecture asked for and no track built, because the rule never reached
+# CONTRACTS.md. `prompts.py` now instructs the model; this is what happens when the model
+# does not listen, which is the only version of the rule that is worth anything when the
+# user's own name is on the message.
+
+
+def _stale_gist(as_of: str) -> dict:
+    return {
+        "gist_id": "g_stale0000ab",
+        "as_of": as_of,
+        "facts": {"dates": [], "times": [], "places": [], "amounts": [], "names": []},
+    }
+
+
+_REGISTER = {
+    "median_len_chars": 34,
+    "p90_len_chars": 88,
+    "avg_msgs_per_burst": 2.3,
+    "punctuation": "lowercase_no_period",
+    "emoji_rate": 0.0,
+}
+
+_NOW = datetime(2026, 8, 8, 12, 0, tzinfo=UTC)
+
+
+def _pair(answer: str, defer: str) -> list[dict]:
+    return [{"stance": "answer", "text": answer}, {"stance": "defer", "text": defer}]
+
+
+def test_a_day_count_is_rejected_when_the_digest_is_stale():
+    # days_silent is computed when the digest is built. A Mac closed for four days hands
+    # the model "3", and "sorry been 3 days" goes out in the USER's name on day seven --
+    # a plausible WRONG commitment, which CONTRACTS.md section 6 puts under
+    # "degrade, never fabricate".
+    candidates = _pair("sorry been 3 days, yes im in", "ill get back to u this week")
+    failures = validate_candidates(
+        candidates, _stale_gist("2026-08-04T12:00:00Z"), {"register": _REGISTER}, _NOW
+    )
+    assert "fabrication_gate" in failures
+
+
+def test_the_same_day_count_passes_when_the_digest_is_FRESH():
+    # The counter-case, and the reason this is not just a ban on numbers: when the
+    # measurement is current, "been 3 days" is true and is exactly what a person writes.
+    candidates = _pair("sorry been 3 days, yes im in", "ill get back to u this week")
+    failures = validate_candidates(
+        candidates, _stale_gist("2026-08-08T11:00:00Z"), {"register": _REGISTER}, _NOW
+    )
+    assert failures == []
+
+
+def test_a_hedge_passes_on_a_stale_digest():
+    # "a while" cannot be wrong. CONTRACTS.md section 1 already draws this line for the
+    # fabrication gate -- a specific is falsifiable against a calendar, a hedge is not --
+    # and a gate that rejected the hedge too would leave the model nothing to write.
+    candidates = _pair("sorry its been a while, yes im in", "ill get back to u this week")
+    failures = validate_candidates(
+        candidates, _stale_gist("2026-08-04T12:00:00Z"), {"register": _REGISTER}, _NOW
+    )
+    assert failures == []
+
+
+def test_spelled_out_and_abbreviated_counts_are_caught_too():
+    # The fact extractor's known blind spot is spelled-out numbers, and this gate would
+    # inherit it verbatim if it only matched digits.
+    for text in ("sorry been three days", "sorry been 2w", "sorry its been a few weeks"):
+        failures = validate_candidates(
+            _pair(text, "ill get back to u this week"),
+            _stale_gist("2026-08-04T12:00:00Z"),
+            {"register": _REGISTER},
+            _NOW,
+        )
+        assert "fabrication_gate" in failures, text
+
+
+def test_a_missing_as_of_is_treated_as_stale():
+    # Fails towards hedging. A gist with no timestamp is not evidence that the numbers
+    # are current.
+    failures = validate_candidates(
+        _pair("sorry been 3 days, yes im in", "ill get back to u this week"),
+        {"gist_id": "g_noasof0000a", "facts": {}},
+        {"register": _REGISTER},
+        _NOW,
+    )
+    assert "fabrication_gate" in failures

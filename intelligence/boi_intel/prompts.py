@@ -21,8 +21,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import UTC, datetime
 
-PROMPT_VERSION_DEFAULT = "draft.v1"
+#: Bumped to v2 in prompt 06, when `SYSTEM` gained the staleness rule and `render_gist`
+#: started carrying `as_of`.
+#:
+#: This is not bookkeeping. CONTRACTS.md § 6 makes a bad draft reproducible from
+#: `(voice_pack_version, gist_id, prompt_version, model_id)` and from nothing else,
+#: because the prompt itself is never logged. Two different prompts under one version
+#: string would make that tuple a lie, and the committed transcripts under
+#: `contracts/transcripts/model/` genuinely are `draft.v1` output.
+PROMPT_VERSION_DEFAULT = "draft.v2"
 
 # The instruction that makes the two candidates a real choice rather than two
 # paraphrases. `answer` and `defer` are the decision the user has actually been
@@ -50,6 +59,10 @@ Rules:
   - Never write like an assistant. No "just circling back", no "reaching out", no
     "I hope this finds you well", no sign-off, no em dash.
   - Keep each candidate close to the user's typical message length.
+  - EVERY NUMBER BELOW WAS MEASURED AT THE "as of" TIMESTAMP, NOT NOW. When the summary
+    is marked STALE, never state a day count or a gap in the present tense -- no "it's
+    been 3 days", no "sorry, 3 days late". Say "a while", "ages", "too long". A hedge
+    cannot be wrong; a stale number sent in the user's own name can.
 
 Return ONLY minified JSON, no markdown fence:
 {"candidates":[{"stance":"answer","text":"..."},{"stance":"defer","text":"..."}]}"""
@@ -81,12 +94,49 @@ def render_voice_pack(pack: dict) -> str:
     return "\n".join(lines)
 
 
-def render_gist(gist: dict) -> str:
+#: Beyond this, `days_silent` is a number about the past rather than about today.
+#: Matches `BOI_STALENESS_WARN_HOURS`, which is the point at which the brief itself
+#: starts telling the user its data is old.
+STALE_AFTER_HOURS = 24
+
+
+def hours_stale(as_of: str | None, now: datetime | None = None) -> float:
+    """How old the measurements are. Unparseable or missing `as_of` reads as STALE.
+
+    Failing towards stale is deliberate: the consequence of wrongly hedging is a slightly
+    vaguer message, and the consequence of wrongly not hedging is the user telling
+    somebody "sorry, been 3 days" on day seven, in their own name.
+    """
+    if not as_of:
+        return float("inf")
+    try:
+        stamp = datetime.fromisoformat(as_of.replace("Z", "+00:00"))
+    except ValueError:
+        return float("inf")
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=UTC)
+    return ((now or datetime.now(UTC)) - stamp).total_seconds() / 3600.0
+
+
+def render_gist(gist: dict, now: datetime | None = None) -> str:
     """The suffix. Changes every day, so it is deliberately outside the cached block.
 
     The ALLOWED SPECIFICS list is `gist.v1.facts` verbatim — the fabrication-gate
     allowlist, restated to the model as an instruction so the validator in 04 has less
     to reject rather than more.
+
+    **`as_of` is rendered here, and before prompt 06 it was not rendered anywhere.**
+    `BOI_ARCHITECTURE.md` § 6.6 requires "`as_of` in every prompt, and a system
+    instruction forbidding present-tense claims about stale state", and § 8 calls
+    staleness "structurally impossible to lose" — but the rule never reached
+    `CONTRACTS.md`, which is the document every track actually built against, so no track
+    could have built it. This file contained the string `as_of` zero times.
+
+    What it cost: `days_silent` is computed when the digest is built. A Mac closed for
+    four days hands the model "days since the last message: 3" with no anchor, and the
+    model writes "sorry, been 3 days" into a message the USER sends in their own name.
+    `staleness.ts` puts a caveat above the draft, and a caveat above a confident draft is
+    not a hedged draft.
     """
     facts = gist.get("facts", {})
     allowed = [
@@ -106,7 +156,14 @@ def render_gist(gist: dict) -> str:
         f"state: {gist.get('state')}",
         f"days since the last message: {gist.get('days_silent')}",
         f"they asked a question: {'yes' if gist.get('unanswered_question') else 'no'}",
+        f"as of: {gist.get('as_of')} — every number above was measured then, not now",
     ]
+    stale = hours_stale(gist.get("as_of"), now)
+    if stale >= STALE_AFTER_HOURS:
+        lines.append(
+            f"STALE: these measurements are about {int(stale // 24)} day(s) old. Do NOT "
+            "state any day count or gap in the present tense. Hedge instead."
+        )
     if gist.get("topic"):
         lines.append(f"topic: {gist['topic']}")
     if gist.get("has_deadline") and gist.get("deadline_hint"):

@@ -259,6 +259,15 @@ class SqlGistProducer:
         }
 
 
+class ModelProducerNotAvailableOnDigestPath(RuntimeError):
+    """Raised rather than degraded. See `gists_from_digest`.
+
+    Distinct from `ModelUnavailable`, which means "no backend, use SQL" and is CAUGHT and
+    degraded per thread. This one means "you asked for something that cannot be correct",
+    and degrading it quietly is how the empty-corpus hole survived.
+    """
+
+
 class ModelUnavailable(RuntimeError):
     """The local model cannot be used. Always caught; never reaches a caller."""
 
@@ -388,7 +397,23 @@ class LocalModelGistProducer:
 def _quotes_the_corpus(text: str, inbound: list[str], min_run: int = 6) -> bool:
     """True if `text` reproduces a run of `min_run`+ consecutive words from an inbound
     message. The gist crosses the boundary; a quotation inside it defeats the whole
-    separation, so a model that copies gets its output discarded."""
+    separation, so a model that copies gets its output discarded.
+
+    **An EMPTY corpus returns True, and that reversal is the point.** This function
+    iterates `inbound` looking for overlap, so with nothing to iterate it returned False
+    — "does not quote the corpus" — for every input, including a sentence the model
+    invented outright. It is the only guard on a model-written gist besides a length
+    check, so on the digest-driven path (`recent_inbound_text=[]` always, correctly, since
+    the digest carries no prose) ANY hallucination under 140 characters was accepted,
+    became `gist["gist"]`, was fed to the drafter as `situation:`, and was shown to the
+    user as the brief item body.
+
+    The question this answers is not "did it quote?" but "can I show this to somebody?",
+    and with no corpus to check against the answer is no. A guard that passes because its
+    input is empty is not a guard.
+    """
+    if not inbound:
+        return True
     words = text.lower().split()
     if len(words) < min_run:
         return False
@@ -516,8 +541,23 @@ def gists_from_digest(
     the SQL producer rather than dropping the item.
     """
     as_of = as_of or digest.get("generated_at") or datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # THE DIGEST PATH REFUSES A MODEL PRODUCER, rather than trusting a gate that cannot
+    # bite. AMENDMENT-001 sets `recent_inbound_text=[]` here and is right to — the digest
+    # carries metadata, never prose — so a `LocalModelGistProducer` is asked to summarise
+    # nothing. `_quotes_the_corpus` now fails closed on an empty corpus, which means a
+    # model producer here would silently degrade to the SQL sentence on every single
+    # thread. Saying so out loud beats a fallback that looks like it worked.
+    #
+    # Latent today only because no MLX backend is installed, which is exactly why testing
+    # would not have found it.
+    if producer is not None and getattr(producer, "producer", "sql") != "sql":
+        raise ModelProducerNotAvailableOnDigestPath(
+            f"{type(producer).__name__} needs message text; digest.v1 carries none. "
+            "Gist production from a digest is SQL-only."
+        )
     if producer is None:
-        producer, _ = select_producer()
+        producer = SqlGistProducer()
 
     gists: list[dict] = []
     for relationship in sorted(digest.get("relationships", []), key=lambda r: r["contact_id"]):
@@ -611,8 +651,21 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"event": "gist.producer_degraded", "to": "sql", "reason": reason}))
 
     if a.digest:
+        # Not `chosen`: on a machine where a local model IS installed, handing it to the
+        # digest path is the bug above. The refusal lives in `gists_from_digest` so a
+        # library caller hits it too; this is the CLI declining to walk into it.
+        if getattr(chosen, "producer", "sql") != "sql":
+            print(
+                json.dumps(
+                    {
+                        "event": "gist.model_producer_refused",
+                        "path": "digest",
+                        "reason": "digest.v1 carries no message text for a model to summarise",
+                    }
+                )
+            )
         digest = json.loads(pathlib.Path(a.digest).read_text())
-        gists = gists_from_digest(digest, top=a.top, as_of=a.as_of, producer=chosen)
+        gists = gists_from_digest(digest, top=a.top, as_of=a.as_of, producer=None)
     else:
         gists = build_gists(
             a.db, top=a.top, salt=resolve_salt(a.salt), as_of=a.as_of, producer=chosen

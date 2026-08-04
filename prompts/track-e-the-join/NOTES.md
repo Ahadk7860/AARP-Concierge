@@ -13,6 +13,7 @@ ambiguity found, and every place a prompt's stated assumption turned out to be w
 | 04 | `package.json` | Appended the `e2e` script. | `npm run e2e` is the prompt's stated entry point. |
 | 05 | `package.json` | Appended the `card` script. | `cloud/card/src/main.ts` is a real entry point now that the renderer stores things; the test suite starts it as a child process to prove a card is fetchable by something that is not the test. |
 | 05 | `.env.example` | Appended `BOI_CARD_DIR`, `BOI_CARD_SIGNING_SECRET`, `BOI_CARD_PUBLIC_BASE`. | The first is the directory the renderer and `deleteUser` share instead of an import, so it has to be nameable from both sides. The second is a bearer-token secret and its default is labelled as a development value in the file itself. |
+| 06 | `prompts/CONTRACTS.md` | Appended three subsections to § 1 (the `as_of`/tense rule, the hedge-allowlist clarification, the empty-collection guard rule) and one to § 2 (US-only signup). Nothing reordered, nothing removed. | Prompt 06's own DoD: "Both rules land in `CONTRACTS.md` — an append". These are exactly the rules that were lost between the architecture and this file, which is why four merged tracks could not have built them. `CONTRACTS.md` is FROZEN, so `ALLOWED_FROZEN` gained it for track E — announced on every ownership run and read line-by-line at merge. |
 | 05 | `scripts/check-ownership.sh` | Extended track E's `OWNED` with `cloud/card/` and `cloud/scheduler/`, and `AMENDMENT_001` with the Python and signup test files. | Raised before writing code: three paths named in prompts 05/06/07's own Constraints sections were `OUT OF BOUNDS` under the regex the user had just verified. The user ruled: extend it, tests live next to the code they test. |
 | review | `.gitignore` | Appended `review-capture-*.md`, with a comment saying why. Append only. | `review-capture-e.md` was committed in `9f2d2b8` and `check-ownership.sh e` correctly called it `OUT OF BOUNDS` — Tracks A–D all left theirs untracked, but nothing enforced that. The file is a snapshot of one machine at one moment, not a project artifact, and it is still on disk for the reviewers; only the tracking is gone. Foundation defect rather than a track one: the rule should always have been there, and this makes it the default instead of something each track has to remember. |
 | review | `scripts/review-capture.sh` | Appended an `e)` case to the track switch, an `e)` line to the interpreter `require` switch, and `e` to the usage string. Nothing reordered or removed. | **The script had no case for `e` and exited 2 on `unknown track: e`.** Track E was added to `gate.sh` and `check-ownership.sh` but not to this one, so Pass 1 could not run at all. The commands mirror `gate.sh`'s `e` case exactly — all four toolchains — rather than inventing a narrower suite. Flagged for the reviewer: **this is the working agent editing the script that captures evidence about its own work**, which is not ideal. The change is a copy of an existing case and is the smallest thing that makes Pass 1 possible; read it first. |
@@ -564,6 +565,111 @@ discriminates: a brief carrying **both** a `card_url` and `card_kind: "refusal"`
 - `BOI_CARD_DIR` is a local filesystem. Two renderer processes must therefore share a
   volume; the production shape is object storage, and the swap is `putCard`/`readCard`
   plus the two lines in `deleteStoredCards`.
+
+## Prompt 06 — four rules that were never transcribed
+
+None of these is a track defect. Each is a rule that existed in `BOI_ARCHITECTURE.md` or
+in both strategy documents and never reached `CONTRACTS.md`, which is the document every
+track actually built against. Four merged tracks and about a thousand tests could not have
+caught any of them.
+
+### 1. `as_of` never reached the drafter, and nothing forbade present-tense claims
+
+`prompts.py` contained the string `as_of` **zero times** and `SYSTEM` had five rules, none
+about tense. Now: `as_of` is rendered with what it means beside it, `SYSTEM` forbids a
+present-tense day count on stale state **and names the hedge to use instead**, and — the
+part that makes it true rather than requested — **a gate rejects a bare day count when the
+gist is stale**, whatever the model did.
+
+`prompt_version` moved `draft.v1` → `draft.v2`. § 6 makes a bad draft reproducible from
+`(voice_pack_version, gist_id, prompt_version, model_id)` and from nothing else, because
+the prompt is never logged; changing `SYSTEM` under a fixed version string turns that
+tuple into a lie, and the committed transcripts really are v1 output.
+
+**Contract gap, not resolved here:** the honest slug for the new gate is
+`stale_tense_gate`, and `draft_bundle.v1.validator.failures` is a **frozen enum**
+(`length_gate`, `register_gate`, `fabrication_gate`, `forbidden_phrase`,
+`stance_collision`, `empty`) that prompt 06 does not grant. The gate therefore reports as
+`fabrication_gate`. The category is defensible — a specific the gist does not license *as
+of now* — and `_RETRY_GUIDANCE["fabrication_gate"]` still steers the retry usefully. But
+a reader of a failure list cannot tell the two apart, and the fix is one enum entry in a
+file this prompt may not touch.
+
+### The fifth finding: the hedge allowlist was ruled on 3 Aug and never implemented
+
+Found while writing the staleness tests, because the canonical hedged `defer` is the
+string CONTRACTS quotes. `facts.RELATIVE_DAYS` extracts `this week` as a date, so
+**`"ill get back to u this week"` failed `fabrication_gate` on every run** against an
+empty allowlist — the exact ceiling the 3 Aug ruling was written to remove, still in
+place. `CONTRACTS.md` § 1 says "a closed allowlist of hedges passes without needing a
+match in `facts`"; nothing implemented it.
+
+It belongs in `validator.py`, not in `facts.py`: extraction should keep seeing these
+strings, since a gist's own `facts` may legitimately carry `this week` out of the other
+person's message. It is the **gate** that must not read them as commitments. Nine entries,
+closed; `tomorrow` and `the weekend` are commitments and are deliberately out.
+
+### 2. The gist model could be handed an empty corpus and its output accepted
+
+`_quotes_the_corpus(text, [])` returned `False` **by construction** — it iterates the
+corpus looking for overlap, and there was nothing to iterate. On the digest path
+`recent_inbound_text` is always empty (correctly: `digest.v1` carries metadata, never
+prose), so the only guard on a model-written gist besides a length check could not bite.
+Any hallucination under 140 characters became `gist["gist"]`, was fed to the drafter as
+`situation:`, and was shown to the user as the brief item body.
+
+Two fixes rather than one, because either alone leaves a hole:
+
+- **The function fails closed on an empty corpus.** The question it really answers is not
+  "did it quote?" but "can I show this to somebody?", and with no corpus the answer is no.
+- **The digest path refuses a model producer outright** —
+  `ModelProducerNotAvailableOnDigestPath`, distinct from `ModelUnavailable`, which means
+  "no backend, use SQL" and is caught and degraded per thread. With only the first fix, a
+  model producer on that path would degrade to the SQL sentence on every thread and look
+  like it had worked.
+
+### 3. US-only was one regex character
+
+`/^\+[1-9][0-9]{6,14}$/` accepted every country on earth and there was no geo gate
+anywhere else. Now `BOI_ALLOWED_COUNTRY_CODES`, default `1`, and a refused country reads
+differently from a malformed number — otherwise a UK user is told their phone number is
+invalid, which is untrue as well as unhelpful. A junk value in the variable yields an
+empty allowlist and refuses everyone, rather than opening the gate.
+
+### 4. The audit for the same shape elsewhere
+
+Every gate in `validator.py`, checked by hand against the vacuous-pass pattern:
+
+| Gate | Empty-collection behaviour | Verdict |
+|---|---|---|
+| `length_failures` | `any()` over candidates → `False` | unreachable: `validate_candidates` returns `empty` and stops before it |
+| `register_failures` | same | same |
+| `fabricated_specifics` | empty allowlist → **everything** unlicensed | fails CLOSED, the safe direction |
+| `forbidden_phrases_in` | iterates a constant that is never empty | not applicable |
+| `stale_claim_failures` (new) | missing `as_of` → treated as stale | fails CLOSED by construction |
+| `_quotes_the_corpus` | **was the hole** | fixed |
+
+**One adjacent finding, reported rather than fixed.** `register_failures({})` lapses:
+`punctuation` defaults to `"mixed"`, which is a real value in the vocabulary, so the
+capitalisation and full-stop checks silently do not apply to a draft validated against a
+voice pack with no register. It is a **default-value** hole rather than the
+empty-iteration one this prompt is about, the emoji check still bites, and `length_limit`
+on the same empty register fails *tight* (31 characters) rather than loose. Naming it
+because "I found nothing else" would be a stronger claim than I can support.
+
+### Every new assertion, verified to fail
+
+| Test | Falsified by | Failure seen |
+|---|---|---|
+| every prompt carries `as_of` | removing the line from `render_gist` | `AssertionError` on the rendered suffix |
+| a day count is rejected on a stale gist | removing `stale_claim_failures` from the verdict | 3 tests fail, incl. the spelled-out and missing-`as_of` cases |
+| `_quotes_the_corpus` fails closed | removing the empty-corpus branch | `assert False is True` |
+| the digest path refuses a model producer | disabling the check | `DID NOT RAISE` |
+| signup rejects non-US numbers | removing the `refine` | `expected 200 to be 400`, twice |
+
+The counter-cases matter as much: the same day count **passes** on a fresh gist, a hedge
+passes on a stale one, and the SQL producer still produces on the digest path. A gate that
+rejects everything is not a gate.
 
 ## Runtime resources
 
