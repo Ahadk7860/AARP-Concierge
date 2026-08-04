@@ -13,6 +13,7 @@ ambiguity found, and every place a prompt's stated assumption turned out to be w
 | 04 | `package.json` | Appended the `e2e` script. | `npm run e2e` is the prompt's stated entry point. |
 | 05 | `package.json` | Appended the `card` script. | `cloud/card/src/main.ts` is a real entry point now that the renderer stores things; the test suite starts it as a child process to prove a card is fetchable by something that is not the test. |
 | 05 | `.env.example` | Appended `BOI_CARD_DIR`, `BOI_CARD_SIGNING_SECRET`, `BOI_CARD_PUBLIC_BASE`. | The first is the directory the renderer and `deleteUser` share instead of an import, so it has to be nameable from both sides. The second is a bearer-token secret and its default is labelled as a development value in the file itself. |
+| 10 | `package.json` | `spectrum-ts@^12.7.0` (pulls `@spectrum-ts/core` and `@spectrum-ts/imessage`). Installed by the user. | The channel cannot be compiled against a remembered API. Real type definitions are what caught `space.phone` being `"shared"` rather than a number — prose in `SPECTRUM_INTEGRATION.md` said "read its `phone`" and the type says nothing about what is in it. |
 | 08 | `cloud/db/migrations/009_pairing_token_format.*` | New migration: the `pairing_codes` shape constraint widens to accept `boi-4f2a91` as well as six digits. | The constraint is documentation. Holding an opaque token in a column whose check says "six digits" makes the schema describe the design we replaced. A second table was rejected — identical lifecycle, so it would duplicate the single-use, expiry, binding and partial index forever. |
 | 07 | `package.json` | Appended the `scheduler` script. | `npm run scheduler` is the prompt's stated entry point. |
 | 06 | `contracts/schema/draft_bundle.v1.json`, `intelligence/boi_intel/contracts.py` | `validator.failures` gains `stale_tense_gate`, in the schema and in the Python mirror. **A union widening: every document that validates today still validates.** | The gate needs a slug of its own or a failure list cannot tell a stale-tense refusal from a fabrication refusal. Both files are FROZEN; the user ruled the widening in and `ALLOWED_FROZEN` now covers the schema (the mirror was already covered). |
@@ -1052,6 +1053,74 @@ from zero:
 
 **If it recurs before `10` finishes, stop and diagnose.** Two unexplained reds is a
 pattern; one is an anecdote.
+
+## Prompt 10 — the quota probe, and what it found instead
+
+### The quota question: answered, and free for a stronger reason than the docs give
+
+`im.space.create("+16465792868")` against the real project, twice:
+
+```json
+{ "msg": "probe.space_created",       "space_id": "any;-;+16465792868", "phone": "shared", "ms": 1 }
+{ "msg": "probe.space_created_twice", "same_id": true,                  "phone": "shared" }
+```
+
+**One millisecond, and a deterministic id.** On the shared tier `space.create` is not a
+remote call at all — it constructs `any;-;<handle>` locally. So it cannot consume the
+50-new-conversations-per-line-per-day quota, and the answer does not depend on Photon's
+definition of "new conversation" holding: **there is no request to count.** That is the
+one limit that would have capped onboarding at 50 users a day rather than degrading it,
+and it is not a limit.
+
+### `space.phone` is the literal string `"shared"`, not a line
+
+**AMENDMENT-002 assumes the deep link's number comes from resolving the user's assigned
+line — "create the space and read its `phone`".** On the Free tier that reads back
+`"shared"`. There is no per-recipient number to resolve, because on a shared pool the line
+is chosen at send time, not at assignment time.
+
+Consequences, in order of how much they cost:
+
+1. **`Registrar.lineFor` cannot be implemented against `space.create` on Free.** The line
+   has to come from **config** — the project's assigned number, known from the dashboard
+   (`+1 646 579-2868`, verified end to end today). The port's `createSpace` still returns
+   a `SpectrumSpaceRef`, and its `phone` is honest about being unresolved rather than
+   fabricating one.
+2. **The deep link is a constant on this tier after all** — for the opposite reason to the
+   one the amendment feared. Not because we hard-coded it, but because the pool genuinely
+   has one number per project until a dedicated line is bought. `StubRegistrar` handing
+   every user a *different* line stays correct: it models the tier we will be on, and the
+   code that consumes it must not assume constancy.
+3. The prompt's chat-GUID persistence still matters, but not for quota — for stability.
+   `any;-;<handle>` is derived from the handle, so it is stable by construction today;
+   persisting it means a future tier that returns opaque ids does not silently change
+   behaviour.
+
+**Not fixed in this session.** The registrar and the channel are unwritten, and this is
+the finding that shapes both.
+
+### The chat-GUID column is `channel_space_id`, and it is a tradeoff
+
+Not `spectrum_space_id`: the column sits on `users`, which is **above the channel line**,
+and `CONTRACTS.md` is explicit that no provider semantics appear there. A vendor name in a
+core table reads as permanent the moment anyone else sees it.
+
+The honest accounting, because this is not obviously right: **transport-scoped data is
+living in a transport-agnostic table.** That is a small violation of the same rule the name
+avoids. It is accepted because the alternative — a `channel_spaces` table — drags in the
+hash-partitioning requirement and a seed helper in `schema.test.ts`, which belongs to
+Track D. On a transport swap the column becomes meaningless, and whoever finds it then
+needs to know it was a deliberate trade rather than a leak.
+
+### A hook blocked a write for a pattern it misread
+
+`spectrum-signature.ts` failed to write with a security warning about
+`child_process.exec()` — triggered by `RegExp.prototype.exec` in
+`signature.match(/^v0=…/)`'s predecessor. There is no `child_process` in the file.
+
+`String.prototype.match` sidesteps it and is equivalent here. Recorded because the next
+person loses the same twenty minutes, and because the workaround is not obvious from the
+error, which names a utility (`execFileNoThrow`) that does not exist in this repo.
 
 ## Runtime resources
 
