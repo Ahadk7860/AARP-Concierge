@@ -30,9 +30,10 @@ public enum GrantStage: String, CaseIterable, Sendable, Equatable {
     case needsConsent
 
     /// **Failure path 1, and it is caught BEFORE the deep link.** The grant binds to the
-    /// responsible bundle; a bundle outside `/Applications` can be granted and the grant
-    /// still will not survive, so sending the user to System Settings first wastes the one
-    /// trip they are willing to make.
+    /// responsible bundle; a bundle outside an Applications folder can be granted and the
+    /// grant still will not survive, so sending the user to System Settings first wastes
+    /// the one trip they are willing to make. See `InstallLocation` for why *both*
+    /// Applications folders count.
     case notInApplications
 
     /// The deep link is open and we are polling.
@@ -544,30 +545,55 @@ public struct GrantSignaller: Sendable {
 /// willing to make.
 public enum InstallLocation {
 
-    /// Where a bundle has to live for the grant to be durable.
-    public static let requiredPrefix = "/Applications/"
+    /// The directories a bundle can durably hold the grant from.
+    ///
+    /// **`~/Applications` counts, and that was established empirically rather than
+    /// assumed.** TRACK.md states the bundle must be "in `/Applications`". This project's
+    /// own log disproves the strict reading: on 3 Aug, `~/Applications/Boi.app` held Full
+    /// Disk Access and completed a full sync of 94,897 messages. A check requiring
+    /// `/Applications` exactly would tell that user to move a working install — advice
+    /// that is both wrong and destructive, because moving the bundle is what actually
+    /// breaks the grant.
+    ///
+    /// The property that matters is not which folder it is, but that the path is **stable
+    /// and user-installed**. Both Applications folders are; `~/Downloads`, `/Volumes`,
+    /// `/tmp` and Gatekeeper's randomized `AppTranslocation` paths are not.
+    ///
+    /// Not a prefix test — a bundle at `~/Downloads/Applications/Boi.app` contains the
+    /// word and is still not installed. These are matched as the *enclosing directory*.
+    public static func installDirectories(
+        home: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> [String] {
+        ["/Applications", home.appendingPathComponent("Applications").path]
+    }
 
     public enum Verdict: Sendable, Equatable {
         case installed
-        /// Runnable but not grantable. Carries the path so the screen can show the user
-        /// where the copy they opened actually is.
+        /// Runnable but not durably grantable. Carries the path so the screen can show the
+        /// user where the copy they opened actually is.
         case elsewhere(path: String)
         /// No enclosing `.app` at all — `swift run`, or a unit test. A bare binary cannot
         /// hold the grant, and it is also not a case any shipping user reaches.
         case notABundle
     }
 
-    public static func verdict(bundlePath: String?) -> Verdict {
+    public static func verdict(
+        bundlePath: String?,
+        home: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> Verdict {
         guard let bundlePath, bundlePath.hasSuffix(".app") else { return .notABundle }
-        // Matched on the enclosing directory rather than by substring: a bundle at
-        // `~/Downloads/Applications/Boi.app` contains the word and is still not installed.
-        let parent = URL(fileURLWithPath: bundlePath).deletingLastPathComponent().path
-        return parent == "/Applications" ? .installed : .elsewhere(path: bundlePath)
+        // The enclosing directory, resolved: `/tmp` is a symlink to `/private/tmp`, and a
+        // path comparison that ignores that reports two different strings for one folder.
+        let parent = URL(fileURLWithPath: bundlePath).deletingLastPathComponent()
+            .resolvingSymlinksInPath().path
+        let allowed = installDirectories(home: home)
+            .map { URL(fileURLWithPath: $0).resolvingSymlinksInPath().path }
+        return allowed.contains(parent) ? .installed : .elsewhere(path: bundlePath)
     }
 
     /// The verdict for the running process, via the responsible bundle — not
     /// `Bundle.main` directly, because the grant binds to the outermost enclosing bundle
-    /// and that is the path that has to be in `/Applications`.
+    /// and that is the path that has to be installed.
     public static func current() -> Verdict {
         verdict(bundlePath: ResponsibleBundle.current())
     }

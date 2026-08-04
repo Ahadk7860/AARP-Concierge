@@ -185,21 +185,70 @@ final class GrantNarratorTests: XCTestCase {
     /// the user finds out by Boi silently not working after they already spent the one
     /// trip to System Settings they were willing to make.
     ///
-    /// MUTATION: change `verdict` to compare with `hasPrefix(requiredPrefix)` on the
-    /// bundle path instead of matching the parent directory. Red on the nested case.
-    func testInstallLocationAcceptsOnlyApplicationsItself() {
-        XCTAssertEqual(InstallLocation.verdict(bundlePath: "/Applications/Boi.app"),
-                       .installed)
+    /// MUTATION: change `verdict` to compare with `hasPrefix("/Applications/")` on the
+    /// bundle path instead of matching the enclosing directory. Red on the nested cases.
+    func testInstallLocationAcceptsEitherApplicationsFolder() {
+        let home = URL(fileURLWithPath: "/Users/x")
+
+        XCTAssertEqual(
+            InstallLocation.verdict(bundlePath: "/Applications/Boi.app", home: home),
+            .installed)
+
+        // **`~/Applications` is a real install location, not a mistake.** On 3 Aug this
+        // project's own log shows `~/Applications/Boi.app` holding Full Disk Access and
+        // completing a 94,897-message sync. A check that rejected it would tell that user
+        // to move a working install — and moving the bundle is what actually breaks the
+        // grant.
+        //
+        // MUTATION: drop the home directory from `installDirectories`. Red here.
+        XCTAssertEqual(
+            InstallLocation.verdict(bundlePath: "/Users/x/Applications/Boi.app", home: home),
+            .installed)
 
         for path in ["/Users/x/Downloads/Boi.app",
                      "/Users/x/Desktop/Boi.app",
+                     // A disk image the user never actually installed from.
+                     "/Volumes/Boi/Boi.app",
+                     // Gatekeeper App Translocation: a randomized path that changes on
+                     // every launch, so a grant made against it is worthless tomorrow.
+                     "/private/var/folders/ab/xyz/d/AppTranslocation/1234/d/Boi.app",
                      // Contains the word and is still not installed — the substring trap.
                      "/Users/x/Downloads/Applications/Boi.app",
                      // A nested bundle under the real folder is not the responsible one.
                      "/Applications/Xcode.app/Contents/Helpers/Boi.app"] {
-            XCTAssertEqual(InstallLocation.verdict(bundlePath: path), .elsewhere(path: path),
+            XCTAssertEqual(InstallLocation.verdict(bundlePath: path, home: home),
+                           .elsewhere(path: path),
                            "\(path) cannot durably hold the grant")
         }
+    }
+
+    /// `/tmp` is a symlink to `/private/tmp`, and more importantly `~` resolves. A path
+    /// comparison that ignores symlinks reports two different strings for one folder — so
+    /// a correctly installed app could be told to move itself.
+    ///
+    /// MUTATION: drop `resolvingSymlinksInPath()` from `verdict`. Red.
+    func testInstallLocationResolvesSymlinksBeforeComparing() throws {
+        // Real directories, because `resolvingSymlinksInPath()` only resolves a path that
+        // exists — a fixture built from strings alone would assert nothing.
+        let name = "boi-home-\(UUID().uuidString)"
+        let home = URL(fileURLWithPath: "/tmp").appendingPathComponent(name)
+        let applications = home.appendingPathComponent("Applications")
+        try FileManager.default.createDirectory(at: applications,
+                                                withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+
+        // The same folder, reached through the symlinked and the resolved spelling. On
+        // macOS `/tmp` is a symlink to `/private/tmp`, so these are two strings for one
+        // directory — and a comparison that ignores that would tell a correctly installed
+        // app to move itself.
+        XCTAssertEqual(
+            InstallLocation.verdict(bundlePath: "/tmp/\(name)/Applications/Boi.app",
+                                    home: home),
+            .installed)
+        XCTAssertEqual(
+            InstallLocation.verdict(bundlePath: "/private/tmp/\(name)/Applications/Boi.app",
+                                    home: home),
+            .installed)
     }
 
     /// A bare binary — `swift run`, or this test process — has no bundle to grant.
