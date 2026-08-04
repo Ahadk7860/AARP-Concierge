@@ -102,18 +102,54 @@ where the **algorithm** was pinned rather than the shape:
 | `contact_id` | **Held** | `CONTRACTS.md` § 3 pins the algorithm — `HMAC(user_salt, normalized_handle)` — and `DigestTests.swift:938` computes both sides independently and compares, failing if nothing matched at all rather than silently comparing an empty set. |
 | Fact vocabulary | **Held** | One side is *generated* from the other by `scripts/generate_fact_vocabulary.py`, and `FactsTests.testVocabularyMatchesPython` re-reads the Python sets at test time — so the generator cannot go stale unnoticed. |
 | Heartbeat shape | **Diverged** | `Heartbeat` (Mac) and the frozen `POST /v1/heartbeat` schema had no overlapping required fields. Found by Track E only when it tried to post one; caught by a schema, not by a test. |
-| `sms:` link format | **Open** | Recorded here. Nothing pins it and nothing compares the two. |
+| `sms:` link format | **Pinned** | `&body=` confirmed on a real Mac, then locked by `testTheSwiftAndTypeScriptDeepLinksAgree`, which runs both languages. The second seam to be pinned properly rather than discovered broken. Still needs the format written into `CONTRACTS.md`, which is the user's. |
 
 The lesson the first two teach and the last two prove: **specifying the shape is not enough
 — the algorithm has to be specified, and a test has to build both sides from scratch.** A
 schema catches a wrong field name. It does not catch two correct implementations of two
 different readings of the same sentence, which is what a separator is.
 
-**Deliberately not pinned yet.** `?body=` versus `&body=` is a real iOS quirk and writing a
-value into `CONTRACTS.md` from memory would freeze the bug and give it the authority of a
-spec. The second manual run tests it. Then it gets pinned properly — the format in
-`CONTRACTS.md`, plus a cross-language agreement test in the shape of the `contact_id` one,
-building both sides rather than trusting one observed run.
+**Resolved by the second manual run: `&body=` is empirically correct.** The deep link
+opened Messages with the number and the body prefilled. (`open --env` was needed to pass
+`BOI_ASSIGNED_LINE` / `BOI_PAIRING_TOKEN` through to a bundled app — `open -a` does not
+forward the caller's environment.) The green bubble in that run was the placeholder number
+having no iMessage registration, so macOS fell back to SMS; not a code path.
+
+The Swift side needed no change — it already built `&body=`, and that is now confirmed
+rather than assumed.
+
+**Pinned in `OnboardingTests.testTheSwiftAndTypeScriptDeepLinksAgree`**, built in the
+`contact_id` shape: both sides computed from scratch and compared, never one side asserted
+against a literal somebody typed. Node runs the real `.ts` through type stripping
+(`--experimental-strip-types`), so it needs no `npm install` — which matters here, because
+a worktree shares no untracked dependencies and **a test nobody can run is a test nobody
+runs.** It carries the non-vacuity guard that made `contact_id` hold: a comparison over an
+empty set is indistinguishable from one that succeeded.
+
+Today it compares the **paired** path only. `pairingDeepLink` is Track E's prompt `08` and
+is not on this branch — my `welcome.ts` exports `smsDeepLink` and nothing else. The test
+enumerates what the TypeScript side exports, so it extends to the unpaired path **with no
+edit here** the moment `08` merges. Until then the `&body=` separator is pinned on the
+Swift side and by the empirical run, not yet by both languages.
+
+**Still the user's to write: the format in `CONTRACTS.md`.** That file is frozen to this
+track (§ 8), so the specification half of the pin is an amendment, not something this
+track can land.
+
+## Known false claim on screen, scheduled for prompt 03
+
+`ThreadHandoff.lineUnresolved` renders *"Boi will still text you — this window just cannot
+open the thread for you."* **That sentence is true when paired and false when not.** An
+unpaired user with an unresolvable line has no thread and no completed pairing, so nothing
+is going to text them, and the screen promises otherwise.
+
+`lineUnresolved` collapses two genuinely different situations — *we know who you are but
+not which line* and *you were never paired* — and pairing is knowable from the token store,
+so the split is available rather than undetectable. That makes it unlike the Later case: it
+is not a limit of the platform, it is a state this code chose not to distinguish.
+
+Scoped to prompt `03` (the four-state split) by the user. Recorded here because it is live
+in the meantime and it is a false statement to a user, not merely a thin one.
 
 ## Prompt 02 — prompt file location
 
