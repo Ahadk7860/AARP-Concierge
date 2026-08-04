@@ -219,7 +219,11 @@ export const heartbeatSchema = z
   .object({
     device_id: z.string().regex(ID_PATTERNS.device),
     app_version: z.string(),
-    digest_as_of: isoUtc,
+    // AMENDMENT-003: required and NULLABLE, never optional. `null` means "this device
+    // has never produced a digest", which is a claim; an absent field is a producer that
+    // forgot, and those must not be the same thing. `.nullable()` keeps the key
+    // mandatory; `.optional()` would not.
+    digest_as_of: isoUtc.nullable(),
     macos_version: z.string().optional(),
     fda_granted: z.boolean().optional(),
   })

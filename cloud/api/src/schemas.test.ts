@@ -161,6 +161,46 @@ describe("the heartbeat body matches the OpenAPI document", () => {
     expect(heartbeatSchema.safeParse(ok).success).toBe(true);
     expect(heartbeatSchema.safeParse({ ...ok, extra: 1 }).success).toBe(false);
   });
+
+  // AMENDMENT-003 ---------------------------------------------------------------
+  //
+  // At the moment Full Disk Access is granted, no sync has ever run — so the grant
+  // heartbeat precedes the first digest by definition, and the old shape could only be
+  // satisfied by fabricating a timestamp. Track E's own `HeartbeatUpload.from` comment
+  // is why that was rejected: it "would report a Mac that produced nothing as having
+  // produced something now", in the one dataset used to detect fleet-wide failure.
+
+  it("accepts a null digest_as_of — a device that has never synced", () => {
+    const beat = {
+      device_id: "dev_abcdefgh",
+      app_version: "0.1.0",
+      digest_as_of: null,
+      fda_granted: true,
+    };
+    expect(heartbeatSchema.safeParse(beat).success).toBe(true);
+  });
+
+  it("still REQUIRES the key, so nullable is not optional", () => {
+    // The distinction the amendment turns on, and the one a differential test against
+    // the JSON Schema does not catch. `null` is a claim — "this device has never
+    // synced". An absent field is a producer that forgot, and a fleet query cannot tell
+    // the second one from a bug in the Mac.
+    const { device_id, app_version } = {
+      device_id: "dev_abcdefgh", app_version: "0.1.0",
+    };
+    expect(heartbeatSchema.safeParse({ device_id, app_version }).success).toBe(false);
+    expect(
+      heartbeatSchema.safeParse({ device_id, app_version, digest_as_of: undefined }).success,
+    ).toBe(false);
+  });
+
+  it("still rejects a malformed timestamp", () => {
+    // Widening to accept null must not widen to accept anything else.
+    const beat = { device_id: "dev_abcdefgh", app_version: "0.1.0" };
+    expect(heartbeatSchema.safeParse({ ...beat, digest_as_of: "yesterday" }).success).toBe(false);
+    expect(heartbeatSchema.safeParse({ ...beat, digest_as_of: 0 }).success).toBe(false);
+    expect(heartbeatSchema.safeParse({ ...beat, digest_as_of: "" }).success).toBe(false);
+  });
 });
 
 describe("the redaction guard", () => {
