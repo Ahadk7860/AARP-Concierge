@@ -403,6 +403,45 @@ final class OnboardingTests: XCTestCase {
         }
     }
 
+    /// **The unresolved screen says only what is known.**
+    ///
+    /// It used to end *"Boi will still text you — this window just cannot open the thread
+    /// for you."* True when paired, **false when not**: an unpaired user with no resolvable
+    /// line has no thread and no completed pairing, so nothing is going to text them.
+    ///
+    /// The claim is deleted rather than softened. Whether Boi will make contact is the part
+    /// this state cannot determine — `lineUnresolved` collapses *we know you but not your
+    /// line* with *you were never paired* — so it says nothing about it. Prompt 03 splits
+    /// the state and gives each half accurate copy.
+    ///
+    /// MUTATION: restore the "Boi will still text you" sentence to `lineUnresolved`'s
+    /// detail. Red.
+    func testTheUnresolvedScreenPromisesNothingItCannotKnow() {
+        let copy = ThreadHandoff.copy(for: .lineUnresolved)
+        let text = (copy.headline + " " + copy.detail).lowercased()
+
+        for claim in ["will still text you", "will text you", "boi will still",
+                      "on its way", "you'll hear from"] {
+            XCTAssertFalse(text.contains(claim),
+                           "the unresolved state cannot know this: \"\(claim)\"")
+        }
+
+        // It still says the two things it *does* know.
+        XCTAssertTrue(text.contains("has not been told which one is yours"))
+        XCTAssertTrue(text.contains("cannot open the thread"))
+        XCTAssertNil(copy.button, "no link to open means no button pointing at one")
+    }
+
+    /// The paired state may promise contact, because there it is true — the thread exists.
+    /// This pins that the fix above did not flatten every state into saying nothing.
+    ///
+    /// MUTATION: blank `paired`'s detail. Red.
+    func testThePairedScreenStillSaysTheReportIsComing() {
+        let copy = ThreadHandoff.copy(for: .paired(link: "sms:+15551234567"))
+        XCTAssertTrue(copy.detail.lowercased().contains("on its way"))
+        XCTAssertNotNil(copy.button)
+    }
+
     // MARK: - The cross-language seam
 
     /// **Swift and TypeScript must build the same `sms:` link, and this runs both.**

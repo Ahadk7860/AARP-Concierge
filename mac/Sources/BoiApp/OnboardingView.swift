@@ -216,38 +216,10 @@ private struct HandoffScreen: View {
                 // ONE MECHANISM, TWO COPY VARIANTS. `sms:` opens an existing conversation
                 // or composes a new one, so paired and unpaired differ in what they say
                 // and in whether a pairing token rides along — not in machinery.
-                switch model.handoff {
-                case .paired(let link):
-                    HandoffAction(
-                        detail: "Your thread with Boi is already open. The first report is "
-                            + "on its way to it.",
-                        button: "Open the conversation",
-                        link: link)
-
-                case .unpaired(let link):
-                    HandoffAction(
-                        detail: "One tap opens Messages with everything filled in. Send it "
-                            + "and Boi takes it from there.",
-                        button: "Start the conversation",
-                        link: link)
-
-                case .lineUnresolved:
-                    // **Never a malformed sms: link.** The number is per-user and comes
-                    // from the registrar; without it there is no honest link to render, so
-                    // say that instead of opening Messages addressed to nothing.
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Boi could not work out which number to text you from.")
-                            .bold()
-                        Text("Every account gets its own line, and this Mac has not been "
-                             + "told which one is yours. Boi will still text you — this "
-                             + "window just cannot open the thread for you.")
-                            .font(.callout).foregroundStyle(.secondary)
-                    }
-                    .padding(12)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
-                    .accessibilityIdentifier("handoff-unresolved")
-                }
+                // The words are `ThreadHandoff.copy` — in BoiKit, where the suite can read
+                // them. This file chooses the layout and nothing else.
+                HandoffAction(copy: ThreadHandoff.copy(for: model.handoff),
+                              link: model.handoff.link)
 
                 // WHAT COULD BE BETTER — below the handoff, and no longer the last word.
                 if let summary, !summary.remedies.isEmpty || !summary.producesReport {
@@ -307,24 +279,31 @@ private struct HandoffScreen: View {
     }
 }
 
-/// The door into the thread. One button, and the link behind it is visible.
+/// The door into the thread — or, when there is no link, the plain statement of why not.
+///
+/// **Never a malformed `sms:` link.** The number is per-user and comes from the registrar;
+/// without it there is nothing honest to open, so the button is simply absent rather than
+/// pointing at a URL addressed to nothing.
 private struct HandoffAction: View {
-    let detail: String
-    let button: String
-    let link: String
+    let copy: ThreadHandoff.Copy
+    let link: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text(detail).foregroundStyle(.secondary)
-            Button(button) {
-                if let url = URL(string: link) { NSWorkspace.shared.open(url) }
+            Text(copy.headline).bold()
+            Text(copy.detail).font(.callout).foregroundStyle(.secondary)
+            if let button = copy.button, let link {
+                Button(button) {
+                    if let url = URL(string: link) { NSWorkspace.shared.open(url) }
+                }
+                .keyboardShortcut(.defaultAction)
+                .accessibilityIdentifier("handoff-button")
             }
-            .keyboardShortcut(.defaultAction)
-            .accessibilityIdentifier("handoff-button")
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
+        .accessibilityIdentifier("handoff-action")
     }
 }
 

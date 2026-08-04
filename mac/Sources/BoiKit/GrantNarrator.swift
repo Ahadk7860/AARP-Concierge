@@ -444,6 +444,58 @@ public enum ThreadHandoff {
         /// thread with somebody else's line. Saying so plainly beats a malformed `sms:`
         /// URL that opens Messages addressed to nothing.
         case lineUnresolved
+
+        /// The `sms:` URL to open, or nil when there is none to open honestly.
+        public var link: String? {
+            switch self {
+            case .paired(let link), .unpaired(let link): return link
+            case .lineUnresolved: return nil
+            }
+        }
+    }
+
+    /// What each handoff state says. **In `BoiKit`, not the view**, for the reason the rest
+    /// of this file is: `BoiApp` is an executable target `BoiKitTests` cannot import, so
+    /// copy left in `OnboardingView` is copy no test can read — and this copy in particular
+    /// shipped a false claim precisely because nothing could assert on it.
+    public struct Copy: Sendable, Equatable {
+        public var headline: String
+        public var detail: String
+        /// nil when there is no link to open.
+        public var button: String?
+    }
+
+    public static func copy(for state: State) -> Copy {
+        switch state {
+        case .paired:
+            return Copy(headline: "Your thread with Boi is already open.",
+                        detail: "The first report is on its way to it.",
+                        button: "Open the conversation")
+        case .unpaired:
+            return Copy(headline: "One tap opens Messages with everything filled in.",
+                        detail: "Send it and Boi takes it from there.",
+                        button: "Start the conversation")
+        case .lineUnresolved:
+            // **Says only what is known.**
+            //
+            // This used to end "Boi will still text you — this window just cannot open the
+            // thread for you." That is true when paired and **false when not**: an unpaired
+            // user with no resolvable line has no thread and no completed pairing, so
+            // nothing is going to text them.
+            //
+            // `lineUnresolved` collapses two different situations — *we know who you are
+            // but not which line* and *you were never paired* — and pairing is knowable
+            // from the token store, so this is a distinction the code declined to make
+            // rather than one the platform withholds. Prompt 03 splits it and gives each
+            // state accurate copy. Until then the claim is **deleted, not softened**:
+            // whether Boi will text them is the part that cannot yet be determined, so
+            // this says nothing about it.
+            return Copy(headline: "Boi could not work out which number to text you from.",
+                        detail: "Every account gets its own line, and this Mac has not been "
+                            + "told which one is yours — so this window cannot open the "
+                            + "thread for you.",
+                        button: nil)
+        }
     }
 
     /// - Parameters:
