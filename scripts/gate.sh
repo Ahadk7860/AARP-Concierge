@@ -109,6 +109,49 @@ if [ -n "$VITEST_ONLY" ]; then
   fi
 fi
 
+# A suite that SHRANK reports as a pass in every mechanism above.
+#
+# The checks so far catch a suite that cannot compile, and one that ran zero tests. None
+# of them notices a suite that is simply SMALLER than it was — a deleted test file, a
+# reverted edit, a `git checkout` over uncommitted work — because the tests that remain
+# all pass and the exit code is zero. It was found by hand: 257 came back where 258 was
+# expected, and only the arithmetic gave it away. A green suite with the wrong number of
+# tests is not green, and nobody should have to remember last week's number to see it.
+#
+# Reported, deliberately not enforced. Removing a superseded test is legitimate — this
+# track did it when prompt 02 overturned two of prompt 01's assertions — so an automatic
+# red here would be a check people learn to route around. Printing the delta makes a
+# shrink something a reader has to look at and account for.
+COUNT_CMD=""
+case "$LETTER" in
+  a|f) COUNT_CMD="swift test --package-path mac --list-tests" ;;
+esac
+if [ -n "$COUNT_CMD" ]; then
+  printf '\n──────── test census\n'
+  discovered=$(eval "$COUNT_CMD" 2>/dev/null | grep -cE '^[A-Za-z_][A-Za-z0-9_]*\.' || true)
+  printf 'tests discovered by the runner: %s\n' "${discovered:-unknown}"
+
+  # Declared test functions, from git rather than the working tree, so this compares two
+  # commits rather than a commit against whatever is on disk.
+  declared_at () {
+    git grep -hcE '^[[:space:]]*func test[A-Za-z0-9_]*\(' "$1" -- 'mac/Tests' 2>/dev/null \
+      | awk '{ total += $1 } END { print total + 0 }'
+  }
+  now=$(declared_at HEAD)
+  printf 'test functions declared at HEAD: %s\n' "$now"
+  if git rev-parse --verify -q HEAD~1 >/dev/null; then
+    prev=$(declared_at HEAD~1)
+    delta=$((now - prev))
+    if [ "$delta" -lt 0 ]; then
+      printf '!! the suite SHRANK by %s since HEAD~1 (%s -> %s)\n' "${delta#-}" "$prev" "$now"
+      printf '   Not a failure by itself — superseded tests get deleted. But say why in\n'
+      printf '   the report, because a vanished test passes every other check here.\n'
+    else
+      printf 'change since HEAD~1: %+d (was %s)\n' "$delta" "$prev"
+    fi
+  fi
+fi
+
 printf '\n════════════════════════════════════\n'
 if [ "$FAILED" -ne 0 ]; then
   printf 'GATE RED — track %s\n\n' "$LETTER"
