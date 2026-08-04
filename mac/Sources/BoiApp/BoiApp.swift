@@ -109,6 +109,18 @@ struct BoiApplication: App {
             OnboardingView(model: model)
                 .frame(minWidth: 560, minHeight: 460)
                 .onAppear { model.start() }
+                // Leaving for System Settings and coming back with the switch still off
+                // is a real, observable event, and it deserves a better screen than the
+                // one that says "waiting". Both halves are needed: `didBecomeActive` also
+                // fires at launch, so the resign is what proves the user actually went.
+                .onReceive(NotificationCenter.default.publisher(
+                    for: NSApplication.didResignActiveNotification)) { _ in
+                    model.applicationDidResignActive()
+                }
+                .onReceive(NotificationCenter.default.publisher(
+                    for: NSApplication.didBecomeActiveNotification)) { _ in
+                    model.applicationDidBecomeActive()
+                }
         }
         .windowResizability(.contentSize)
     }
