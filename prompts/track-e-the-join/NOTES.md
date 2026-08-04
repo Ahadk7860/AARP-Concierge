@@ -13,6 +13,7 @@ ambiguity found, and every place a prompt's stated assumption turned out to be w
 | 04 | `package.json` | Appended the `e2e` script. | `npm run e2e` is the prompt's stated entry point. |
 | 05 | `package.json` | Appended the `card` script. | `cloud/card/src/main.ts` is a real entry point now that the renderer stores things; the test suite starts it as a child process to prove a card is fetchable by something that is not the test. |
 | 05 | `.env.example` | Appended `BOI_CARD_DIR`, `BOI_CARD_SIGNING_SECRET`, `BOI_CARD_PUBLIC_BASE`. | The first is the directory the renderer and `deleteUser` share instead of an import, so it has to be nameable from both sides. The second is a bearer-token secret and its default is labelled as a development value in the file itself. |
+| 07 | `package.json` | Appended the `scheduler` script. | `npm run scheduler` is the prompt's stated entry point. |
 | 06 | `contracts/schema/draft_bundle.v1.json`, `intelligence/boi_intel/contracts.py` | `validator.failures` gains `stale_tense_gate`, in the schema and in the Python mirror. **A union widening: every document that validates today still validates.** | The gate needs a slug of its own or a failure list cannot tell a stale-tense refusal from a fabrication refusal. Both files are FROZEN; the user ruled the widening in and `ALLOWED_FROZEN` now covers the schema (the mirror was already covered). |
 | 06 | `prompts/CONTRACTS.md` | Appended three subsections to § 1 (the `as_of`/tense rule, the hedge-allowlist clarification, the empty-collection guard rule) and one to § 2 (US-only signup). Nothing reordered, nothing removed. | Prompt 06's own DoD: "Both rules land in `CONTRACTS.md` — an append". These are exactly the rules that were lost between the architecture and this file, which is why four merged tracks could not have built them. `CONTRACTS.md` is FROZEN, so `ALLOWED_FROZEN` gained it for track E — announced on every ownership run and read line-by-line at merge. |
 | 05 | `scripts/check-ownership.sh` | Extended track E's `OWNED` with `cloud/card/` and `cloud/scheduler/`, and `AMENDMENT_001` with the Python and signup test files. | Raised before writing code: three paths named in prompts 05/06/07's own Constraints sections were `OUT OF BOUNDS` under the regex the user had just verified. The user ruled: extend it, tests live next to the code they test. |
@@ -680,6 +681,109 @@ The counter-cases matter as much: the same day count **passes** on a fresh gist,
 passes on a stale one, and the SQL producer still produces on the digest path. A gate that
 rejects everything is not a gate.
 
+## Prompt 07 — the retention product had no runtime
+
+`dueUsers()`, `isDue()`, `slotFor()`, `nextRetry()` and `runForUser()` were correct,
+tested, timezone-aware and idempotent, and the only callers in the repo were their own
+tests and the e2e runner. `node-cron` appeared in production code exactly once, in a
+comment. **Nothing woke at 8am.** Same failure as `TickDeps` one level up: a function with
+no caller cannot be wrong. `allUserSchedules()` was in the same state — a query with no
+production reader.
+
+`npm run scheduler` is now a process: sweep on an interval, bounded concurrency, one
+advisory lock, a drain on SIGTERM, and an hourly fleet-health read.
+
+### The card had to be wired here too, and it is not in the prompt
+
+`tickDeps` takes `cardFor`, and the only implementation lived in `cloud/e2e`. A scheduler
+that did not pass one would have sent card-less briefs forever — prompt 05's work existing
+only inside the test harness, which is precisely the "three components each correct about
+its own half" shape this track exists to find. `cloud/scheduler/src/card.ts` is a thin
+client against `BOI_CARD_BASE`; unset means no card, which costs the card and not the
+brief. Recorded because 07's scope section does not mention the card at all.
+
+### Two tests that could not fail, caught before they shipped
+
+**The three-mornings test.** The first version asserted three briefs and three leads over
+nine ticks — and it stayed green with `runForUser`'s idempotency short-circuit deleted.
+The unique constraint threw instead, the tick reported `failed`, and the row counts were
+identical. Three briefs and six errors is not the same product as three briefs and six
+no-ops. It now asserts the **status of all nine ticks**
+(`sent, already_sent, already_sent` × 3), and the falsification produces
+`["sent","sent","sent",…]`.
+
+**The SIGTERM test.** The first version waited for the brief row and *then* signalled, by
+which point the tick was over — so a shutdown that dropped in-flight work on the floor
+passed it. It now signals on `sweep.start`, mid-tick, and asserts the brief completed
+**after the process is gone**.
+
+That change immediately found a real bug, and then a second one behind it:
+
+- **The process exited during the drain.** `clearInterval` removed the last referenced
+  handle and the intelligence bridge `unref`s its subprocess, so Node saw an empty event
+  loop and exited 0 with the tick still running. **A pending promise does not keep a
+  process alive.** Fixed with a keep-alive interval held for the duration of the drain,
+  plus a bounded grace period — a drain that waits forever is a deploy that hangs.
+- **`vite-node` installs its own SIGTERM handler and calls `process.exit()` from it.**
+  With both handlers installed the process logged `scheduler.draining`, ran two more lines
+  of ours, and was killed mid-tick by the other one — a drain that announces itself and
+  does not happen, which is worse than no drain because the log says otherwise. The
+  scheduler now removes inherited signal handlers before installing its own.
+
+Neither would have been found by signalling after the work was done, which is the obvious
+way to write that test.
+
+### The sweep is global, and so were my first assertions
+
+`sweepOnce` enumerates every account in the database — that is the whole point of it — so
+`channel.sent.length` and `result.sent` are counts over *whoever else is in the dev
+database*, including rows another suite left behind. Three assertions were reading those
+numbers and one fleet test was 26 devices wrong. Everything is now scoped by `user_id`,
+and the fleet tests clear the fleet first, because a fleet aggregate is global **by
+definition** and a leftover device is another Mac in the count exactly as a real one is.
+
+### Failure isolation has two layers, and each was verified by disabling the other
+
+Removing the sweep's own `try`/`catch` changed nothing, because `runForUserWithRetry`
+already catches everything the tick throws. Making that wrapper rethrow showed the sweep's
+catch keeping the bystander's brief alive. So: the outer catch is unreachable today and is
+kept deliberately, and this is the evidence that it is a second layer rather than dead
+code.
+
+### The fleet read
+
+One query over `devices`, no user content, unscoped by necessity — the correlation
+*across* users is the one aggregate the architecture asks for and the one thing a per-user
+scope cannot express. Alarms on a **share** (≥ 50%) over a minimum fleet (≥ 5 devices),
+never a count: eight of ten quiet on one day is a fleet event, two is Tuesday, and an
+alarm that fires on two is one people learn to ignore. Both directions asserted, plus a
+three-of-three fleet that does **not** alarm and a never-reported device that counts as
+quiet.
+
+It groups by `app_version`, which is what makes it actionable: `bundle_path_stable` — the
+Mac's own read of *why* — still does not cross the wire (the prompt-01 heartbeat
+disagreement, unresolved), but `app_version` does, and "every device on 1.4.0 went quiet
+on Tuesday" names the release without it.
+
+### A test seam that is deliberately loud
+
+`BOI_SCHEDULER_FAKE_NOW`. Every scheduling function downstairs takes `now` as a parameter;
+`main.ts` was the one place calling `new Date()`, and without a seam the only way to test
+the **process** is to wait for 08:00 in some real timezone — and no IANA offset lands in
+the 15–29 minute range, so for half of every hour no timezone makes a user due. It logs a
+`warn` on every startup that has it set, naming the consequence: a silent fake clock in
+production is a product that stops sending and looks healthy.
+
+### Open
+
+- **The scheduler still sends to `StubChannel`.** It is named in the startup line rather
+  than left to be discovered by reading the source. `08` replaces it.
+- **One process, one lock, no lease.** A scheduler that is `kill -9`ed releases the
+  advisory lock when its connection dies, which is the behaviour a lease table would have
+  to reimplement badly. A second instance exits rather than waiting, so a rolling deploy
+  has a gap of up to one interval — acceptable at one sweep per five minutes against a
+  fifteen-minute window, and worth revisiting before there is more than one region.
+
 ## Runtime resources
 
 `CONTRACTS.md` § 9 has no row for Track E. Reusing Track D's `3041` and Track A's
@@ -687,6 +791,12 @@ rejects everything is not a gate.
 The Swift suite binds an **ephemeral** loopback port (`NWListener` on `.any`) rather than
 a fixed one, and `pipeline.test.ts` listens on port `0`, so nothing in either suite can
 collide with anything.
+
+Prompt 07 adds no port: the scheduler is a process with no listener. It takes one
+Postgres advisory lock, `8_140_777`, deliberately not the suite lock's `8_140_231` — two
+locks that collide would make the test suite and the scheduler silently exclude each
+other. The scheduler test suite starts the card renderer on **3043** (see prompt 05's
+row), never 3042, so a renderer somebody left running cannot answer for it.
 
 Database: **`boi_dev_e`**, created for this track rather than reusing `boi_dev_d`.
 `cloud/db/src/schema.test.ts` drops and rebuilds the schema, and the bridge's two suites
