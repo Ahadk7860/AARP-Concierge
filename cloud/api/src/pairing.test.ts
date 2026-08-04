@@ -302,7 +302,6 @@ describe("handle-mismatch detection, relocated to the inbound", () => {
     const phone = nextPhone();
     const out = await signup(h, phone);
     cleanup.push(out.userId);
-    const code = await mintCode(out.userId, new Date());
 
     await handleInbound({
       inbound: {
@@ -585,7 +584,6 @@ describe("the pairing secret actually reaches the user", () => {
     const phone = nextPhone();
     const out = await signup(h, phone);
     cleanup.push(out.userId);
-    const code = await mintCode(out.userId, new Date());
 
     // The Mac shows a code; the user texts it.
     const macCode = "778812";
