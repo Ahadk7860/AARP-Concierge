@@ -13,6 +13,7 @@ ambiguity found, and every place a prompt's stated assumption turned out to be w
 | 04 | `package.json` | Appended the `e2e` script. | `npm run e2e` is the prompt's stated entry point. |
 | 05 | `package.json` | Appended the `card` script. | `cloud/card/src/main.ts` is a real entry point now that the renderer stores things; the test suite starts it as a child process to prove a card is fetchable by something that is not the test. |
 | 05 | `.env.example` | Appended `BOI_CARD_DIR`, `BOI_CARD_SIGNING_SECRET`, `BOI_CARD_PUBLIC_BASE`. | The first is the directory the renderer and `deleteUser` share instead of an import, so it has to be nameable from both sides. The second is a bearer-token secret and its default is labelled as a development value in the file itself. |
+| 06 | `contracts/schema/draft_bundle.v1.json`, `intelligence/boi_intel/contracts.py` | `validator.failures` gains `stale_tense_gate`, in the schema and in the Python mirror. **A union widening: every document that validates today still validates.** | The gate needs a slug of its own or a failure list cannot tell a stale-tense refusal from a fabrication refusal. Both files are FROZEN; the user ruled the widening in and `ALLOWED_FROZEN` now covers the schema (the mirror was already covered). |
 | 06 | `prompts/CONTRACTS.md` | Appended three subsections to § 1 (the `as_of`/tense rule, the hedge-allowlist clarification, the empty-collection guard rule) and one to § 2 (US-only signup). Nothing reordered, nothing removed. | Prompt 06's own DoD: "Both rules land in `CONTRACTS.md` — an append". These are exactly the rules that were lost between the architecture and this file, which is why four merged tracks could not have built them. `CONTRACTS.md` is FROZEN, so `ALLOWED_FROZEN` gained it for track E — announced on every ownership run and read line-by-line at merge. |
 | 05 | `scripts/check-ownership.sh` | Extended track E's `OWNED` with `cloud/card/` and `cloud/scheduler/`, and `AMENDMENT_001` with the Python and signup test files. | Raised before writing code: three paths named in prompts 05/06/07's own Constraints sections were `OUT OF BOUNDS` under the regex the user had just verified. The user ruled: extend it, tests live next to the code they test. |
 | review | `.gitignore` | Appended `review-capture-*.md`, with a comment saying why. Append only. | `review-capture-e.md` was committed in `9f2d2b8` and `check-ownership.sh e` correctly called it `OUT OF BOUNDS` — Tracks A–D all left theirs untracked, but nothing enforced that. The file is a snapshot of one machine at one moment, not a project artifact, and it is still on disk for the reviewers; only the tracking is gone. Foundation defect rather than a track one: the rule should always have been there, and this makes it the default instead of something each track has to remember. |
@@ -586,14 +587,22 @@ gist is stale**, whatever the model did.
 the prompt is never logged; changing `SYSTEM` under a fixed version string turns that
 tuple into a lie, and the committed transcripts really are v1 output.
 
-**Contract gap, not resolved here:** the honest slug for the new gate is
-`stale_tense_gate`, and `draft_bundle.v1.validator.failures` is a **frozen enum**
-(`length_gate`, `register_gate`, `fabrication_gate`, `forbidden_phrase`,
-`stance_collision`, `empty`) that prompt 06 does not grant. The gate therefore reports as
-`fabrication_gate`. The category is defensible — a specific the gist does not license *as
-of now* — and `_RETRY_GUIDANCE["fabrication_gate"]` still steers the retry usefully. But
-a reader of a failure list cannot tell the two apart, and the fix is one enum entry in a
-file this prompt may not touch.
+**RESOLVED by the user: `draft_bundle.v1.validator.failures` gains `stale_tense_gate`.**
+It rode on `fabrication_gate` for one commit, because the enum is frozen and prompt 06
+did not grant it. The ruling: a failure list that cannot distinguish a stale-tense refusal
+from a fabrication refusal has lost the information it exists to carry.
+
+The two really are different defects with different fixes — one names a specific the gist
+never carried, the other repeats a specific the gist **did** carry and that has since
+expired — and `_RETRY_GUIDANCE` now steers differently for each ("say 'a while', never a
+number of days" vs "use only what is in ALLOWED SPECIFICS"). Asserted separately: one
+candidate naming an unlicensed date *and* a stale day count reports both slugs.
+
+**It is a union widening**, so nothing that validates today stops validating; the schema
+carries that sentence, `VALIDATOR_FAILURES` carries it, and a test asserts every
+pre-existing slug is still in the vocabulary. `contracts/schema/draft_bundle.v1.json` is
+now a sanctioned frozen exception on the same basis as the others — announced on every
+ownership run and read line-by-line at merge.
 
 ### The fifth finding: the hedge allowlist was ruled on 3 Aug and never implemented
 

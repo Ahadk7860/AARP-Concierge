@@ -266,10 +266,13 @@ def forbidden_phrase_failures(candidates: list[dict]) -> bool:
 # WRONG commitment — the class CONTRACTS.md § 6 puts under "degrade, never fabricate",
 # and strictly worse than an obviously-invented one because it gets sent.
 #
-# It reports as `fabrication_gate` rather than as a slug of its own. The honest slug is
-# `stale_tense_gate`, and `draft_bundle.v1.validator.failures` is a FROZEN enum that
-# prompt 06 does not grant. Recorded in NOTES.md as a contract gap. The category is the
-# same either way: a specific the gist does not license *as of now*.
+# It reports as `stale_tense_gate`, its own slug. It rode on `fabrication_gate` for one
+# commit while `draft_bundle.v1.validator.failures` was a frozen enum this track could not
+# widen; the user ruled to widen it, on the grounds that a failure list which cannot
+# distinguish a stale-tense refusal from a fabrication refusal has lost the information it
+# exists to carry. The two really are different defects: one names a specific the gist
+# never carried, the other repeats a specific the gist carried *and that has since
+# expired*.
 
 #: Beyond this, a day count is a claim about the past wearing the present tense.
 STALE_CLAIM_HOURS = 24.0
@@ -319,8 +322,10 @@ def validate_candidates(
         failures.append("length_gate")
     if register_failures(usable, register):
         failures.append("register_gate")
-    if fabrication_failures(usable, gist) or stale_claim_failures(usable, gist, now):
+    if fabrication_failures(usable, gist):
         failures.append("fabrication_gate")
+    if stale_claim_failures(usable, gist, now):
+        failures.append("stale_tense_gate")
     if forbidden_phrase_failures(usable):
         failures.append("forbidden_phrase")
     if usable[0]["stance"] == usable[1]["stance"]:

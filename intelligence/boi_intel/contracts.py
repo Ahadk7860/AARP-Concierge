@@ -135,6 +135,12 @@ VALIDATOR_FAILURES = (
     "forbidden_phrase",
     "stance_collision",
     "empty",
+    # Widened in prompt 06, and a widening only: every value above still means what it
+    # meant. A draft that says "sorry, been 3 days" over a four-day-old digest is making
+    # a claim licensed by data that has expired -- not the same defect as naming a
+    # specific the gist never carried, and a failure list that calls both
+    # `fabrication_gate` has lost the thing it exists to carry.
+    "stale_tense_gate",
 )
 
 # Assistant-speak in a text to your college roommate is worse than no draft at all.

@@ -188,6 +188,10 @@ _RETRY_GUIDANCE = {
     ),
     "forbidden_phrase": "You wrote like an assistant. No stock phrases, no sign-off, no em dash.",
     "stance_collision": "Both had the same stance. One must commit, the other must buy time.",
+    "stale_tense_gate": (
+        "You stated a day count as a present-tense fact, and these measurements are old. "
+        "Say 'a while', 'ages', 'too long' -- never a number of days or weeks."
+    ),
     "empty": "Return exactly two candidates as minified JSON.",
 }
 

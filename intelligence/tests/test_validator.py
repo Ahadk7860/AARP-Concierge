@@ -580,7 +580,11 @@ def test_a_day_count_is_rejected_when_the_digest_is_stale():
     failures = validate_candidates(
         candidates, _stale_gist("2026-08-04T12:00:00Z"), {"register": _REGISTER}, _NOW
     )
-    assert "fabrication_gate" in failures
+    # Its OWN slug, not `fabrication_gate`. A failure list that cannot tell a stale-tense
+    # refusal from a fabrication refusal has lost the information it exists to carry --
+    # they are different defects with different fixes, and `_RETRY_GUIDANCE` steers
+    # differently for each.
+    assert failures == ["stale_tense_gate"]
 
 
 def test_the_same_day_count_passes_when_the_digest_is_FRESH():
@@ -614,7 +618,7 @@ def test_spelled_out_and_abbreviated_counts_are_caught_too():
             {"register": _REGISTER},
             _NOW,
         )
-        assert "fabrication_gate" in failures, text
+        assert "stale_tense_gate" in failures, text
 
 
 def test_a_missing_as_of_is_treated_as_stale():
@@ -626,4 +630,37 @@ def test_a_missing_as_of_is_treated_as_stale():
         {"register": _REGISTER},
         _NOW,
     )
+    assert "stale_tense_gate" in failures
+
+
+def test_the_slug_is_in_the_frozen_vocabulary_and_is_a_WIDENING():
+    # The union widened rather than changed: every slug that validated before still
+    # validates, which is what makes this safe to do to a frozen enum.
+    assert "stale_tense_gate" in VALIDATOR_FAILURES
+    for slug in (
+        "length_gate",
+        "register_gate",
+        "fabrication_gate",
+        "forbidden_phrase",
+        "stance_collision",
+        "empty",
+    ):
+        assert slug in VALIDATOR_FAILURES
+
+
+def test_a_stale_tense_failure_and_a_fabrication_are_reported_SEPARATELY():
+    # One candidate names a date the gist never carried; the same candidate repeats a day
+    # count that has since expired. Two defects, two fixes, two slugs.
+    candidates = _pair("sorry been 3 days, see u on the 14th", "ill get back to u soon")
+    failures = validate_candidates(
+        candidates, _stale_gist("2026-08-04T12:00:00Z"), {"register": _REGISTER}, _NOW
+    )
+    assert "stale_tense_gate" in failures
     assert "fabrication_gate" in failures
+
+
+def test_the_retry_note_for_a_stale_tense_failure_says_what_to_do_instead():
+    # A correction that only names the prohibition is one a model routes around by
+    # rephrasing the same claim.
+    note = retry_note(["stale_tense_gate"])
+    assert "a while" in note
