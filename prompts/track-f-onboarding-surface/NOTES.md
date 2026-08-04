@@ -5,6 +5,7 @@
 | Prompt | File | What | Why it could not be track-local |
 |---|---|---|---|
 | 01 | — | none | The `f` cases in `gate.sh`, `check-ownership.sh` and `review-capture.sh` were authored by the user in `f529ffe`, not by this track. |
+| 02 | `scripts/gate.sh` | Appended a **test census** block: prints the count the runner discovers, the count declared at `HEAD`, and the delta against `HEAD~1`. Swift tracks (`a`, `f`) only — a no-op elsewhere rather than a guess at another runner's output format. | The gate is the only place the number is visible at the moment a claim is made about a commit. Putting it in a track-local script would mean the one report that matters never shows it. Append only: no existing line changed, and `check-ownership.sh f` passes. |
 
 ## Contract ambiguities found
 
@@ -87,6 +88,39 @@ Fixed in `2b726b8`.
 value the validator is the only thing rejecting. If every input would pass anyway, the
 validator could be deleted and the suite would not notice.
 
+## A green suite with the wrong number of tests is not green
+
+Twice in this track a revert-based mutation harness ran `git checkout` over an
+**uncommitted** file and destroyed its own subject — the install-location fix in `01`, the
+cross-language test in `02`. The second time, the suite came back **257 where 258 was
+expected**, and the only thing that caught it was the arithmetic not matching.
+
+**Every mechanism in this project reports a vanished test as a pass.** `swift test` exits
+zero because the tests that remain all pass. `gate.sh` checks that the suite compiles and
+that no suite was silently *skipped* — but a suite that is simply *smaller* than it was
+trips neither. There is no failure signal anywhere, because nothing failed. The test is
+just gone.
+
+This is the same family as the two failures that named the other checks — a suite that
+could not compile reporting zero failures, and vitest reporting a skipped file as a pass —
+and it is the one nobody had a check for. It is also strictly worse than those two, because
+the others leave evidence in the output and this leaves none at all.
+
+Two things came out of it:
+
+- **The rule: commit before mutating.** A revert-based harness is only safe over committed
+  state; over uncommitted work `git checkout` is not a revert, it is a delete.
+- **The transferable part is not the rule, it is the habit.** What saved it was expecting a
+  number and checking when the number disagreed, rather than accepting a green. The rule
+  prevents one specific accident; the habit catches the whole class.
+
+Recorded in `gate.sh` as a **census** rather than a gate: discovered count, declared count,
+and the delta since `HEAD~1`. Deliberately not enforced — deleting a superseded test is
+legitimate, and this track did exactly that when prompt `02` overturned two of prompt
+`01`'s assertions. A check that goes red on a legitimate action is a check people learn to
+route around. Printing the delta makes a shrink something a reader has to account for
+instead of something nobody can see.
+
 ## Two languages computing the same string is a contract — and this is the fourth one
 
 `ThreadHandoff.link` (Swift) and `pairingDeepLink` (TypeScript, `cloud/api/src/welcome.ts`)
@@ -102,7 +136,7 @@ where the **algorithm** was pinned rather than the shape:
 | `contact_id` | **Held** | `CONTRACTS.md` § 3 pins the algorithm — `HMAC(user_salt, normalized_handle)` — and `DigestTests.swift:938` computes both sides independently and compares, failing if nothing matched at all rather than silently comparing an empty set. |
 | Fact vocabulary | **Held** | One side is *generated* from the other by `scripts/generate_fact_vocabulary.py`, and `FactsTests.testVocabularyMatchesPython` re-reads the Python sets at test time — so the generator cannot go stale unnoticed. |
 | Heartbeat shape | **Diverged** | `Heartbeat` (Mac) and the frozen `POST /v1/heartbeat` schema had no overlapping required fields. Found by Track E only when it tried to post one; caught by a schema, not by a test. |
-| `sms:` link format | **Pinned** | `&body=` confirmed on a real Mac, then locked by `testTheSwiftAndTypeScriptDeepLinksAgree`, which runs both languages. The second seam to be pinned properly rather than discovered broken. Still needs the format written into `CONTRACTS.md`, which is the user's. |
+| `sms:` link format | **Pinned — paired path both-sides, unpaired path pending** | `&body=` confirmed on a real Mac and written into `CONTRACTS.md` by the user, with `testTheSwiftAndTypeScriptDeepLinksAgree` cited as the enforcement. **Read "pinned" precisely:** the test runs both languages today only for the *paired* link, because `pairingDeepLink` is Track E's prompt `08` and is not on this branch. The `&body=` separator itself is currently pinned by the Swift side, the spec, and the device observation — **not yet by two languages agreeing.** It becomes cross-verified automatically when `08` merges; the test enumerates what TypeScript exports and needs no edit. |
 
 The lesson the first two teach and the last two prove: **specifying the shape is not enough
 — the algorithm has to be specified, and a test has to build both sides from scratch.** A
@@ -136,20 +170,30 @@ Swift side and by the empirical run, not yet by both languages.
 track (§ 8), so the specification half of the pin is an amendment, not something this
 track can land.
 
-## Known false claim on screen, scheduled for prompt 03
+## The false claim, and why deleting beat softening — fixed in `16a6760`
 
-`ThreadHandoff.lineUnresolved` renders *"Boi will still text you — this window just cannot
-open the thread for you."* **That sentence is true when paired and false when not.** An
-unpaired user with an unresolvable line has no thread and no completed pairing, so nothing
-is going to text them, and the screen promises otherwise.
+`ThreadHandoff.lineUnresolved` rendered *"Boi will still text you — this window just cannot
+open the thread for you."* **True when paired, false when not.** An unpaired user with an
+unresolvable line has no thread and no completed pairing, so nothing was going to text
+them.
 
 `lineUnresolved` collapses two genuinely different situations — *we know who you are but
-not which line* and *you were never paired* — and pairing is knowable from the token store,
-so the split is available rather than undetectable. That makes it unlike the Later case: it
-is not a limit of the platform, it is a state this code chose not to distinguish.
+not which line* and *you were never paired* — and pairing is knowable from the token store.
+That makes it unlike the Later case in prompt `02`: **not a limit of the platform, a
+distinction this code declined to make.**
 
-Scoped to prompt `03` (the four-state split) by the user. Recorded here because it is live
-in the meantime and it is a false statement to a user, not merely a thin one.
+**Deleted rather than softened.** Hedging it — "Boi may still text you" — would have
+preserved a claim about the thing this state specifically cannot determine. The copy now
+says the two things it knows (this Mac has not been told which number is yours; this window
+therefore cannot open the thread) and nothing about future contact. Prompt `03` splits the
+state and gives each half accurate copy.
+
+**It shipped false because it was unreachable by tests.** The string lived in
+`OnboardingView.swift`, in the executable target `BoiKitTests` cannot import — the exact
+constraint that put `GrantStage` in `BoiKit` in prompt `01`, applied inconsistently one
+file over. Moved to `ThreadHandoff.copy` and now asserted. The lesson generalises past this
+bug: **user-facing copy that no test can read is copy that can be false for as long as
+nobody reads it aloud.**
 
 ## Prompt 02 — prompt file location
 
