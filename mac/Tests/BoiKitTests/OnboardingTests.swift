@@ -345,7 +345,11 @@ final class OnboardingTests: XCTestCase {
     ///
     /// MUTATION: fall back to a constant number when `handle` is nil. Red.
     func testAnUnresolvableLineIsSaidPlainlyRatherThanRenderedBroken() {
-        for handle in [nil, "", "   ", "+1555 123", "+1555&body=x", "line\nbreak"] {
+        // The last four are the ones a loose validator lets through: a path separator, an
+        // angle bracket and a quote all change what the URL means rather than failing
+        // loudly, and `?` starts a query the `sms:` form does not use.
+        for handle in [nil, "", "   ", "+1555 123", "+1555&body=x", "line\nbreak",
+                       "+1555/x", "a<b>@c.com", "a\"b@c.com", "+1555?x=1"] {
             XCTAssertEqual(
                 ThreadHandoff.resolve(handle: handle, pairingToken: "tok", isPaired: false),
                 .lineUnresolved,
