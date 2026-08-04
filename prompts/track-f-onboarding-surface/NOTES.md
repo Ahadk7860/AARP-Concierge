@@ -64,6 +64,57 @@ both sides would still pass their own tests. It is not a shape `contracts/schema
 Worth a fixture or a shared constant; recorded rather than solved because the fix is a
 contract change and this track does not make those.
 
+## A test whose fixtures never reach the boundary it claims to defend
+
+`testEveryProducedLinkIsAParseableURL` asserted that every link `ThreadHandoff` produces
+survives `URL(string:)`. The assertion was real. **Every handle it passed in was already
+safe** — `+15551234567` and `boi@example.com` — so loosening `isUsable` to permit `/`, `<`,
+`>` and quotes changed nothing it could see. The mutation came back **GREEN**: the test
+named a boundary and never went near it.
+
+This is worth naming as a shape, because it is invisible in review. The test reads
+correctly, the assertion is the right assertion, the name describes a real property, and it
+passes for the right-looking reason. What is missing is not in the test body at all — it is
+in the fixtures, which stop short of the edge. Reviewing the assertion tells you nothing;
+only a mutation does, and only a mutation that moves *the boundary itself* rather than the
+logic around it.
+
+The fix was to push the inputs to the edge — `+1555/x`, `a<b>@c.com`, `a"b@c.com`,
+`+1555?x=1` — in the test that owns the rejection rule, and to retarget the mutation there.
+Fixed in `2b726b8`.
+
+**The general form:** when a test defends a validator, at least one fixture has to be a
+value the validator is the only thing rejecting. If every input would pass anyway, the
+validator could be deleted and the suite would not notice.
+
+## Two languages computing the same string is a contract — and this is the fourth one
+
+`ThreadHandoff.link` (Swift) and `pairingDeepLink` (TypeScript, `cloud/api/src/welcome.ts`)
+both build `sms:<handle>&body=<encoded token>`. Nothing checks they agree. `&body=` versus
+`?body=` is one character, it opens Messages with an empty body, the pairing token is
+silently lost, and **both sides pass their own tests**.
+
+That makes four cross-language seams in this project, and the two that held are the two
+where the **algorithm** was pinned rather than the shape:
+
+| Seam | Outcome | Why |
+|---|---|---|
+| `contact_id` | **Held** | `CONTRACTS.md` § 3 pins the algorithm — `HMAC(user_salt, normalized_handle)` — and `DigestTests.swift:938` computes both sides independently and compares, failing if nothing matched at all rather than silently comparing an empty set. |
+| Fact vocabulary | **Held** | One side is *generated* from the other by `scripts/generate_fact_vocabulary.py`, and `FactsTests.testVocabularyMatchesPython` re-reads the Python sets at test time — so the generator cannot go stale unnoticed. |
+| Heartbeat shape | **Diverged** | `Heartbeat` (Mac) and the frozen `POST /v1/heartbeat` schema had no overlapping required fields. Found by Track E only when it tried to post one; caught by a schema, not by a test. |
+| `sms:` link format | **Open** | Recorded here. Nothing pins it and nothing compares the two. |
+
+The lesson the first two teach and the last two prove: **specifying the shape is not enough
+— the algorithm has to be specified, and a test has to build both sides from scratch.** A
+schema catches a wrong field name. It does not catch two correct implementations of two
+different readings of the same sentence, which is what a separator is.
+
+**Deliberately not pinned yet.** `?body=` versus `&body=` is a real iOS quirk and writing a
+value into `CONTRACTS.md` from memory would freeze the bug and give it the authority of a
+spec. The second manual run tests it. Then it gets pinned properly — the format in
+`CONTRACTS.md`, plus a cross-language agreement test in the shape of the `contact_id` one,
+building both sides rather than trusting one observed run.
+
 ## Prompt 02 — prompt file location
 
 `02-get-out-of-the-way-and-hand-off.md` is committed on **`track-e`**, not on `main`, so it
