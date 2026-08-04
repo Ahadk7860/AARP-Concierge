@@ -32,6 +32,8 @@ usage: boi-cli scan --db <path> [options]
                     [--top <n>]
        boi-cli voice-pack --mirror <path> --out <dir> [--contacts <abcddb>]
        boi-cli health --mirror <path> [--contacts <abcddb>]
+       boi-cli sync-run --db <path> --state <dir> [--force] [--dry-run]
+                        [--contacts <abcddb>]
 
   --db <path>                 chat.db to read. Opened file:<path>?mode=ro, always.
   --snapshot                  copy the db and both sidecars first, then read the copy
@@ -52,6 +54,11 @@ usage: boi-cli scan --db <path> [options]
   --contacts <path>           AddressBook-v22.abcddb; auto-discovered when omitted
   --calls <path>              CallHistory.storedata; auto-discovered when omitted
   --top <n>                   also print n relationship summaries, names redacted
+
+  --state <dir>               (sync-run) the state directory: mirror, heartbeat,
+                              upload queue. Output goes to <dir>/out.
+  --force                     (sync-run) ignore the idempotent 6h guard
+  --dry-run                   (sync-run) print what would be uploaded, upload nothing
 """
 
 guard let command = arguments.first, !command.hasPrefix("--") else {
@@ -240,10 +247,14 @@ case "digest":
         let library = MetricLibrary(resolver: resolver,
                                     options: .init(now: generatedAt, callHistory: calls))
         let result = try library.compute(mirror: mirror)
+        // AMENDMENT-001: the digest now carries the fabrication-gate allowlist.
+        let signals = try FactExtractor.signalsByContact(
+            mirror: mirror, identities: result.relationships.map(\.identity))
         let digest = DigestBuilder(
             resolver: resolver,
             options: .init(generatedAt: generatedAt,
-                           system: systemState(contacts: contacts))).build(from: result)
+                           system: systemState(contacts: contacts),
+                           signalsByContact: signals)).build(from: result)
         let bytes = try DigestBuilder.write(digest, to: outPath)
 
         StructuredLog.emit("digest.complete", at: generatedAt, fields: [
@@ -549,6 +560,72 @@ case "voice-pack":
         ])
     } catch {
         StructuredLog.emit("voice_pack.failed", level: .error, fields: ["detail": "\(error)"])
+        exit(1)
+    }
+
+case "sync-run":
+    // The whole pass — read, mirror, digest, voice packs, heartbeat, UPLOAD — reachable
+    // without the .app bundle.
+    //
+    // `Boi.app --sync` is the shipping entry point and it lives in `BoiApp.swift`, which
+    // Track E does not own. Prompt 01 said the `--dry-run` flag belongs in this file;
+    // there was no full-run command here to put it on, so this is it. `--dry-run` is also
+    // read from `CommandLine.arguments` by `Uploader.Configuration.fromEnvironment`, which
+    // is how `Boi.app --sync --dry-run` works without editing a file this track does not
+    // own. Both routes are recorded in NOTES.md.
+    guard let databasePath = value("db"), let stateDirectory = value("state") else { fail(usage) }
+    guard let salt = ContactResolver.developmentSalt() else {
+        fail("\(ContactResolver.developmentSaltVariable) is not set. Copy .env.example to "
+             + ".env in this worktree.")
+    }
+    do {
+        let paths = SyncRun.Paths(
+            chatDatabase: databasePath,
+            mirror: URL(fileURLWithPath: stateDirectory)
+                .appendingPathComponent("mirror.db").path,
+            outputDirectory: URL(fileURLWithPath: stateDirectory)
+                .appendingPathComponent("out").path,
+            stateDirectory: stateDirectory,
+            contacts: value("contacts"))
+        let outcome = try SyncRun(paths: paths, salt: salt).run(force: flag("force"))
+
+        StructuredLog.emit("sync_run.complete", fields: [
+            "ran": outcome.ran,
+            "reason": outcome.skippedReason ?? "none",
+            "messages_ingested": outcome.messagesIngested,
+            "mirror_message_count": outcome.mirrorMessageCount,
+            "health": outcome.health.rawValue,
+            "digest": outcome.digestPath ?? "none — corpus is thin",
+            "voice_packs": outcome.voicePackPaths.count,
+            "heartbeat": outcome.heartbeatPath ?? "none",
+            "upload_accepted": outcome.upload?.accepted ?? -1,
+            "upload_duplicates": outcome.upload?.duplicates ?? -1,
+            "upload_queued": outcome.upload?.queued ?? -1,
+            "upload_rejected": outcome.upload?.rejected ?? -1,
+            "upload_dry_run": outcome.upload?.dryRun ?? -1,
+            "elapsed_s": (outcome.elapsed * 1000).rounded() / 1000,
+        ])
+    } catch let unavailable as Uploader.QueueUnavailable {
+        // Strictly worse than `Deferred`: nothing was queued, so nothing will be retried.
+        // Reported separately so an operator cannot read it as "it'll go next time".
+        StructuredLog.emit("sync_run.queue_unavailable", level: .error, fields: [
+            "endpoint": unavailable.endpoint,
+            "detail": unavailable.description,
+        ])
+        exit(1)
+    } catch let deferred as Uploader.Deferred {
+        // NON-ZERO. A silent success on a failed upload is the defect prompt 01 exists
+        // to catch. The local artefacts are all written; the queue holds what did not
+        // land, and the next run retries it.
+        StructuredLog.emit("sync_run.upload_deferred", level: .error, fields: [
+            "queued": deferred.queued,
+            "rejected": deferred.rejected,
+            "endpoints": deferred.endpoints,
+            "detail": deferred.description,
+        ])
+        exit(1)
+    } catch {
+        StructuredLog.emit("sync_run.failed", level: .error, fields: ["detail": "\(error)"])
         exit(1)
     }
 

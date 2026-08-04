@@ -98,6 +98,15 @@ export type Brief = {
   staleness: { digest_as_of: ISO8601; hours_stale: number; warn: boolean; message?: string | null };
   items: BriefItem[];   // max 3
   card_url?: string | null;
+  /**
+   * What the renderer produced, ADDITIVE in prompt 05 alongside the same field in
+   * `brief.v1.json`. Optional, so nothing that compiles today stops compiling.
+   *
+   * Without it the composer carried a URL and no kind, `deliverBrief` could not tell a
+   * report card from a refusal card, and a user below the renderer's bar was handed
+   * "not enough history yet" every morning forever.
+   */
+  card_kind?: "standard" | "refusal" | null;
 };
 
 export type OutboundBlock =

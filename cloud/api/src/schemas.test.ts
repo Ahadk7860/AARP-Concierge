@@ -18,6 +18,9 @@ import {
   describeViolations,
 } from "./redaction.js";
 import type { VoicePack } from "../../shared/src/index.js";
+// AMENDMENT-001: the same minimal digest the differential uses, so the two tests
+// cannot drift about what "minimal" means.
+import { MINIMAL_DIGEST } from "./differential.test.js";
 
 const ROOT = process.cwd();
 const SCHEMA_DIR = join(ROOT, "contracts", "schema");
@@ -332,5 +335,50 @@ describe("the redaction guard", () => {
     expect(detail).toContain("phone");
     expect(detail).toContain("exemplars");
     expect(detail).not.toContain("415-555-0142");
+  });
+});
+
+// AMENDMENT-001 -----------------------------------------------------------------
+//
+// The four fields are REQUIRED, and the reason is a failure mode rather than tidiness:
+// optional would let an un-updated Mac upload a digest that validates, and the cloud
+// would then produce gists that can never be `action_needed` — no error, no alarm, and a
+// morning brief that quietly stops containing the only thing it exists to say.
+//
+// Required means that Mac is rejected at the boundary, loudly, on the first upload.
+describe("AMENDMENT-001: the four fields are required, not optional", () => {
+  const FIELDS = ["last_from_me", "max_gap_days", "unanswered_question", "facts"] as const;
+
+  for (const field of FIELDS) {
+    it(`rejects a digest whose relationship is missing ${field}`, () => {
+      const doc = JSON.parse(JSON.stringify(MINIMAL_DIGEST));
+      delete doc.relationships[0][field];
+      const result = digestSchema.safeParse(doc);
+      expect(result.success, `${field} was accepted as absent`).toBe(false);
+    });
+  }
+
+  it("accepts the minimal digest once all four are present", () => {
+    expect(digestSchema.safeParse(JSON.parse(JSON.stringify(MINIMAL_DIGEST))).success).toBe(true);
+  });
+
+  it("holds the facts cap that gist.v1 holds — 3 words, 40 chars", () => {
+    // A cap enforced in one container and not the other is not a cap. This is the
+    // digest-side half; `gist.v1.facts` carries the identical subschema.
+    const withFact = (token: string) => {
+      const doc = JSON.parse(JSON.stringify(MINIMAL_DIGEST));
+      doc.relationships[0].facts.places = [token];
+      return digestSchema.safeParse(doc).success;
+    };
+    expect(withFact("the 14th"), "a real fact must pass").toBe(true);
+    expect(withFact("Jenny And Marks Wedding"), "four words is somebody's sentence").toBe(false);
+    expect(withFact("a".repeat(41)), "41 chars is over the cap").toBe(false);
+    expect(withFact("one two three"), "exactly three words is the boundary").toBe(true);
+  });
+
+  it("rejects an unknown key inside facts", () => {
+    const doc = JSON.parse(JSON.stringify(MINIMAL_DIGEST));
+    doc.relationships[0].facts.secrets = ["anything"];
+    expect(digestSchema.safeParse(doc).success).toBe(false);
   });
 });

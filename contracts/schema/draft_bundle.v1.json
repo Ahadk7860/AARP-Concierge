@@ -101,8 +101,10 @@
               "fabrication_gate",
               "forbidden_phrase",
               "stance_collision",
-              "empty"
-            ]
+              "empty",
+              "stale_tense_gate"
+            ],
+            "description": "UNION WIDENED, prompt 06: `stale_tense_gate`. Nothing that validates today stops validating. It reports a candidate that stated a day count in the present tense while the gist's `as_of` was stale -- a claim licensed by data that has expired, which is a different defect from naming a specific the gist never carried. Riding on `fabrication_gate` made a failure list unable to distinguish them, which is the information the list exists to carry."
           }
         }
       }

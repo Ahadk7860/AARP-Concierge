@@ -108,14 +108,101 @@ def load_corpus(path: str, flag_says_mirror: bool) -> tuple[set[str], set[str]]:
     return sent, received
 
 
+# ---------------------------------------------------------------------------
+# AMENDMENT-001: the fabrication-gate allowlist, wherever it lives
+# ---------------------------------------------------------------------------
+#
+# `facts` now appears in TWO containers -- `gist.v1.facts` and
+# `digest.v1.$defs/relationship.facts` -- under identical rules. This is the ONE function
+# that enforces the no-verbatim rule on it, and both callers use it.
+#
+# A second implementation is the thing to avoid, not a second caller. The 3-word / 40-char
+# cap is enforced by the JSON Schema, which is literally the same subschema in both files;
+# the no-verbatim rule is enforced here. A cap enforced in one container and not the other
+# is not a cap, and two checkers that drift are worse than one that is strict.
+
+FACT_KEYS = ("dates", "times", "places", "amounts", "names")
+MAX_FACT_WORDS = 3
+MAX_FACT_CHARS = 40
+
+
+def facts_violations(facts: dict, received: set[str]) -> list[str]:
+    """Every way a `facts` object can be wrong, in either container.
+
+    `received` is the normalised set of inbound messages. A token that IS an inbound
+    message, or that is a long span of one, is the other person's prose wearing the shape
+    of a fact -- the exact failure the 60-char cap once allowed when a place pattern
+    captured four consecutive capitalised words.
+    """
+    problems: list[str] = []
+    for key in FACT_KEYS:
+        for token in facts.get(key) or []:
+            if not isinstance(token, str) or not token.strip():
+                problems.append(f"{key}: empty or non-string token")
+                continue
+            if len(token) > MAX_FACT_CHARS:
+                problems.append(f"{key}: {len(token)} chars > {MAX_FACT_CHARS} -- {token[:20]!r}...")
+            if len(token.split()) > MAX_FACT_WORDS:
+                problems.append(
+                    f"{key}: {len(token.split())} words > {MAX_FACT_WORDS} -- a fact is a "
+                    f"token, not a clause"
+                )
+            n = norm(token)
+            if n in received:
+                problems.append(f"{key}: VERBATIM inbound message as a fact -- {token[:40]!r}")
+            elif len(n) >= 12 and any(n in r for r in received):
+                # A long token that is a SPAN of an inbound message. Short ones are
+                # excluded because "friday" is legitimately inside somebody's sentence
+                # and is exactly the kind of token the allowlist exists to carry.
+                problems.append(f"{key}: verbatim SPAN of an inbound message -- {token[:40]!r}")
+    return problems
+
+
+def check_digest_facts(digest: dict, received: set[str]) -> list[str]:
+    """The digest-side caller. Same function, different envelope."""
+    out: list[str] = []
+    for rel in digest.get("relationships", []):
+        for problem in facts_violations(rel.get("facts") or {}, received):
+            out.append(f"{rel.get('contact_id', '?')}: {problem}")
+    return out
+
+
+def check_gist_facts(gist: dict, received: set[str]) -> list[str]:
+    """The gist-side caller. Same function, different envelope."""
+    return [f"{gist.get('gist_id', '?')}: {p}"
+            for p in facts_violations(gist.get("facts") or {}, received)]
+
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     src = ap.add_mutually_exclusive_group(required=True)
     src.add_argument("--mirror", help="Boi local mirror -- decoded text, the correct input")
     src.add_argument("--db", help="raw chat.db -- refused when its NULL-text share is high")
     # Both flags are advisory. What the file IS decides, not which flag you typed.
-    ap.add_argument("--pack", required=True)
+    what = ap.add_mutually_exclusive_group(required=True)
+    what.add_argument("--pack", help="a voice_pack.v1 document")
+    what.add_argument("--digest", help="a digest.v1 document -- checks relationship.facts")
+    what.add_argument("--gist", help="a gist.v1 document -- checks facts")
     a = ap.parse_args()
+
+    # AMENDMENT-001. `facts` crosses the boundary in two containers now, and both are
+    # checked by `facts_violations` above.
+    if a.digest or a.gist:
+        doc = json.loads(pathlib.Path(a.digest or a.gist).read_text())
+        _, received = load_corpus(a.mirror or a.db, flag_says_mirror=bool(a.mirror))
+        problems = (check_digest_facts(doc, received) if a.digest
+                    else check_gist_facts(doc, received))
+        if problems:
+            print(f"FAIL -- {len(problems)} facts violation(s).")
+            for p in problems[:10]:
+                print(f"  {p}")
+            print("\nThe allowlist is what the fabrication gate trusts. A token that is "
+                  "somebody's\nsentence makes the gate license their prose in the user's "
+                  "own name.")
+            sys.exit(1)
+        print("OK -- facts within the 3-word / 40-char cap, none verbatim from inbound")
+        return
 
     pack = json.loads(pathlib.Path(a.pack).read_text())
     exemplars = [norm(e) for e in pack.get("exemplars", [])]

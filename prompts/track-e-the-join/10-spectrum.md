@@ -1,6 +1,10 @@
-# Track E — Prompt 04: Photon, and the first message a human receives
+# Track E — Prompt 10: Photon, and the first message a human receives
 
-**Depends on:** 03, green, with artifacts you have read by hand.
+**Depends on:** 09, green — and a real report card from `05` that a human has looked at.
+
+**Note the change from `08`:** the live send now exercises the *user-initiated* onboarding
+from `08`, not the Boi-texts-first flow this prompt was written against. Read
+`AMENDMENT-002` before the send sequence.
 
 ## Context
 

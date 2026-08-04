@@ -22,16 +22,28 @@ public struct DigestBuilder {
         /// through to the one health function, never re-derived here.
         public var system: HealthCheck.SystemState
 
+        /// AMENDMENT-001. The allowlist, per `contact_id`, extracted from the other
+        /// person's recent messages by `FactExtractor`.
+        ///
+        /// Passed in rather than computed here because `MetricLibrary.Result` carries no
+        /// messages — deliberately, since the corpus is the thing that must not travel.
+        /// `FactExtractor.factsByContact(mirror:identities:)` builds this from the
+        /// mirror, and the caller hands it over. A contact with no entry gets `.empty`,
+        /// which is a valid and common answer.
+        public var signalsByContact: [String: FactExtractor.ThreadSignals]
+
         public init(userID: String? = nil,
                     deviceID: String? = nil,
                     generatedAt: Date = Date(),
                     minimumMessages: Int = 1,
-                    system: HealthCheck.SystemState = HealthCheck.SystemState()) {
+                    system: HealthCheck.SystemState = HealthCheck.SystemState(),
+                    signalsByContact: [String: FactExtractor.ThreadSignals] = [:]) {
             self.userID = userID
             self.deviceID = deviceID
             self.generatedAt = generatedAt
             self.minimumMessages = minimumMessages
             self.system = system
+            self.signalsByContact = signalsByContact
         }
     }
 
@@ -65,6 +77,24 @@ public struct DigestBuilder {
                     days_since_last_contact: metrics.daysSinceLastContact,
                     momentum_90d: Self.round(metrics.momentum90d),
                     initiation_ratio: Self.round(metrics.initiationRatio),
+                    // AMENDMENT-001. Three of these the metric library already computed
+                    // and this projection used to throw away — the comment at the top of
+                    // this file listed "unanswered questions, who had the last word" as
+                    // things that stop here. They stop here no longer, because the gist
+                    // producer cannot classify `action_needed` without them.
+                    last_from_me: metrics.userSentLastMessage,
+                    max_gap_days: metrics.longestGapDays,
+                    // THE PENDING QUESTION, NOT A HISTORICAL ONE. This first read
+                    // `metrics.unansweredQuestionsFromThem > 0`, which counts every
+                    // question either party ever left unanswered — a different and
+                    // perfectly reasonable metric, and the wrong one here. `threads.py`
+                    // asks whether the LAST message is one of theirs wanting an answer,
+                    // and the Swift↔Python agreement test caught the difference on its
+                    // first run. See `FactExtractor.hasPendingQuestion`.
+                    unanswered_question: options
+                        .signalsByContact[metrics.identity.contact_id]?.pendingQuestion ?? false,
+                    facts: options
+                        .signalsByContact[metrics.identity.contact_id]?.facts ?? .empty,
                     median_reply_latency_s: metrics.medianReplyLatency,
                     p90_reply_latency_s: metrics.p90ReplyLatency,
                     tapbacks: Tapbacks(given: metrics.tapbacksGiven,

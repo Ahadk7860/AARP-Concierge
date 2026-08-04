@@ -231,7 +231,9 @@ class SqlGistProducer:
         return True
 
     def produce(self, contact_id: str, stats: ThreadStats, state: str, as_of: str) -> dict:
-        facts = extract_facts(stats.recent_inbound_text)
+        # AMENDMENT-001: prefer the allowlist the Mac already extracted. On the chat.db
+        # path `stats.facts` is None and this re-extracts from the tail, unchanged.
+        facts = stats.facts if stats.facts is not None else extract_facts(stats.recent_inbound_text)
         topic = infer_topic(stats.recent_inbound_text)
         deadline = deadline_for(stats, facts)
 
@@ -255,6 +257,15 @@ class SqlGistProducer:
             "model_id": None,
             "as_of": as_of,
         }
+
+
+class ModelProducerNotAvailableOnDigestPath(RuntimeError):
+    """Raised rather than degraded. See `gists_from_digest`.
+
+    Distinct from `ModelUnavailable`, which means "no backend, use SQL" and is CAUGHT and
+    degraded per thread. This one means "you asked for something that cannot be correct",
+    and degrading it quietly is how the empty-corpus hole survived.
+    """
 
 
 class ModelUnavailable(RuntimeError):
@@ -386,7 +397,23 @@ class LocalModelGistProducer:
 def _quotes_the_corpus(text: str, inbound: list[str], min_run: int = 6) -> bool:
     """True if `text` reproduces a run of `min_run`+ consecutive words from an inbound
     message. The gist crosses the boundary; a quotation inside it defeats the whole
-    separation, so a model that copies gets its output discarded."""
+    separation, so a model that copies gets its output discarded.
+
+    **An EMPTY corpus returns True, and that reversal is the point.** This function
+    iterates `inbound` looking for overlap, so with nothing to iterate it returned False
+    — "does not quote the corpus" — for every input, including a sentence the model
+    invented outright. It is the only guard on a model-written gist besides a length
+    check, so on the digest-driven path (`recent_inbound_text=[]` always, correctly, since
+    the digest carries no prose) ANY hallucination under 140 characters was accepted,
+    became `gist["gist"]`, was fed to the drafter as `situation:`, and was shown to the
+    user as the brief item body.
+
+    The question this answers is not "did it quote?" but "can I show this to somebody?",
+    and with no corpus to check against the answer is no. A guard that passes because its
+    input is empty is not a guard.
+    """
+    if not inbound:
+        return True
     words = text.lower().split()
     if len(words) < min_run:
         return False
@@ -450,6 +477,106 @@ def select_producer(model_id: str | None = None) -> tuple[GistProducer, str | No
 # --------------------------------------------------------------------------- build
 
 
+def stats_from_digest_relationship(
+    relationship: dict,
+    facts: dict | None = None,
+) -> ThreadStats:
+    """AMENDMENT-001. A `ThreadStats` built from a `digest.v1` relationship.
+
+    **Additive.** `build_gists(db_path, …)` below is untouched and stays the tested path
+    a Mac-side producer will use if the port ever happens; deleting it to "simplify"
+    would throw that away.
+
+    The mapping is deliberately total — every field `classify`, `priority` and
+    `sql_gist_text` read comes from the digest, and nothing is invented:
+
+    - `momentum` is a property over `messages_last_90d / messages_prior_90d`, and
+      `momentum_90d` already carries exactly that ratio. Rather than fabricate two
+      window counts, set the prior window to a fixed 1 and the recent window to the
+      ratio, which reproduces the property exactly.
+    - `recent_inbound_text` stays **empty**, always. It is the other person's prose, it
+      never leaves the Mac, and `facts` crossing instead is the whole point of the
+      amendment. A digest-driven producer runs without it.
+    - `handle` is the `contact_id`. The producer only uses `handle` to derive a
+      `contact_id`, and here it is already derived — on the Mac, under the user's salt.
+    """
+    facts = facts if facts is not None else relationship.get("facts") or {}
+    momentum = float(relationship.get("momentum_90d", 1.0))
+    total = int(relationship.get("message_count", 0))
+    sent = int(relationship.get("sent_count", 0))
+
+    return ThreadStats(
+        handle=relationship["contact_id"],
+        total_messages=total,
+        sent_messages=sent,
+        received_messages=int(relationship.get("received_count", total - sent)),
+        days_silent=int(relationship.get("days_since_last_contact", 0)),
+        last_from_me=bool(relationship["last_from_me"]),
+        unanswered_question=bool(relationship["unanswered_question"]),
+        max_gap_days=int(relationship["max_gap_days"]),
+        median_reply_latency_seconds=(relationship.get("median_reply_latency_s") or {}).get("them"),
+        # The property is recent/prior; 1.0 prior makes recent the ratio itself.
+        messages_last_90d=momentum,
+        messages_prior_90d=1.0,
+        recent_inbound_text=[],
+        facts=_facts_with_all_keys(facts),
+    )
+
+
+def _facts_with_all_keys(facts: dict) -> dict:
+    """Five keys, always, so downstream reads need no `.get` dance."""
+    return {k: list(facts.get(k) or []) for k in ("dates", "times", "places", "amounts", "names")}
+
+
+def gists_from_digest(
+    digest: dict,
+    top: int | None = None,
+    as_of: str | None = None,
+    producer: GistProducer | None = None,
+) -> list[dict]:
+    """Ranked gists from a `digest.v1` document. The cloud-side entry point.
+
+    Mirrors `build_gists`' ordering and degradation exactly: `classify` returning `None`
+    omits the thread, ties break on `contact_id`, and a `ModelUnavailable` falls back to
+    the SQL producer rather than dropping the item.
+    """
+    as_of = as_of or digest.get("generated_at") or datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # THE DIGEST PATH REFUSES A MODEL PRODUCER, rather than trusting a gate that cannot
+    # bite. AMENDMENT-001 sets `recent_inbound_text=[]` here and is right to — the digest
+    # carries metadata, never prose — so a `LocalModelGistProducer` is asked to summarise
+    # nothing. `_quotes_the_corpus` now fails closed on an empty corpus, which means a
+    # model producer here would silently degrade to the SQL sentence on every single
+    # thread. Saying so out loud beats a fallback that looks like it worked.
+    #
+    # Latent today only because no MLX backend is installed, which is exactly why testing
+    # would not have found it.
+    if producer is not None and getattr(producer, "producer", "sql") != "sql":
+        raise ModelProducerNotAvailableOnDigestPath(
+            f"{type(producer).__name__} needs message text; digest.v1 carries none. "
+            "Gist production from a digest is SQL-only."
+        )
+    if producer is None:
+        producer = SqlGistProducer()
+
+    gists: list[dict] = []
+    for relationship in sorted(digest.get("relationships", []), key=lambda r: r["contact_id"]):
+        if relationship.get("is_group"):
+            continue
+        stats = stats_from_digest_relationship(relationship)
+        state = classify(stats)
+        if state is None:
+            continue
+        cid = relationship["contact_id"]
+        try:
+            gists.append(producer.produce(cid, stats, state, as_of))
+        except ModelUnavailable:
+            gists.append(SqlGistProducer().produce(cid, stats, state, as_of))
+
+    gists.sort(key=lambda g: (-g["priority"], g["contact_id"]))
+    return gists[:top] if top else gists
+
+
 def build_gists(
     db_path: str,
     top: int | None = None,
@@ -506,7 +633,12 @@ def main(argv: list[str] | None = None) -> int:
         prog="python -m boi_intel.gist",
         description="Produce gist.v1 documents from a chat.db. SQL by default.",
     )
-    ap.add_argument("--db", required=True, help="path to a Messages chat.db, read-only")
+    # AMENDMENT-001. Exactly one source. `--digest` is the cloud path and reads a
+    # stored `digest.v1`; `--db` is the Mac path and is unchanged. Mutually exclusive
+    # and required, so "which one did it use?" is never a question.
+    src = ap.add_mutually_exclusive_group(required=True)
+    src.add_argument("--db", help="path to a Messages chat.db, read-only")
+    src.add_argument("--digest", help="path to a digest.v1 document (no corpus needed)")
     ap.add_argument("--out", required=True, help="output directory")
     ap.add_argument("--top", type=int, default=None, help="keep only the N highest priority")
     ap.add_argument("--salt", default=None, help="user_salt for the contact_id HMAC")
@@ -518,7 +650,26 @@ def main(argv: list[str] | None = None) -> int:
         # Structured JSON to stdout, per CONTRACTS.md § 6. Never the prompt, never text.
         print(json.dumps({"event": "gist.producer_degraded", "to": "sql", "reason": reason}))
 
-    gists = build_gists(a.db, top=a.top, salt=resolve_salt(a.salt), as_of=a.as_of, producer=chosen)
+    if a.digest:
+        # Not `chosen`: on a machine where a local model IS installed, handing it to the
+        # digest path is the bug above. The refusal lives in `gists_from_digest` so a
+        # library caller hits it too; this is the CLI declining to walk into it.
+        if getattr(chosen, "producer", "sql") != "sql":
+            print(
+                json.dumps(
+                    {
+                        "event": "gist.model_producer_refused",
+                        "path": "digest",
+                        "reason": "digest.v1 carries no message text for a model to summarise",
+                    }
+                )
+            )
+        digest = json.loads(pathlib.Path(a.digest).read_text())
+        gists = gists_from_digest(digest, top=a.top, as_of=a.as_of, producer=None)
+    else:
+        gists = build_gists(
+            a.db, top=a.top, salt=resolve_salt(a.salt), as_of=a.as_of, producer=chosen
+        )
     for path in write_gists(gists, a.out):
         g = json.loads(path.read_text())
         print(f"{path}  {g['state']}  priority={g['priority']}  producer={g['producer']}")

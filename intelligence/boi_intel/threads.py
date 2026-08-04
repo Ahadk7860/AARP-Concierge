@@ -61,6 +61,11 @@ class ThreadStats:
     messages_last_90d: int = 0
     messages_prior_90d: int = 0
     recent_inbound_text: list[str] = field(default_factory=list)
+    # AMENDMENT-001. Supplied when the stats came from a `digest.v1` relationship, where
+    # the Mac already extracted the allowlist and `recent_inbound_text` is empty by
+    # design. `None` means "extract it yourself from the tail", which is the chat.db
+    # path and is unchanged.
+    facts: dict[str, list[str]] | None = None
 
     @property
     def momentum(self) -> float:

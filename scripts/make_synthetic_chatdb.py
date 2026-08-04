@@ -98,6 +98,67 @@ PEOPLE = [
     ("+15550100006", "Sam",   "iMessage",  180, 303, 0.46, 0),
 ]
 
+# ---------------------------------------------------------------- the rich profile
+#
+# `--profile rich` adds these on top of the six above. It exists because of one number:
+# `buildCardModel` refuses any digest with fewer than **ten** ranked relationships
+# (`not_enough_ranked`), so the six-person corpus can only ever produce a refusal card —
+# and both strategy documents make "show 20 people the card" the stop condition for the
+# whole product. Until this profile existed, that test was not merely unrun, it was
+# unrunnable: this repo had never produced the artifact it requires.
+#
+# **The default is unchanged, byte for byte, and that is deliberate.** `relationships.count
+# == 6` and `thread_count == 7` are asserted in Track A's `DigestTests`, and the six people
+# encode specific awkward shapes (a muted thread, an SMS thread, per-person NULL-text
+# shares). Rewriting another track's assertions so that my card renders is the wrong repair
+# for "the fixture is too small".
+#
+# These are generated as CONVERSATIONS rather than as a uniform drip, because every
+# archetype except `chapter` is defined by conversational structure the uniform generator
+# cannot express: `initiation_ratio` counts who breaks a **six-hour** silence, and a thread
+# with a message every 25 minutes has almost no openings to attribute to anyone.
+#
+#   archetype               what the classifier needs (Metrics.swift)
+#   chapter                 >= 20 messages, quiet >= 180 days
+#   fade                    momentum < 0.5, quiet >= 30 days
+#   the_one_you_keep_waiting >= 3 unanswered questions FROM THE USER, user sent last,
+#                           initiation >= 0.6
+#   one_way_enthusiasm      initiation >= 0.7, >= 8 conversations opened
+#   rising_fastest          momentum >= 1.5, quiet <= 14 days
+#
+# `kind` below is the archetype each person is SHAPED for, and it is a target rather than
+# a promise: the classifier is Swift's and this script never asserts against it. What
+# proves the shaping worked is a rendered `kind: standard` card, which is the point.
+RICH_PEOPLE = [
+    # handle,        name,      service,    kind,                      convos, quiet, span
+    ("+15550100011", "Nina",    "iMessage", "chapter",                     16,  240,  190),
+    ("+15550100012", "Theo",    "iMessage", "chapter",                     12,  310,  120),
+    ("+15550100013", "Bex",     "SMS",      "chapter",                     11,  195,  150),
+    ("+15550100014", "Ade",     "iMessage", "fade",                        26,   44,  330),
+    ("+15550100015", "Kit",     "iMessage", "fade",                        22,   38,  300),
+    ("+15550100016", "Jonah",   "iMessage", "waiting",                     18,    9,  260),
+    ("+15550100017", "Remy",    "iMessage", "one_way",                     20,    5,  300),
+    ("+15550100018", "Soraya",  "iMessage", "rising",                      24,    3,  260),
+    ("+15550100019", "Ellis",   "iMessage", "steady",                      18,    6,  320),
+    ("+15550100020", "Wren",    "SMS",      "steady",                      14,   11,  300),
+]
+
+# Questions, kept out of the shared line pools on purpose. `unansweredQuestions` keys on a
+# trailing `?` AND on `text` being non-null, so a question that lands in the NULL-text share
+# is invisible to the classifier — these rows always carry text.
+USER_QUESTIONS = [
+    "u around this weekend?",
+    "did u ever pick a date?",
+    "still good for the thing?",
+    "hey did u see my last msg?",
+    "we still on?",
+]
+THEIR_QUESTIONS = [
+    "how did the move go?",
+    "you free later?",
+    "what did they say?",
+]
+
 USER_LINES = [
     "sorry been mia this week, work has been insane",
     "omg yes im so down. what day were u thinking",
@@ -122,8 +183,187 @@ THEIR_LINES = [
 ]
 
 
+# How each shape distributes its conversations over its own span, and who opens them.
+#
+# `weight` is sampled over the span, 0.0 = oldest, 1.0 = newest. Momentum is the last 90
+# days over the 90 before, so "how many conversations landed late" IS the momentum knob:
+# `fade` is back-loaded into the past and `rising` into the present.
+SHAPES = {
+    #            weight(frac)                       user opens   msgs per convo
+    "chapter": (lambda f: 1.0,                          0.50,      (3, 7)),
+    "fade":    (lambda f: 1.0 + 4.0 * (1.0 - f) ** 2,   0.55,      (3, 8)),
+    "waiting": (lambda f: 1.0,                          0.75,      (2, 5)),
+    "one_way": (lambda f: 1.0,                          0.90,      (2, 6)),
+    "rising":  (lambda f: 1.0 + 6.0 * f ** 3,           0.50,      (4, 9)),
+    "steady":  (lambda f: 1.0,                          0.50,      (3, 8)),
+}
+
+
+def _rich_threads(cur, rng: random.Random, now: datetime, stats: dict, mguid: int) -> int:
+    """Ten more people, generated as conversations rather than as a uniform drip.
+
+    Returns the running message-guid counter. Everything here is additive: the six
+    default people are written before this runs and are not touched by it.
+    """
+    for handle, _name, service, kind, convos, quiet_days, span_days in RICH_PEOPLE:
+        weight, user_opens, (lo, hi) = SHAPES[kind]
+
+        cur.execute("INSERT INTO handle (id, service, country) VALUES (?,?,?)",
+                    (handle, service, "us"))
+        hid = cur.lastrowid
+        cur.execute(
+            "INSERT INTO chat (guid, style, chat_identifier, service_name) VALUES (?,?,?,?)",
+            (f"{service};-;{handle}", 45, handle, service),
+        )
+        cid = cur.lastrowid
+        cur.execute("INSERT INTO chat_handle_join VALUES (?,?)", (cid, hid))
+        stats["threads"] += 1
+
+        end = now - timedelta(days=quiet_days)
+        start = end - timedelta(days=span_days)
+        # Sample conversation openings from the shape's weighting, then sort: a
+        # conversation is a burst in time and the burst order has to be chronological or
+        # `initiation_ratio` attributes openings to whoever happened to be written first.
+        bins = [i / 199 for i in range(200)]
+        picks = rng.choices(bins, weights=[weight(f) for f in bins], k=convos)
+        picks.sort()
+
+        # `the_one_you_keep_waiting` needs >= 3 questions from the USER that nobody
+        # answered, and the user holding the last word. Those are the final conversations
+        # of the thread, so nothing arrives inside the answer window afterwards.
+        unanswered_at = set(range(convos - 4, convos)) if kind == "waiting" else set()
+
+        for index, frac in enumerate(picks):
+            opened_at = start + (end - start) * frac
+            from_me = rng.random() < user_opens
+            n = rng.randint(lo, hi)
+            when = opened_at
+            for turn in range(n):
+                # Real conversations alternate but not perfectly; a run of two from one
+                # side is what makes `initiation_ratio` different from a volume count.
+                if turn > 0:
+                    from_me = from_me if rng.random() < 0.25 else not from_me
+                    when = when + timedelta(seconds=rng.randint(40, 900))
+                body = rng.choice(USER_LINES if from_me else THEIR_LINES)
+                text, attr = body, None
+                if rng.random() < 0.30:
+                    text, attr = None, b"__SYNTHETIC_NO_TYPEDSTREAM__"
+                    stats["null_text"] += 1
+                mguid += 1
+                cur.execute(
+                    """INSERT INTO message
+                       (guid, text, handle_id, service, date, date_delivered, date_read,
+                        is_from_me, is_read, attributedBody, was_delivered_quietly)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                    (f"MSG-{mguid:07d}", text, 0 if from_me else hid, service,
+                     to_apple_ns(when), to_apple_ns(when + timedelta(seconds=2)),
+                     to_apple_ns(when + timedelta(seconds=rng.randint(5, 600))),
+                     1 if from_me else 0, 1, attr, 0),
+                )
+                cur.execute("INSERT INTO chat_message_join VALUES (?,?,?)",
+                            (cid, cur.lastrowid, to_apple_ns(when)))
+                stats["messages"] += 1
+
+            # A trailing question, never NULL-text: `unansweredQuestions` reads `text`
+            # and a question hidden in the attributedBody share cannot be counted.
+            if index in unanswered_at:
+                when = when + timedelta(seconds=rng.randint(600, 4000))
+                mguid += 1
+                cur.execute(
+                    """INSERT INTO message
+                       (guid, text, handle_id, service, date, is_from_me, is_read)
+                       VALUES (?,?,?,?,?,?,?)""",
+                    (f"MSG-{mguid:07d}", rng.choice(USER_QUESTIONS), 0, service,
+                     to_apple_ns(when), 1, 1),
+                )
+                cur.execute("INSERT INTO chat_message_join VALUES (?,?,?)",
+                            (cid, cur.lastrowid, to_apple_ns(when)))
+                stats["messages"] += 1
+                stats["unanswered_user_questions"] = \
+                    stats.get("unanswered_user_questions", 0) + 1
+            elif rng.random() < 0.25:
+                # Questions from them, answered, so the two counters are not the same
+                # number wearing two names.
+                when = when + timedelta(seconds=rng.randint(60, 900))
+                for asker_is_me, line in ((0, rng.choice(THEIR_QUESTIONS)),
+                                          (1, rng.choice(USER_LINES))):
+                    mguid += 1
+                    cur.execute(
+                        """INSERT INTO message
+                           (guid, text, handle_id, service, date, is_from_me, is_read)
+                           VALUES (?,?,?,?,?,?,?)""",
+                        (f"MSG-{mguid:07d}", line, 0 if asker_is_me else hid, service,
+                         to_apple_ns(when), asker_is_me, 1),
+                    )
+                    cur.execute("INSERT INTO chat_message_join VALUES (?,?,?)",
+                                (cid, cur.lastrowid, to_apple_ns(when)))
+                    stats["messages"] += 1
+                    when = when + timedelta(seconds=rng.randint(120, 3000))
+    return mguid
+
+
+ADDRESS_BOOK_SCHEMA = """
+CREATE TABLE ZABCDRECORD (
+  Z_PK INTEGER PRIMARY KEY, ZFIRSTNAME TEXT, ZLASTNAME TEXT, ZORGANIZATION TEXT
+);
+CREATE TABLE ZABCDPHONENUMBER (
+  Z_PK INTEGER PRIMARY KEY, ZOWNER INTEGER, ZFULLNUMBER TEXT
+);
+CREATE TABLE ZABCDEMAILADDRESS (
+  Z_PK INTEGER PRIMARY KEY, ZOWNER INTEGER, ZADDRESS TEXT
+);
+"""
+
+# Last names, so the directory carries the two-part display the reader joins. Kept here
+# rather than in PEOPLE because PEOPLE is load-bearing for other tracks' tests.
+SURNAMES = {
+    "Maya": "Okonjo", "Yu": "Chen", "Mom": "", "Dre": "Salinas", "Priya": "Raman",
+    "Sam": "Whitfield", "Nina": "Alvarez", "Theo": "Baptiste", "Bex": "Lindqvist",
+    "Ade": "Oyelaran", "Kit": "Moreau", "Jonah": "Feldman", "Remy": "Duval",
+    "Soraya": "Nazari", "Ellis": "Tran", "Wren": "Halloway",
+}
+
+
+def write_address_book(path: pathlib.Path, profile: str = "minimal") -> int:
+    """A synthetic `AddressBook-v22.abcddb` naming the same people the corpus texts.
+
+    **This is what turns the card from a debugging artifact into the thing the kill test
+    is about.** Without it every archetype on the card is headed `+15550100014`, because
+    `ContactResolver` falls back to the handle when no directory names it — and nobody
+    screenshots a phone number. The names were always in this file; they just had nowhere
+    to go.
+
+    Written to the path `AddressBookDirectory.discover()` looks in, under whatever HOME
+    the caller sets, so no Swift changes and no new flag: point a run's HOME at the
+    directory holding this and the Mac finds it exactly as it finds a real one.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        path.unlink()
+    con = sqlite3.connect(path)
+    con.executescript(ADDRESS_BOOK_SCHEMA)
+    people = list(PEOPLE) + (
+        [(h, n, s, None, None, None, None) for h, n, s, _k, _c, _q, _sp in RICH_PEOPLE]
+        if profile == "rich" else []
+    )
+    for record, person in enumerate(people, start=1):
+        handle, name = person[0], person[1]
+        con.execute(
+            "INSERT INTO ZABCDRECORD (Z_PK, ZFIRSTNAME, ZLASTNAME, ZORGANIZATION)"
+            " VALUES (?,?,?,?)",
+            (record, name, SURNAMES.get(name, ""), None),
+        )
+        con.execute(
+            "INSERT INTO ZABCDPHONENUMBER (Z_PK, ZOWNER, ZFULLNUMBER) VALUES (?,?,?)",
+            (record, record, handle),
+        )
+    con.commit()
+    con.close()
+    return len(people)
+
+
 def build(out: pathlib.Path, seed: int = 7, leave_wal_open: bool = True,
-          retention_cap_days: int | None = None) -> dict:
+          retention_cap_days: int | None = None, profile: str = "minimal") -> dict:
     rng = random.Random(seed)
     out.parent.mkdir(parents=True, exist_ok=True)
     for suffix in ("", "-wal", "-shm"):
@@ -213,6 +453,9 @@ def build(out: pathlib.Path, seed: int = 7, leave_wal_open: bool = True,
                 )
                 stats["tapbacks"] += 1
                 stats["messages"] += 1
+
+    if profile == "rich":
+        mguid = _rich_threads(cur, rng, now, stats, mguid)
 
     # A TAPBACK THE USER SENT, quoting the other person. is_from_me = 1, and the body
     # carries their sentence verbatim. This is the case that defeats every guard except
@@ -327,9 +570,21 @@ def main() -> None:
                          "first_contact_at was floored at the cap, so a friendship that "
                          "began in 2019 reported as beginning a year ago. Needed to test "
                          "the first_contact_at null rule in CONTRACTS section 10.")
+    ap.add_argument("--profile", choices=("minimal", "rich"), default="minimal",
+                    help="minimal (default) is the original six people, unchanged byte "
+                         "for byte. rich adds ten more so the corpus clears the card "
+                         "renderer's ten-ranked-relationship bar -- without it every "
+                         "card this repo can produce is a refusal card, which makes the "
+                         "kill test unrunnable rather than merely unrun.")
+    ap.add_argument("--contacts-out", default=None, metavar="PATH",
+                    help="also write a synthetic AddressBook-v22.abcddb naming the same "
+                         "people. Without one the card headlines every archetype with a "
+                         "phone number, which is not an artifact anybody screenshots.")
     a = ap.parse_args()
     stats = build(pathlib.Path(a.out), a.seed, leave_wal_open=not a.checkpoint,
-                  retention_cap_days=a.retention_cap_days)
+                  retention_cap_days=a.retention_cap_days, profile=a.profile)
+    if a.contacts_out:
+        stats["contacts"] = write_address_book(pathlib.Path(a.contacts_out), a.profile)
     print(f"wrote {a.out}")
     for k, v in stats.items():
         print(f"  {k}: {v}")

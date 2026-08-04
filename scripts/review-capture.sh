@@ -18,7 +18,7 @@ set -uo pipefail
 
 LETTER="${1:-}"
 BASE="${BOI_BASE:-main}"
-if [ -z "$LETTER" ]; then echo "usage: review-capture.sh <a|b|c|d>" >&2; exit 2; fi
+if [ -z "$LETTER" ]; then echo "usage: review-capture.sh <a|b|c|d|e|f>" >&2; exit 2; fi
 
 case "$LETTER" in
   a) SLUG="mac";           TEST="swift test --package-path mac"
@@ -29,6 +29,13 @@ case "$LETTER" in
      LINT="npm run lint && npm run typecheck" ;;
   d) SLUG="cloud-surface"; TEST="npm test -- cloud/api cloud/brief cloud/card cloud/db"
      LINT="npm run lint && npm run typecheck" ;;
+  # Track E is the join, so its capture is every other track's suite at once -- the
+  # whole reason the track exists is that nobody had run all four against one commit.
+  # Mirrors gate.sh's `e` case; appended by Track E, recorded in its NOTES.md.
+  e) SLUG="the-join";      TEST="npx vitest run --passWithNoTests cloud && python3 -m pytest && swift test --package-path mac"
+     LINT="npx eslint . && ruff check intelligence && ruff format --check intelligence && npx tsc --noEmit -p tsconfig.json" ;;
+  f) SLUG="onboarding";    TEST="swift test --package-path mac"
+     LINT="swift build --package-path mac -Xswiftc -warnings-as-errors" ;;
   *) echo "unknown track: $LETTER" >&2; exit 2 ;;
 esac
 
@@ -48,6 +55,8 @@ case "$LETTER" in
   a) require swift ;;
   b) require python3 ;;
   c|d) require npx ;;
+  f) require swift ;;
+  e) require swift; require python3; require npx ;;
 esac
 
 OUT="review-capture-$LETTER.md"

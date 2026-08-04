@@ -637,3 +637,81 @@ def test_null_text_rows_still_count_for_timing(tmp_path):
     stats = load_threads(con, now_epoch=_now())
     con.close()
     assert stats["+15550100999"].days_silent == 2, "a NULL-text row must count for timing"
+
+
+# ------------------------------------------------- prompt 06: the vacuous fabrication gate
+#
+# AMENDMENT-001 made gist production digest-driven, and that path sets
+# `recent_inbound_text=[]` ALWAYS -- correctly, because the digest carries metadata and
+# never prose. The guard on a model-written gist is a length check plus
+# `_quotes_the_corpus`, and that function iterated the corpus looking for overlap, so with
+# nothing to iterate it answered "does not quote" for every input on earth.
+#
+# Any hallucination under 140 characters was therefore accepted, became `gist["gist"]`,
+# was handed to the drafter as `situation:`, and was shown to the user as the brief item
+# body. Latent only because no MLX backend is installed -- which is precisely why testing
+# would never have found it.
+
+
+def test_quotes_the_corpus_fails_CLOSED_on_an_empty_corpus():
+    # The question is not "did it quote?" but "can I show this to somebody?", and with no
+    # corpus to check against the answer is no.
+    assert gist_mod._quotes_the_corpus("a sentence nobody ever said", []) is True
+    # And it still answers the original question when there IS a corpus.
+    assert gist_mod._quotes_the_corpus("a sentence nobody ever said", ["something else"]) is False
+    said = "are you still coming on the 14th of the month"
+    assert gist_mod._quotes_the_corpus(said, [said]) is True
+
+
+class _HallucinatingProducer:
+    """A model producer that returns a plausible sentence from nothing at all."""
+
+    producer = "local_model"
+    model_id = "fake-local-model"
+
+    def produce(self, contact_id, stats, state, as_of):  # noqa: D102, ANN001
+        base = gist_mod.SqlGistProducer().produce(contact_id, stats, state, as_of)
+        base["gist"] = "they are waiting to hear about the deposit before friday"
+        base["producer"] = self.producer
+        base["model_id"] = self.model_id
+        return base
+
+
+def _digest_with_one_relationship() -> dict:
+    return {
+        "schema_version": "digest.v1",
+        "generated_at": "2026-08-08T12:00:00Z",
+        "relationships": [
+            {
+                "contact_id": "h_00000000000000ab",
+                "display": "Ade Oyelaran",
+                "is_group": False,
+                "message_count": 400,
+                "days_since_last_contact": 50,
+                "momentum_90d": 0.3,
+                "initiation_ratio": 0.6,
+                "last_from_me": False,
+                "max_gap_days": 60,
+                "unanswered_question": True,
+                "facts": {"dates": [], "times": [], "places": [], "amounts": [], "names": []},
+            }
+        ],
+    }
+
+
+def test_the_digest_path_REFUSES_a_model_producer():
+    # Refuses rather than degrades. `ModelUnavailable` means "no backend, use SQL" and is
+    # caught per thread; this means "you asked for something that cannot be correct", and
+    # quietly degrading it is how the hole above survived.
+    with pytest.raises(gist_mod.ModelProducerNotAvailableOnDigestPath):
+        gist_mod.gists_from_digest(
+            _digest_with_one_relationship(), producer=_HallucinatingProducer()
+        )
+
+
+def test_the_digest_path_still_produces_with_the_sql_producer():
+    # The counter-case: the refusal is about the producer, not about the path being
+    # broken.
+    gists = gist_mod.gists_from_digest(_digest_with_one_relationship())
+    assert len(gists) == 1
+    assert gists[0]["producer"] == "sql"

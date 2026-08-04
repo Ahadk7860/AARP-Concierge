@@ -35,6 +35,7 @@ import sys
 
 from boi_intel.contracts import FORBIDDEN_PHRASES
 from boi_intel.facts import extract_facts
+from boi_intel.prompts import hours_stale
 from boi_intel.register import EMOJI
 
 # CONTRACTS.md and prompt 04: extend this list, never shorten it. Everything below is
@@ -153,6 +154,37 @@ def register_failures(candidates: list[dict], register: dict) -> bool:
     return False
 
 
+#: Vague temporal hedges, which are NOT specifics — CONTRACTS.md § 1, decided 3 Aug:
+#: "a specific is falsifiable against a calendar; a hedge is not", and "a closed
+#: allowlist of hedges passes without needing a match in `facts`".
+#:
+#: **That ruling was never implemented.** `facts.RELATIVE_DAYS` extracts `this week` as a
+#: date, so the canonical `defer` candidate — `"ill get back to u this week"`, the exact
+#: string CONTRACTS quotes — failed `fabrication_gate` on every run with an empty
+#: allowlist, which is the 5% ceiling the contract says nobody could reach. Found while
+#: writing the staleness tests, because that string is what a hedged draft looks like.
+#:
+#: Implemented here rather than in `facts.py` on purpose: extraction should keep seeing
+#: these (the gist's own `facts` may legitimately carry "this week" from the other
+#: person's message), and it is the GATE that must not treat them as commitments.
+#:
+#: Closed and short, as instructed. Anything naming a day, a date, a time or a number
+#: stays gated — `tomorrow` and `the weekend` are commitments and are deliberately absent.
+HEDGES = frozenset(
+    {
+        "this week",
+        "next week",
+        "this month",
+        "next month",
+        "soon",
+        "later",
+        "sometime",
+        "in a bit",
+        "a while",
+    }
+)
+
+
 def fabricated_specifics(text: str, facts: dict) -> list[str]:
     """Every specific in `text` that `gist.facts` does not license.
 
@@ -183,6 +215,8 @@ def fabricated_specifics(text: str, facts: dict) -> list[str]:
     for key in ("dates", "times", "places", "amounts", "names"):
         for value in found.get(key, []):
             norm = _normalise(value)
+            if norm in HEDGES:
+                continue
             if any(_licenses(a, norm) for a in allowed):
                 continue
             unlicensed.append(value)
@@ -220,10 +254,56 @@ def forbidden_phrase_failures(candidates: list[dict]) -> bool:
     return any(forbidden_phrases_in(c["text"]) for c in candidates)
 
 
+# ------------------------------------------------------------- stale present tense
+#
+# `BOI_ARCHITECTURE.md` § 6.6 asks for two things: `as_of` in every prompt, and a system
+# instruction forbidding present-tense claims about stale state. `prompts.py` now does
+# both — and an instruction is a request, not a guarantee. This is the guarantee.
+#
+# The failure it stops: `days_silent` is computed when the digest is built, so a Mac
+# closed for four days tells the model "3 days" and the model writes "sorry, been 3 days"
+# into a message the USER sends in their own name, on day seven. That is a plausible
+# WRONG commitment — the class CONTRACTS.md § 6 puts under "degrade, never fabricate",
+# and strictly worse than an obviously-invented one because it gets sent.
+#
+# It reports as `stale_tense_gate`, its own slug. It rode on `fabrication_gate` for one
+# commit while `draft_bundle.v1.validator.failures` was a frozen enum this track could not
+# widen; the user ruled to widen it, on the grounds that a failure list which cannot
+# distinguish a stale-tense refusal from a fabrication refusal has lost the information it
+# exists to carry. The two really are different defects: one names a specific the gist
+# never carried, the other repeats a specific the gist carried *and that has since
+# expired*.
+
+#: Beyond this, a day count is a claim about the past wearing the present tense.
+STALE_CLAIM_HOURS = 24.0
+
+#: "3 days", "3d", "two weeks". Spelled-out small numbers included because the fact
+#: extractor famously does not catch them and this is the same blind spot.
+_SPELLED = "one|two|three|four|five|six|seven|eight|nine|ten|a couple of|a few"
+_DAY_COUNT = re.compile(
+    rf"\b(?:\d{{1,3}}|{_SPELLED})\s*(?:d|w|day|days|week|weeks|month|months)\b",
+    re.IGNORECASE,
+)
+
+
+def stale_claim_failures(candidates: list[dict], gist: dict, now=None) -> bool:
+    """True if a candidate states a bare day count while the gist is stale.
+
+    Vague hedges are untouched on purpose — "a while", "ages", "too long" commit to
+    nothing checkable, which is exactly what a stale draft should do. CONTRACTS.md § 1
+    already draws that line for the fabrication gate and this is the same line.
+    """
+    if hours_stale(gist.get("as_of"), now) < STALE_CLAIM_HOURS:
+        return False
+    return any(_DAY_COUNT.search(c.get("text", "") or "") for c in candidates)
+
+
 # ------------------------------------------------------------------- the verdict
 
 
-def validate_candidates(candidates: list[dict], gist: dict, voice_pack: dict) -> list[str]:
+def validate_candidates(
+    candidates: list[dict], gist: dict, voice_pack: dict, now=None
+) -> list[str]:
     """Failure slugs for one set of candidates, in the frozen vocabulary.
 
     An empty list means every gate passed. Order is fixed so two runs over the same
@@ -244,6 +324,8 @@ def validate_candidates(candidates: list[dict], gist: dict, voice_pack: dict) ->
         failures.append("register_gate")
     if fabrication_failures(usable, gist):
         failures.append("fabrication_gate")
+    if stale_claim_failures(usable, gist, now):
+        failures.append("stale_tense_gate")
     if forbidden_phrase_failures(usable):
         failures.append("forbidden_phrase")
     if usable[0]["stance"] == usable[1]["stance"]:

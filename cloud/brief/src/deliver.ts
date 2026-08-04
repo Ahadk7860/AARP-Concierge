@@ -12,6 +12,7 @@
 import type {
   Brief,
   BriefItem,
+  Capabilities,
   Channel,
   OutboundBlock,
   OutboundMessage,
@@ -46,8 +47,41 @@ export function briefIdempotencyKey(brief: Brief, suffix: string): string {
   return `brief-${brief.user_id}-${brief.scheduled_for}${suffix}`;
 }
 
-/** The lead message: the staleness caveat, if any, then the framing line. */
-export function leadBlocks(brief: Brief): OutboundBlock[] {
+/**
+ * The lead message: the staleness caveat, if any, then the card, then the framing line.
+ *
+ * **The card is the reason this function gained an argument.** `composeBrief` has set
+ * `brief.card_url` since Track E prompt `04` wired the renderer in, and nothing here read
+ * it — `deliverBrief` emitted text blocks only, so the renderer, the compose edge and the
+ * stored brief were all green while the card never reached a user.
+ * `BOI_ARCHITECTURE.md` § 5 calls the card the entire acquisition loop; a brief without it
+ * is the product's growth mechanism silently absent. It survived because the criterion
+ * asserted on `brief.card_url` — an artifact — rather than on the blocks the channel
+ * received.
+ *
+ * Placement is deliberate. After the caveat, because the caveat qualifies the card too: a
+ * report card built from a four-day-old corpus is exactly the confident wrong answer the
+ * warning exists to precede. Before the framing line, because that line leads directly
+ * into the items — and on an unthreaded transport the items are concatenated onto this
+ * same message, so a card appended at the end would land between "3 people worth a message
+ * today:" and the first person.
+ *
+ * Gated on `capabilities.images`. A transport that cannot carry an image gets no card and
+ * no substitute: a bare URL in a text block is not a card, it is a link nobody taps.
+ *
+ * **And gated on `card_kind === "standard"`, which is the policy prompt 05 fixed.** A
+ * refusal card — "not enough history yet" — is a good product exactly once, on the
+ * onboarding surface, where it names a real problem and points at
+ * `Settings > Messages > Keep Messages`. Attached to a brief it arrives every morning
+ * forever, which is a reproach rather than information, and it violates "never hand
+ * someone a bad report and call it their year in messages". A brief below the bar ships
+ * its text and no image.
+ *
+ * A `card_url` with no `card_kind` is treated as no card. That is deliberate: the field
+ * is optional in the type for compatibility, and the failure this gate exists to prevent
+ * is precisely a card whose kind nobody checked.
+ */
+export function leadBlocks(brief: Brief, capabilities?: Capabilities): OutboundBlock[] {
   const blocks: OutboundBlock[] = [];
 
   // The caveat goes FIRST, before any content it qualifies. Underneath the items it
@@ -55,6 +89,12 @@ export function leadBlocks(brief: Brief): OutboundBlock[] {
   const caveat = brief.staleness.message;
   if (brief.staleness.warn && typeof caveat === "string" && caveat.length > 0) {
     blocks.push({ type: "text", text: caveat });
+  }
+
+  const card = brief.card_url;
+  if (typeof card === "string" && card.length > 0 && capabilities?.images === true
+      && brief.card_kind === "standard") {
+    blocks.push({ type: "image", url: card, alt: "your relationships this week" });
   }
 
   const n = brief.items.length;
@@ -186,8 +226,8 @@ export async function deliverBrief(input: DeliverInput): Promise<DeliveryResult>
     user_id: brief.user_id,
     idempotency_key: briefIdempotencyKey(brief, "-lead"),
     blocks: threaded
-      ? leadBlocks(brief)
-      : [...leadBlocks(brief), ...brief.items.flatMap((i) => itemBlocks(i))],
+      ? leadBlocks(brief, capabilities)
+      : [...leadBlocks(brief, capabilities), ...brief.items.flatMap((i) => itemBlocks(i))],
     reply_to_message_id: null,
     ...(threaded ? { requested_capabilities: ["threading"] } : {}),
   };
@@ -217,6 +257,10 @@ export async function deliverBrief(input: DeliverInput): Promise<DeliveryResult>
     items: brief.items.length,
     threaded,
     warn: brief.staleness.warn,
+    // Whether the card actually left the building, not whether it was rendered.
+    // `briefs.card_url` being set is what made the missing edge invisible for a whole
+    // prompt; this is the same fact measured on the send side.
+    card: lead.blocks.some((b) => b.type === "image"),
   });
 
   return { sent: true, messages, delivered, threaded };

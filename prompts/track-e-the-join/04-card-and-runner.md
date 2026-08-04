@@ -1,6 +1,6 @@
-# Track E — Prompt 03: one command, the whole pipe
+# Track E — Prompt 04: one command, the whole pipe
 
-**Depends on:** 01 and 02. Both.
+**Depends on:** 01, 02 and 03.
 
 ## Context
 
@@ -67,7 +67,14 @@ and confirm the gist is about the person the brief says it is about.
 - [ ] `npm run e2e` exits zero from an empty database, with no manual steps
 - [ ] The run writes an artifact directory containing, at minimum: `digest.json`, `gists.json`, `drafts.json`, `card.png`, `brief.json`, `outbound.json`
 - [ ] `card.png` **opens and is legible.** Paste it in the report. A PNG that decodes is not the same as a card a human can read
-- [ ] The brief in `StubChannel.sent` contains at most three items, each with a gist and two drafts, and a `card_url` that resolves
+- [ ] The brief in `StubChannel.sent` contains at most three items, each with a gist and two drafts
+- [ ] **The card reaches the channel as an `image` block.** Assert over the blocks
+      `StubChannel` received, NOT over `brief.card_url`. The original wording of this line
+      asserted on the stored brief, which is why the renderer, the compose edge and the
+      artifact could all be green while the card never reached a user — `deliverBrief`
+      emits text blocks only. `BOI_ARCHITECTURE.md` § 5 calls the card the acquisition
+      loop; a brief without it is the product's growth mechanism silently absent.
+      `deliver.ts` is granted to this track for exactly this fix and nothing else.
 - [ ] The drafts are about the contact the gist names — assert `contact_id` equality across all four artifacts, not just presence
 - [ ] **The renderer being down produces a brief with `card_url: null` that still sends.** Kill the card server and assert it
 - [ ] Running `npm run e2e` twice against the same database sends **once** — the idempotency Track D built is exercised for the first time by a second real run, not by a unit test

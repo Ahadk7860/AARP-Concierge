@@ -79,6 +79,14 @@ export const MINIMAL_DIGEST = {
       days_since_last_contact: 0,
       momentum_90d: 0,
       initiation_ratio: 0,
+      // AMENDMENT-001 made these four REQUIRED, so a minimal digest carries them. That
+      // this test failed the moment the schema changed is the point of it: a
+      // hand-written zod mirror stays correct right up until the first real schema
+      // change, and this differential is what notices.
+      last_from_me: false,
+      max_gap_days: 0,
+      unanswered_question: false,
+      facts: { dates: [], times: [], places: [], amounts: [], names: [] },
       as_of: "2026-08-01T09:14:00Z",
     },
   ],
