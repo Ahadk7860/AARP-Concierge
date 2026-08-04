@@ -931,6 +931,79 @@ worst case for the old behaviour was a schema that could not be rolled back at a
   sent from a phone. Registering both handles makes the answer irrelevant, which is why it
   did not block.
 
+## Prompt 09 — ask Boi for your report
+
+The path that makes the kill test runnable. Twenty people asking and screenshotting is the
+same evidence as twenty receiving, and it needs no scheduler and no waiting until 8am
+tomorrow — people are most curious in the ninety seconds after their history loads, and
+the scheduled brief asks them to sleep on it.
+
+### Three outcomes, and the first two are different claims
+
+The prompt described two. AMENDMENT-002 created the third **after** it was written, and it
+is now the likeliest of the three: the thread exists before the Mac app does, so the most
+probable report request in the entire product arrives before any digest exists.
+
+| Outcome | What it says | Whose claim it is |
+|---|---|---|
+| `no_corpus` | "i don't have your history yet — finish setting up the app" | **ours** |
+| `refusal` | "i've read your history and there isn't enough of it" | **theirs** |
+| `standard` | the card | — |
+
+Getting the first two backwards tells a brand-new user their friendships are too thin to
+measure when we simply have not looked yet — the confident wrong answer the architecture
+names as the failure that costs trust permanently, and it is one `if` away at all times.
+Asserted in both directions: the no-corpus answer must **not** contain "isn't enough", and
+must name the step that fixes it.
+
+**A refusal card on request is fine**, which is the opposite of the standing rule for a
+scheduled brief, and deliberately so. Daily and unasked it is a reproach; asked for
+directly it is the honest answer to a direct question. It must say what would change it —
+a refusal with no remedy is the guilt-without-agency the product conventions forbid.
+
+### The 7am request and the 8am brief
+
+Two code paths, same user, one hour apart. The decision: **the brief goes out without the
+image.** Its subject is the three people; the card is an artifact they already have, and a
+dated figure repeated an hour later with nothing said is how it starts reading as a live
+one. `card.already_served_today` says which happened, and the counter-case is asserted too
+— a user who did not ask still gets their card.
+
+### The cache is beside the artifact, not in a table
+
+First attempt was a `report_cards` table. It failed on Track D's `schema.test.ts`, which
+requires **every** user-data table to be hash-partitioned and seeded by a helper in a file
+this track does not own — so a new table for a cache means editing another track's suite.
+
+It lives at `<BOI_CARD_DIR>/<user_id>/report-<day>.json` instead, next to the PNG it points
+at. `deleteUser` already removes that directory, so there is no second thing to remember,
+and the residue check covers it unchanged. Keyed on the **local day** rather than a TTL,
+because "your report for today" is what the card claims to be — a rolling 24-hour window
+hands somebody a card at 23:58 that is still called today's at 23:58 tomorrow.
+
+*(The stray table survived in `boi_dev_d` after the migration was deleted and failed
+Track D's catalog walk until it was dropped by hand. A migration that has run is not
+undone by deleting its file.)*
+
+### A cached URL outlives only the host that issued it
+
+The cache stores an absolute signed URL. In production that is the long-lived card service
+and the signature is good for seven days. In the e2e every run gets an ephemeral port, so a
+second run against the same account on the same day holds a URL whose server is gone — the
+artifact step tolerates it and logs `report.cached_url_unreachable`.
+
+Worth carrying: **storing `card_id` and rebuilding the URL at serve time would be
+strictly better** — fresh expiry, no dependence on the issuing host — and is a small change
+whenever the card service gets a stable hostname.
+
+### Three more assertions that counted globally
+
+Adding the report stage broke three e2e tests, all of which counted across *every* outbound
+message: "exactly one image", "exactly one stored card", "the second run sends nothing".
+None was wrong; each was a count over a population that grew. Scoped to identity now —
+brief messages by key prefix, brief leads by suffix — which is the same repair as
+`outbound[0]`, three tests later.
+
 ## Runtime resources
 
 `CONTRACTS.md` § 9 has no row for Track E. Reusing Track D's `3041` and Track A's

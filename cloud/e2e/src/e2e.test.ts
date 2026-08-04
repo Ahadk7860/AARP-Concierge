@@ -201,7 +201,9 @@ describe("the whole pipe, end to end", () => {
     const result = await runEndToEnd({ artifactRoot: ARTIFACT_ROOT, log: () => {} });
     const url = viaChild(result.cardUrl as string);
     expect((await fetch(url)).status).toBe(200);
-    expect(countCardsFor(result.scope.user_id)).toBe(1);
+    // At least one: the brief's card, plus the report's if the run asked for one. The
+    // assertion that matters is the one after the delete.
+    expect(countCardsFor(result.scope.user_id)).toBeGreaterThanOrEqual(1);
 
     const deleted = await deleteUser(result.scope);
     expect(deleted.deleted).toBe(true);
@@ -220,11 +222,16 @@ describe("the whole pipe, end to end", () => {
 
     // GAP 5. Asserted over the blocks `StubChannel` received — the stored `card_url`
     // below was already true on the run that found this, and the card still never left.
-    const images = result.outbound.flatMap((m) =>
+    // Scoped to the BRIEF's messages. Since prompt 09 the run also answers a report
+    // request, which carries its own card — a count over every outbound would be
+    // asserting "how many cards exist" rather than "did the brief carry one".
+    const briefMessages = result.outbound.filter((m) =>
+      m.idempotency_key.startsWith("brief-"));
+    const images = briefMessages.flatMap((m) =>
       m.blocks.filter((b): b is { type: "image"; url: string; alt?: string | null } =>
         b.type === "image"),
     );
-    expect(images.length, JSON.stringify(result.outbound)).toBe(1);
+    expect(images.length, JSON.stringify(briefMessages)).toBe(1);
     expect(images[0]?.url).toBe(result.cardUrl);
 
     // It rides the LEAD, and it rides it before the line that leads into the items.
@@ -294,7 +301,12 @@ describe("the whole pipe, end to end", () => {
     });
 
     expect(second.status).toBe("already_sent");
-    expect(second.sent, JSON.stringify(second.outbound)).toBe(0);
+    // No second BRIEF. The report intent legitimately answers again — a user may ask
+    // twice and gets the cached card with "same card as earlier today" — so counting
+    // every send would assert that the product ignores its own user.
+    const secondLeads = second.outbound.filter((m) => m.idempotency_key.endsWith("-lead"));
+    expect(secondLeads.length, JSON.stringify(second.outbound.map((m) => m.idempotency_key)))
+      .toBe(0);
 
     // Nothing new in the outbox either, so this is not passing because a fresh channel
     // simply had not been used yet.

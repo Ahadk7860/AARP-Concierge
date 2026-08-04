@@ -17,6 +17,8 @@
 // changes its prefix changes nothing in this file.
 
 import { boiHandle } from "../../api/src/welcome.js";
+import { readTodaysCard, writeTodaysCard } from "../../card/src/store.js";
+import { localDayKey } from "./scheduler.js";
 import type { Brief, Candidate, Channel, InboundMessage, OutboundMessage } from "../../shared/src/index.js";
 import {
   consumePairingCode,
@@ -27,6 +29,7 @@ import {
   getPool,
   issuePairingCode,
   latestBrief,
+  latestDigest,
   type UserScope,
 } from "../../db/src/index.js";
 
@@ -55,12 +58,51 @@ export function parsePairingToken(text: string | null): string | null {
   return match === null ? null : `boi-${match[1]!.toLowerCase()}`;
 }
 
+/**
+ * `send my friends report`, matched generously.
+ *
+ * **Advertise one phrase, match loosely around it.** Somebody told to text
+ * "send my friends report" will type "hi boi, i'd like to receive my friends report", or
+ * "friends report please", or just "report". Exact-string matching fails the user who was
+ * polite, and being told the magic words did not work is worse than never being offered
+ * them.
+ *
+ * Generous in ONE direction only. `1`, `2`, six digits and `boi-…` tokens are all matched
+ * ahead of this and are anchored to the whole message, so a draft selection cannot become
+ * a report request no matter how this widens.
+ */
+export function parseReportRequest(text: string | null): boolean {
+  if (text === null) return false;
+  // `report` is the load-bearing word; `friends` is optional because half the people who
+  // were told the phrase will drop it. A bare "friends" is NOT enough — "how are my
+  // friends" is a question this product cannot answer and must not pretend to.
+  return /\breports?\b/i.test(text);
+}
+
 export type Selection =
   | { kind: "selected"; item_index: number; candidate_index: number; candidate: Candidate; brief_id: string }
   | { kind: "ambiguous"; brief_id: string; item_count: number }
   | { kind: "no_brief" }
   | { kind: "no_drafts"; item_index: number; brief_id: string }
   | { kind: "pairing_code"; code: string; bound: boolean }
+  /**
+   * The report, on request. THREE outcomes, and the first two are not the same claim.
+   *
+   * - `no_corpus` — **"I don't have your history yet."** A claim about US. Under
+   *   AMENDMENT-002 the thread exists before the Mac app does, so the single most likely
+   *   report request in the product arrives before any digest exists: somebody reads
+   *   "text me: send my friends report" and does it immediately, or texts while the scan
+   *   is still running.
+   * - `refusal` — **"I read your history and there is not enough of it."** A claim about
+   *   THEM, and only sayable once we have actually looked.
+   * - `standard` — the card.
+   *
+   * Getting the first two backwards tells a brand-new user their friendships are too thin
+   * to measure when we simply have not looked yet. That is the confident wrong answer the
+   * architecture names as the failure that costs trust permanently, and it is one `if`
+   * away at all times.
+   */
+  | { kind: "report"; outcome: "no_corpus" | "refusal" | "standard"; cached: boolean }
   /** AMENDMENT-002: the prefilled token came back, and the account is now paired. */
   | { kind: "paired"; token: string }
   /**
@@ -200,7 +242,15 @@ export async function resolveSelection(
   }
 
   const candidateIndex = parseSelection(inbound.text);
-  if (candidateIndex === null) return { kind: "not_a_selection" };
+  if (candidateIndex === null) {
+    // THE REPORT, ON REQUEST. Ordered after every anchored matcher above and before the
+    // "reply 1 or 2" fallback, which is where a message that means something else used to
+    // land. The outcome is decided in `handleInbound`, which holds the renderer.
+    if (parseReportRequest(inbound.text)) {
+      return { kind: "report", outcome: "no_corpus", cached: false };
+    }
+    return { kind: "not_a_selection" };
+  }
 
   let itemIndex: number | null = null;
   let brief: Brief | null = null;
@@ -293,6 +343,21 @@ export function replyBlocks(selection: Selection, display?: string): OutboundMes
             : "that code is already in use. hit sign up again and i'll text you a fresh one.",
         },
       ];
+    case "report":
+      // The image and the standard-card lead-in are built in `handleInbound`, which holds
+      // the renderer and the user id. Only the two TEXT-ONLY outcomes are answered here.
+      if (selection.outcome === "no_corpus") {
+        // A claim about US, and it names the step that fixes it. Never a refusal card:
+        // "there is not enough of your history" is a different sentence and we have not
+        // earned the right to say it yet.
+        return [{
+          type: "text",
+          text:
+            "i don't have your history yet — that all happens on your mac. finish setting "
+            + "up the app (or give the first scan a minute) and ask me again.",
+        }];
+      }
+      return [];
     case "paired":
       // The download link and the contact card are built in `handleInbound`, which is
       // the only place that knows the user id. This branch returns nothing so the
@@ -368,11 +433,132 @@ export function downloadUrl(): string {
   return process.env["BOI_DOWNLOAD_URL"] ?? "https://boi.app/download";
 }
 
+/**
+ * The report, served: cache, render, send.
+ *
+ * Returns `null` when there is no corpus, which is the one outcome that is a sentence
+ * rather than an image — and the caller answers it with `replyBlocks`.
+ */
+async function serveReport(input: {
+  scope: UserScope;
+  channel: Channel;
+  renderCard?: (scope: UserScope, digest: unknown) => Promise<{
+    url: string | null;
+    kind: "standard" | "refusal" | null;
+    card_id?: string | null;
+    reason?: string | null;
+  }>;
+  now: Date;
+  timezone: string;
+  db?: ResolveDeps["db"];
+  log: (event: Record<string, unknown>) => void;
+}): Promise<HandleInboundResult | null> {
+  const { scope, channel, now, log } = input;
+
+  // NO CORPUS IS NOT A REFUSAL. Under AMENDMENT-002 the thread predates the Mac app, so
+  // this is the likeliest report request in the product — and "there is not enough of
+  // your history" would be a confident claim about somebody we have never looked at.
+  const digest = await latestDigest(scope, input.db ?? getPool());
+  if (digest === null) {
+    log({ msg: "report.no_corpus", user_id: scope.user_id });
+    return null;
+  }
+
+  const dayKey = localDayKey(now, input.timezone);
+  const cached = readTodaysCard(scope.user_id, dayKey);
+
+  let url = cached?.card_url ?? null;
+  let kind = cached?.kind ?? null;
+  if (cached === null) {
+    const rendered = input.renderCard
+      ? await input.renderCard(scope, digest.payload)
+      : { url: null, kind: null as "standard" | "refusal" | null, card_id: null };
+    url = rendered.url;
+    kind = rendered.kind;
+    if (kind !== null) {
+      writeTodaysCard(scope.user_id, {
+        day_key: dayKey,
+        card_id: rendered.card_id ?? null,
+        card_url: rendered.url,
+        kind,
+        served_at: now.toISOString(),
+      });
+    }
+  }
+
+  const blocks: OutboundMessage["blocks"] = [];
+  if (kind === "standard" && url !== null) {
+    blocks.push({ type: "text", text: "here's where your friendships stand right now:" });
+    blocks.push({ type: "image", url, alt: "your relationships this week" });
+  } else {
+    // A REFUSAL, ON REQUEST, IS FINE — and the standing rule that it is never attached to
+    // a scheduled brief still holds. Daily and unasked it is a reproach; asked for
+    // directly it is the honest answer to a direct question, and it MUST say what would
+    // change it. A refusal with no remedy is the guilt-without-agency the product
+    // conventions forbid.
+    blocks.push({
+      type: "text",
+      text:
+        "i've read your history and there isn't enough of it yet for a report i'd stand "
+        + "behind — i need more months of messages. check Settings > Messages > Keep "
+        + "Messages, and if it's set to 30 days or a year, that's the cap.",
+    });
+  }
+
+  if (cached !== null) {
+    // Served twice today. Say so rather than reprinting yesterday's number as if it were
+    // new: the card is dated by design, and a silent repeat is what makes people stop
+    // believing the figure.
+    blocks.push({
+      type: "text",
+      text: "same card as earlier today — it updates once a day, after your mac syncs.",
+    });
+  }
+
+  const message: OutboundMessage = {
+    schema_version: "outbound.v1",
+    user_id: scope.user_id,
+    // Keyed on the DAY and the attempt, so a provider redelivery of the same request does
+    // not send twice while a genuine second request still gets an answer.
+    idempotency_key: `report-${scope.user_id}-${dayKey}-${cached === null ? "first" : now.getTime()}`,
+    blocks,
+    reply_to_message_id: null,
+  };
+  await channel.send(message);
+
+  log({
+    msg: "report.served",
+    user_id: scope.user_id,
+    kind: kind ?? "none",
+    cached: cached !== null,
+  });
+  return {
+    selection: {
+      kind: "report",
+      outcome: kind === "standard" ? "standard" : "refusal",
+      cached: cached !== null,
+    },
+    sent: [message],
+  };
+}
+
 export async function handleInbound(input: {
   inbound: InboundMessage;
   channel: Channel;
   db?: ResolveDeps["db"];
   now?: Date;
+  /** The user's zone, for the day key the report cache is bucketed on. */
+  timezone?: string;
+  /**
+   * Renders and hosts a card. Absent means no renderer is configured, which is a
+   * legitimate deployment and costs the image rather than the answer.
+   */
+  renderCard?: (scope: UserScope, digest: unknown) => Promise<{
+    url: string | null;
+    kind: "standard" | "refusal" | null;
+    card_id?: string | null;
+    reason?: string | null;
+  }>;
   log?: (event: Record<string, unknown>) => void;
 }): Promise<HandleInboundResult> {
   const log = input.log ?? (() => {});
@@ -408,6 +594,26 @@ export async function handleInbound(input: {
   if (selection.kind === "no_drafts" || selection.kind === "selected") {
     const row = await latestBrief(scope, input.db ?? getPool());
     display = row?.payload.items[selection.item_index]?.display;
+  }
+
+  // THE REPORT, ON REQUEST — the path that makes the kill test runnable.
+  //
+  // Twenty people asking for their report and screenshotting it is the same evidence as
+  // twenty receiving one, and it needs no scheduler and no waiting until 8am tomorrow.
+  // People are most curious in the ninety seconds after their history finishes loading,
+  // and the scheduled brief asks them to sleep on it.
+  if (selection.kind === "report") {
+    const served = await serveReport({
+      scope,
+      channel: input.channel,
+      renderCard: input.renderCard,
+      now: input.now ?? new Date(),
+      timezone: input.timezone ?? "America/Los_Angeles",
+      db: input.db,
+      log,
+    });
+    if (served !== null) return served;
+    // No corpus: answered as text by `replyBlocks` below, with the step that fixes it.
   }
 
   // THE FIRST REPLY. AMENDMENT-002's ordering: Boi delivers the download link before it

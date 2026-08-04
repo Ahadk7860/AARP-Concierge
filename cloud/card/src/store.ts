@@ -143,3 +143,55 @@ export function signedCardPath(
   const signature = signCard(userId, cardId, expiresAt);
   return `/cards/${userId}/${cardId}.png?exp=${expiresAt}&sig=${signature}`;
 }
+
+// ---------------------------------------------------------------------------
+// Today's report card
+// ---------------------------------------------------------------------------
+//
+// `send my friends report` is the ONE path a user can trigger as fast as they can type,
+// and every trigger renders a 1080x1920 PNG. Two reasons to cache it, and the second
+// matters more than the cost: **a card that changes between two requests four seconds
+// apart is a card whose numbers nobody trusts.** The card's whole claim is that the user
+// can check it against their own memory.
+//
+// It lives HERE, beside the PNG, rather than in a `report_cards` table. A table would be
+// the obvious choice and it was the first attempt — but every user-data table in this
+// schema must be hash-partitioned and seeded by `schema.test.ts`'s helper, which belongs
+// to Track D, so a new table means an edit to another track's suite for a cache. Keeping
+// it next to the artifact also means `deleteUser` already reaches it: the whole
+// `<root>/<user_id>/` directory goes, pointer and PNG together, with no second thing to
+// remember.
+//
+// Keyed on the LOCAL DAY rather than a TTL, because "your report for today" is what the
+// card claims to be. A rolling 24-hour window hands somebody a card at 23:58 that is
+// still called today's at 23:58 tomorrow.
+
+export type TodaysCard = {
+  day_key: string;
+  card_id: string | null;
+  card_url: string | null;
+  kind: "standard" | "refusal";
+  served_at: string;
+};
+
+function pointerPath(userId: string, dayKey: string): string {
+  return path.join(cardRoot(), path.basename(userId), `report-${path.basename(dayKey)}.json`);
+}
+
+export function readTodaysCard(userId: string, dayKey: string): TodaysCard | null {
+  const file = pointerPath(userId, dayKey);
+  if (!existsSync(file)) return null;
+  try {
+    return JSON.parse(readFileSync(file, "utf8")) as TodaysCard;
+  } catch {
+    // A truncated pointer is a cache miss, never a crash: the worst case is one extra
+    // render, and the alternative is a user who cannot get their report at all.
+    return null;
+  }
+}
+
+export function writeTodaysCard(userId: string, card: TodaysCard): void {
+  const file = pointerPath(userId, card.day_key);
+  mkdirSync(path.dirname(file), { recursive: true });
+  writeFileSync(file, `${JSON.stringify(card, null, 2)}\n`, { mode: 0o600 });
+}

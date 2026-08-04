@@ -26,7 +26,8 @@ import {
 } from "../../db/src/index.js";
 import { composeBrief } from "./compose.js";
 import { deliverBrief } from "./deliver.js";
-import { nextRetry, slotFor, type UserSchedule } from "./scheduler.js";
+import { localDayKey, nextRetry, slotFor, type UserSchedule } from "./scheduler.js";
+import { readTodaysCard } from "../../card/src/store.js";
 
 export type TickOutcome =
   | { user_id: string; status: "sent"; brief_id: string; items: number; messages: number }
@@ -104,12 +105,54 @@ export function tickDeps(
  * agree: a `card_url` with no `card_kind` is a card nobody checked the kind of, which is
  * exactly the state that put a refusal card in front of a user every morning.
  */
+/**
+ * `cardFields`, reachable from a test.
+ *
+ * Exported rather than duplicated: the 7am/8am decision is one branch, and a test that
+ * reimplemented it would assert its own copy rather than the one that runs.
+ */
+export async function cardFieldsForTest(input: {
+  scope: UserScope;
+  now: Date;
+  timezone: string;
+  log: (event: Record<string, unknown>) => void;
+  cardFor: NonNullable<TickDeps["cardFor"]>;
+}): Promise<{ card_url: string | null; card_kind: "standard" | "refusal" | null }> {
+  return cardFields(
+    { now: input.now, log: input.log, cardFor: input.cardFor } as TickDeps,
+    input.scope,
+    {},
+    input.timezone,
+  );
+}
+
 async function cardFields(
   deps: TickDeps,
   scope: UserScope,
   digest: unknown,
+  timezone: string,
 ): Promise<{ card_url: string | null; card_kind: "standard" | "refusal" | null }> {
   if (deps.cardFor === undefined) return { card_url: null, card_kind: null };
+
+  // ALREADY SENT TODAY. Somebody who texted "send my friends report" at 07:00 must not
+  // get the identical image again at 08:00 with no acknowledgement — that is how a dated
+  // figure starts reading as a live one, and the card's whole claim is that the user can
+  // check it against their own memory.
+  //
+  // The brief still goes: its subject is the three people, and the card is the artifact
+  // they already have. Silence about the card beats repeating it, and the log says which
+  // happened.
+  const served = readTodaysCard(scope.user_id, localDayKey(deps.now, timezone));
+  if (served !== null) {
+    (deps.log ?? (() => {}))({
+      msg: "card.already_served_today",
+      user_id: scope.user_id,
+      consequence: "the brief goes out without an image; the user asked for it at "
+        + served.served_at,
+    });
+    return { card_url: null, card_kind: null };
+  }
+
   const card = await deps.cardFor(scope, digest);
   return { card_url: card.url, card_kind: card.kind };
 }
@@ -174,7 +217,8 @@ export async function runForUser(
     drafts: await deps.draftsFor(scope),
     // The card. `cardFor` swallows a renderer failure and returns nulls, so a card
     // that cannot be rendered costs the card and not the brief.
-    ...(await cardFields(deps, scope, digest.payload)),
+    ...(await cardFields(deps, scope, digest.payload,
+      user?.timezone ?? schedule.timezone)),
   });
 
   // Reuse the row on a resumed attempt: `unique (user_id, scheduled_for)` would reject

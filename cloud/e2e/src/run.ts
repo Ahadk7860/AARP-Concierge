@@ -35,6 +35,7 @@ import {
   registerDevice,
   latestDigest,
   listBriefs,
+  getUser,
   listOutboundMessages,
   listRelationships,
   unsafeScopeFromUserId,
@@ -339,6 +340,70 @@ export async function runEndToEnd(options: E2EOptions = {}): Promise<E2EResult> 
           return { url: card.url, kind: cardKind };
         },
       });
+    });
+
+    // ------------------------------------------------------- 7b. ASK BOI FOR THE REPORT
+    //
+    // Prompt 09, and the stage that makes the kill test runnable: twenty people asking
+    // for their report and screenshotting it is the same evidence as twenty receiving
+    // one, with no scheduler and no waiting until 8am tomorrow. `report.png` is the
+    // artifact — the card exactly as it arrives in the thread.
+    await stage("report", "send my friends report", async () => {
+      const before = channel.sent.length;
+      const result = await handleInbound({
+        inbound: {
+          schema_version: "inbound.v1",
+          provider: "mock",
+          provider_message_id: `lmsg_report_${Date.now()}`,
+          line_id: "line_e2e",
+          from_handle: (await getUser(scope))?.phone_e164 ?? "",
+          user_id: null,
+          received_at: new Date().toISOString(),
+          kind: "text",
+          text: "send my friends report",
+          protocol: "imessage",
+        },
+        channel,
+        now: eightAmLocal(TZ),
+        timezone: TZ,
+        renderCard: async (forScope, digest) => {
+          if (cardBase === null) return { url: null, kind: null };
+          const card = await renderCardForDigest(digest, {
+            baseUrl: cardBase, userId: forScope.user_id, artifactDir, log,
+          });
+          return {
+            url: card.url,
+            kind: card.kind as "standard" | "refusal" | null,
+            card_id: null,
+          };
+        },
+      });
+
+      // The IMAGE THE USER RECEIVED, fetched back from the URL that reached the thread —
+      // not the bytes the renderer returned. A card that renders and does not resolve is
+      // the defect prompt 05 was written to end.
+      const image = channel.sent.slice(before)
+        .flatMap((m) => m.blocks)
+        .find((b) => b.type === "image");
+      if (image !== undefined && image.type === "image") {
+        // Tolerated, and the reason is a real property rather than test noise: the daily
+        // cache stores an ABSOLUTE URL, so a cached card outlives only as long as the
+        // host that issued it. In production that is the long-lived card service and the
+        // signature is good for seven days. Here every run gets an ephemeral port, so a
+        // second run against the same account on the same day holds a URL whose server is
+        // gone. The artifact is evidence; failing the run over it would be the tail
+        // wagging the dog.
+        try {
+          const fetched = await fetch(image.url);
+          await writeFile(path.join(artifactDir, "report.png"),
+            Buffer.from(await fetched.arrayBuffer()));
+        } catch {
+          log({ msg: "report.cached_url_unreachable", url_host: new URL(image.url).host });
+        }
+      }
+      await writeFile(path.join(artifactDir, "report.json"),
+        JSON.stringify(channel.sent.slice(before), null, 2));
+      return result;
     });
 
     // -------------------------------------------------------------- 8. artifacts
