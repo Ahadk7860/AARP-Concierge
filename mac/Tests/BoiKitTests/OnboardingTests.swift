@@ -403,6 +403,106 @@ final class OnboardingTests: XCTestCase {
         }
     }
 
+    // MARK: - The cross-language seam
+
+    /// **Swift and TypeScript must build the same `sms:` link, and this runs both.**
+    ///
+    /// The fourth cross-language seam in this project. The two that held — `contact_id`
+    /// and the fact vocabulary — held because the *algorithm* was pinned or one side was
+    /// generated from the other. The two that diverged had their shape specified and the
+    /// algorithm left to each reader. A separator is exactly the kind of thing a schema
+    /// cannot catch: `?body=` and `&body=` are both "a string", both sides pass their own
+    /// tests, and the pairing token is silently lost.
+    ///
+    /// Built in the shape of `DigestTests`' Swift-versus-Python comparison — **both sides
+    /// computed from scratch and compared**, not one side asserted against a literal
+    /// somebody typed. `&body=` was confirmed empirically on a real Mac: the deep link
+    /// opened Messages with the number and the body prefilled.
+    ///
+    /// Node runs the real `.ts` directly via type stripping, so this needs no `npm
+    /// install` — which matters, because a worktree shares no untracked dependencies and a
+    /// test nobody can run is a test nobody runs.
+    ///
+    /// MUTATION: change `ThreadHandoff.link`/`paired` to `?body=`, or to drop the `sms:`
+    /// prefix. Red — the two sides stop agreeing.
+    func testTheSwiftAndTypeScriptDeepLinksAgree() throws {
+        let handle = "+15551234567"
+        let token = "tok_cross_language"
+
+        let script = """
+        const m = await import('./cloud/api/src/welcome.ts');
+        const out = {
+          smsDeepLink: m.smsDeepLink ? m.smsDeepLink('\(handle)') : null,
+          pairingDeepLink: m.pairingDeepLink
+            ? m.pairingDeepLink({ handle: '\(handle)', token: '\(token)' })
+            : null,
+        };
+        console.log(JSON.stringify(out));
+        """
+
+        let typescript = try Self.node(script)
+        var compared = 0
+
+        // The paired path: an existing thread, no token. Both sides say `sms:<handle>`.
+        if let theirs = typescript["smsDeepLink"] as? String {
+            XCTAssertEqual(ThreadHandoff.resolve(handle: handle, pairingToken: nil,
+                                                 isPaired: true),
+                           .paired(link: theirs),
+                           "Swift and TypeScript disagree about the paired deep link")
+            compared += 1
+        }
+
+        // The unpaired path: the token rides in the body. This is the one the separator
+        // question was about. `pairingDeepLink` arrives with Track E's prompt 08 — until
+        // that merges this side is absent, and the comparison extends to cover it with no
+        // edit here the moment it lands.
+        if let theirs = typescript["pairingDeepLink"] as? String {
+            XCTAssertEqual(ThreadHandoff.link(handle: handle, token: token), theirs,
+                           "Swift and TypeScript disagree about the pairing deep link — "
+                               + "check the &body= separator")
+            XCTAssertTrue(theirs.contains("&body="),
+                          "the empirically-confirmed separator is &body=, not ?body=")
+            compared += 1
+        }
+
+        // **The guard that stops this passing vacuously.** The `contact_id` comparison has
+        // the same one — without it, a comparison over an empty set is indistinguishable
+        // from a comparison that succeeded, which is how a cross-language test goes green
+        // for years while the two sides drift.
+        XCTAssertGreaterThan(compared, 0,
+                             "no deep-link function was compared; the TypeScript side "
+                                 + "exported neither, so this test checked nothing")
+    }
+
+    /// Runs a script against the repository root with node's type stripping, so the real
+    /// `.ts` source is the thing under test rather than a hand-copied mirror.
+    private static func node(_ script: String) throws -> [String: Any] {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["node", "--experimental-strip-types", "--input-type=module",
+                             "-e", script]
+        process.currentDirectoryURL = Fixture.repositoryRoot
+        let output = Pipe(), errors = Pipe()
+        process.standardOutput = output
+        process.standardError = errors
+        try process.run()
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        let errorText = String(data: errors.fileHandleForReading.readDataToEndOfFile(),
+                               encoding: .utf8) ?? ""
+        process.waitUntilExit()
+
+        // Fails rather than skips. A green run that checked nothing is worse than a red
+        // one, and this project has been bitten by exactly that.
+        guard process.terminationStatus == 0 else {
+            throw Fixture.FixtureUnavailable(
+                detail: "node exited \(process.terminationStatus): \(errorText)")
+        }
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw Fixture.FixtureUnavailable(detail: "node produced no JSON: \(errorText)")
+        }
+        return object
+    }
+
     // MARK: - The heartbeat that left the machine
 
     /// **`fda_granted: true`, on the wire, to a real socket.**
