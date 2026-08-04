@@ -110,6 +110,17 @@ AMENDMENT_002='^(cloud/api/src/welcome\.ts$|cloud/api/src/welcome\.test\.ts$|clo
 # amendment names these files explicitly. Not frozen, just not normally track E's.
 AMENDMENT_001='^(mac/Sources/BoiKit/(DigestBuilder|Fact[A-Za-z]*)\.swift$|mac/Tests/BoiKitTests/(Digest|Fact[A-Za-z]*)Tests\.swift$|intelligence/boi_intel/(gist|threads)\.py$|intelligence/tests/test_(gist|threads|facts)\.py$|scripts/(check_voice_pack_leak|validate_fixtures)\.py$|cloud/api/src/(schemas\.ts|schemas\.test\.ts|differential\.test\.ts|signup\.test\.ts|routes/signup\.ts)$|cloud/db/src/repository\.ts$|intelligence/boi_intel/(prompts|validator)\.py$|intelligence/tests/test_(prompts|validator|draft)\.py$|scripts/make_synthetic_chatdb\.py$)'
 
+# EVERY amendment variable, in one place. Track E found the bug this fixes: FROZEN is
+# checked first and exits, so the amendment variables — consulted only in the ownership
+# loop below — were never reached by a frozen path. The grants existed, were correct, and
+# were unreachable by control flow. A check that says OUT OF BOUNDS about a path its own
+# file explicitly permits.
+#
+# ADD A NEW AMENDMENT VARIABLE HERE AND NOWHERE ELSE. Both the frozen escape and the loop
+# read this one string, so a grant cannot be reachable in one and invisible in the other.
+AMENDMENTS="$AMENDMENT_001|$AMENDMENT_002|$AMENDMENT_002B|$AMENDMENT_002C|$AMENDMENT_003"
+SANCTIONED="$ALLOWED_FROZEN|$AMENDMENTS"
+
 if ! git rev-parse --verify --quiet "$BASE" >/dev/null; then
   echo "cannot resolve base ref '$BASE' — refusing to report a pass I cannot justify" >&2
   exit 2
@@ -118,8 +129,8 @@ changed="$(git diff --name-only "$BASE"...HEAD)"
 
 frozen_hits="$(echo "$changed" | grep -E "$FROZEN" || true)"
 if [ "$LETTER" = "e" ] && [ -n "$frozen_hits" ]; then
-  sanctioned="$(echo "$frozen_hits" | grep -E "$ALLOWED_FROZEN" || true)"
-  frozen_hits="$(echo "$frozen_hits" | grep -Ev "$ALLOWED_FROZEN" || true)"
+  sanctioned="$(echo "$frozen_hits" | grep -E "$SANCTIONED" || true)"
+  frozen_hits="$(echo "$frozen_hits" | grep -Ev "$SANCTIONED" || true)"
   if [ -n "$sanctioned" ]; then
     echo "FROZEN, SANCTIONED FOR TRACK E — must be in NOTES.md and read line-by-line at merge:"
     echo "$sanctioned" | sed 's/^/  /'
