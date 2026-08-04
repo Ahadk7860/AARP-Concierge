@@ -448,6 +448,14 @@ differently has to be pinned. Three are:
 - **Invitation, never verdict.** `"you've reached out to Sarah 12 times this month"`,
   never `"Sarah doesn't text you back"`. Every reveal ships with a one-tap remedy.
   Guilt without agency is repellent; guilt with a button is a product.
+- **A refusal with no remedy is guilt without agency** — added 4 Aug. The same rule as
+  invitation-never-verdict, stated in the case where it is hardest to follow. Every
+  refusal the product can produce says what would change it: the card's
+  `not_enough_ranked` names `Settings > Messages > Keep Messages`, and the report intent
+  distinguishes *"i don't have your history yet"* (our claim, with the setup step) from
+  *"there isn't enough of it"* (a claim about them, only sayable once we have looked).
+  Those two are one careless copy edit apart, and getting them backwards tells a
+  brand-new user their friendships are too thin to measure when nobody has looked.
 - **Never auto-send.** Ever. The approval tap costs nothing and buys everything.
 - **Don't ship reciprocity.** Across 25 real relationships the spread was 0.465–0.615,
   sd 0.034 — it carries almost no information, and it is the most legally dangerous

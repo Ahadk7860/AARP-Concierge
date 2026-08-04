@@ -101,7 +101,7 @@ export function buildServer(options: BuildOptions = {}): FastifyInstance {
     },
   );
 
-  registerIngestRoutes(app, log);
+  registerIngestRoutes(app, log, { channel });
   registerSignupRoutes(app, log, {
     channel,
     now,

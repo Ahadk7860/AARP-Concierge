@@ -17,7 +17,7 @@
 // changes its prefix changes nothing in this file.
 
 import { boiHandle } from "../../api/src/welcome.js";
-import { readTodaysCard, writeTodaysCard } from "../../card/src/store.js";
+import { readTodaysCard, todaysCardUrl, writeTodaysCard } from "../../card/src/store.js";
 import { localDayKey } from "./scheduler.js";
 import type { Brief, Candidate, Channel, InboundMessage, OutboundMessage } from "../../shared/src/index.js";
 import {
@@ -450,6 +450,7 @@ async function serveReport(input: {
   }>;
   now: Date;
   timezone: string;
+  cardBaseUrl?: string | null;
   db?: ResolveDeps["db"];
   log: (event: Record<string, unknown>) => void;
 }): Promise<HandleInboundResult | null> {
@@ -467,7 +468,10 @@ async function serveReport(input: {
   const dayKey = localDayKey(now, input.timezone);
   const cached = readTodaysCard(scope.user_id, dayKey);
 
-  let url = cached?.card_url ?? null;
+  // Rebuilt from `card_id` rather than replayed: a cached absolute URL breaks on expiry,
+  // on a key rotation and on a hostname change, and it breaks by handing the user a link
+  // that refuses to load.
+  let url = cached === null ? null : todaysCardUrl(cached, input.cardBaseUrl ?? null);
   let kind = cached?.kind ?? null;
   if (cached === null) {
     const rendered = input.renderCard
@@ -549,6 +553,8 @@ export async function handleInbound(input: {
   now?: Date;
   /** The user's zone, for the day key the report cache is bucketed on. */
   timezone?: string;
+  /** Where the card service lives, so a cached card's URL is rebuilt rather than replayed. */
+  cardBaseUrl?: string | null;
   /**
    * Renders and hosts a card. Absent means no renderer is configured, which is a
    * legitimate deployment and costs the image rather than the answer.
@@ -607,6 +613,8 @@ export async function handleInbound(input: {
       scope,
       channel: input.channel,
       renderCard: input.renderCard,
+      cardBaseUrl: input.cardBaseUrl ?? process.env["BOI_CARD_PUBLIC_BASE"]
+        ?? process.env["BOI_CARD_BASE"] ?? null,
       now: input.now ?? new Date(),
       timezone: input.timezone ?? "America/Los_Angeles",
       db: input.db,

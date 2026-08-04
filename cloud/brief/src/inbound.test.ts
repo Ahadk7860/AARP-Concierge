@@ -541,3 +541,46 @@ describe("a report request from a number we do not know", () => {
     expect(channel.sent.length).toBe(0);
   }, 120_000);
 });
+
+describe("a cached card's URL is rebuilt, not replayed", () => {
+  it("survives the host that issued it going away", async () => {
+    // A signed URL carries an expiry and a host. Caching the string looked equivalent to
+    // caching the id and is not: it breaks on expiry, on a signing-key rotation, and on a
+    // hostname change — and it breaks by handing the user a link that refuses to load,
+    // which reads to them as the product being broken.
+    const { scope, phone } = await seed();
+    await seedDigest(scope);
+    const channel = new StubChannel();
+
+    await handleInbound({
+      inbound: inboundFrom(phone, "report"),
+      channel,
+      now: NOW,
+      timezone: TZ,
+      cardBaseUrl: "http://old-host:1111",
+      renderCard: async () => ({
+        url: "http://old-host:1111/cards/x/card_abc123.png?exp=1&sig=dead",
+        kind: "standard" as const,
+        card_id: "card_abc123",
+      }),
+    });
+
+    // The service moved. The cache is unchanged and the answer must still work.
+    const again = await handleInbound({
+      inbound: inboundFrom(phone, "report"),
+      channel,
+      now: NOW,
+      timezone: TZ,
+      cardBaseUrl: "http://new-host:2222",
+      renderCard: async () => {
+        throw new Error("must not re-render: the card is cached for today");
+      },
+    });
+
+    const image = again.sent[0]!.blocks.find((b) => b.type === "image");
+    expect(image?.type === "image" && image.url).toContain("http://new-host:2222");
+    expect(image?.type === "image" && image.url).toContain("card_abc123");
+    // A FRESH signature, not the dead one that was cached.
+    expect(image?.type === "image" && image.url).not.toContain("sig=dead");
+  }, 120_000);
+});

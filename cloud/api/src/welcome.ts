@@ -161,3 +161,42 @@ export function pairingCodeMessage(userId: string, code: string): OutboundMessag
     reply_to_message_id: null,
   };
 }
+
+/**
+ * What Boi says the moment the first digest lands.
+ *
+ * Two facts and one instruction, in that order:
+ *
+ * 1. **The corpus size**, because it is the first evidence the user has that anything
+ *    happened on their machine. "I read 83,887 messages" is checkable against their own
+ *    sense of how much they text, which is the same property the card is built on.
+ * 2. **Where it stayed.** The one sentence the whole architecture exists to earn.
+ * 3. **The exact phrase to text back** — printed, not hinted at. A product that says
+ *    "just ask me for your report" has invented a guessing game; `parseReportRequest`
+ *    matches generously precisely because people will not type it exactly, but they have
+ *    to be given something to be inexact about.
+ */
+export function firstSyncOffer(userId: string, digest: {
+  corpus?: { message_count?: number; thread_count?: number };
+}): OutboundMessage {
+  const messages = digest.corpus?.message_count ?? 0;
+  const threads = digest.corpus?.thread_count ?? 0;
+  return {
+    schema_version: "outbound.v1",
+    user_id: userId,
+    // One offer per account, ever. `messages_out` has `unique (user_id, idempotency_key)`,
+    // so a Mac that re-uploads cannot make this arrive twice.
+    idempotency_key: `firstsync-${userId}`,
+    blocks: [
+      {
+        type: "text",
+        text:
+          `all set — i read ${messages.toLocaleString("en-US")} messages across `
+          + `${threads.toLocaleString("en-US")} conversations, and every one of them `
+          + "stayed on your mac.",
+      },
+      { type: "text", text: "want to see where things stand? text me: send my friends report" },
+    ],
+    reply_to_message_id: null,
+  };
+}

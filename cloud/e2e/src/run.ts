@@ -366,6 +366,7 @@ export async function runEndToEnd(options: E2EOptions = {}): Promise<E2EResult> 
         channel,
         now: eightAmLocal(TZ),
         timezone: TZ,
+        cardBaseUrl: cardBase,
         renderCard: async (forScope, digest) => {
           if (cardBase === null) return { url: null, kind: null };
           const card = await renderCardForDigest(digest, {

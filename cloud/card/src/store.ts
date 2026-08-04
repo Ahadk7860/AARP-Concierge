@@ -167,6 +167,8 @@ export function signedCardPath(
 // still called today's at 23:58 tomorrow.
 
 export type TodaysCard = {
+  /** Carried so the URL can be rebuilt without the caller having to remember whose it is. */
+  user_id_for_url: string;
   day_key: string;
   card_id: string | null;
   card_url: string | null;
@@ -190,8 +192,31 @@ export function readTodaysCard(userId: string, dayKey: string): TodaysCard | nul
   }
 }
 
-export function writeTodaysCard(userId: string, card: TodaysCard): void {
+/**
+ * Today's card as a URL that is valid NOW, rebuilt from the stored `card_id`.
+ *
+ * **The pointer stores the id; the URL is derived at serve time.** Caching an absolute
+ * URL looked equivalent and is not: a signed URL carries an expiry and a host, so a cached
+ * one breaks when the signature ages out, when the signing key rotates, and when the
+ * service moves — and it breaks by handing the user a link that 401s or refuses to
+ * connect, which reads to them as the product being broken.
+ *
+ * Found in the end-to-end runner, where each run gets an ephemeral port and a second run
+ * on the same day held a URL whose server was gone. That is the same bug wearing a
+ * costume: the host that issued a cached URL is not guaranteed to be the host that serves
+ * it later.
+ *
+ * Falls back to the stored URL when there is no `card_id` — pointers written before this
+ * existed, and refusals, which have no stored card at all.
+ */
+export function todaysCardUrl(card: TodaysCard, base: string | null): string | null {
+  if (card.card_id === null || base === null || base === "") return card.card_url;
+  return `${base.replace(/\/$/, "")}${signedCardPath(card.user_id_for_url, card.card_id)}`;
+}
+
+export function writeTodaysCard(userId: string, card: Omit<TodaysCard, "user_id_for_url">): void {
   const file = pointerPath(userId, card.day_key);
   mkdirSync(path.dirname(file), { recursive: true });
-  writeFileSync(file, `${JSON.stringify(card, null, 2)}\n`, { mode: 0o600 });
+  writeFileSync(file, `${JSON.stringify({ ...card, user_id_for_url: userId }, null, 2)}\n`,
+    { mode: 0o600 });
 }

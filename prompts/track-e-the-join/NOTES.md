@@ -996,6 +996,29 @@ Worth carrying: **storing `card_id` and rebuilding the URL at serve time would b
 strictly better** — fresh expiry, no dependence on the issuing host — and is a small change
 whenever the card service gets a stable hostname.
 
+### The cache is per-process, and that is a deploy-time fact
+
+A file-based cache means **two API instances have two caches**, so a user could get two
+renders on the same local day from different hosts. Harmless today — one process — and it
+is written down here rather than discovered at deploy: the moment there are two, the fix is
+a shared store, not a bigger file.
+
+### A migration that ran is not undone by deleting its file
+
+`010_report_cards` was written, applied to `boi_dev_d`, then abandoned in favour of the
+file-based cache. Deleting the `.sql` left the **table** behind, and Track D's catalog walk
+— which enumerates user-data tables rather than reading a list — correctly failed on a
+table that was partitioned by nobody and seeded by nothing. Dropped by hand.
+
+### A figure meant to be checked reads as live if it silently repeats
+
+The 7am/8am rule generalises past the cache, and it is a property of **the card** rather
+than of the mechanism: the card's whole claim is that the user can check it against their
+own memory, which means it has to be legible as *dated*. Sending the same number again an
+hour later without saying so converts a snapshot into a live reading, and the user has no
+way to tell. Anywhere a dated artifact can be re-delivered, either say when it was made or
+do not send it twice.
+
 ### Three more assertions that counted globally
 
 Adding the report stage broke three e2e tests, all of which counted across *every* outbound

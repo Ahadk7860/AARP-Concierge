@@ -87,6 +87,15 @@ AMENDMENT_002B='^(cloud/api/src/pairing\.test\.ts$|cloud/db/migrations/|cloud/sh
 # selected by omission, and let those ten go red under the mapping table.
 AMENDMENT_002C='^cloud/api/src/server\.ts$'
 
+# AMENDMENT-002D — `routes/ingest.ts`, granted 4 Aug for prompt 09's last criterion.
+# Own variable, per the rule.
+#
+# "After the first sync, Boi sends the corpus size and the exact phrase to text back" has
+# to fire when the FIRST digest lands, which is the ingest route. The 8am tick is the one
+# seam track E already owns; this is the other end of the same requirement and it was
+# never granted.
+AMENDMENT_002D='^cloud/api/src/routes/ingest\.ts$'
+
 # AMENDMENT-003 — prompt 08, the nullable `digest_as_of`. Its own variable, same reason
 # as 002: a grant appended to a neighbouring line can be lost to a concurrent edit with
 # no conflict and no error, and the gate then goes green because the rule that would have
@@ -118,7 +127,7 @@ AMENDMENT_001='^(mac/Sources/BoiKit/(DigestBuilder|Fact[A-Za-z]*)\.swift$|mac/Te
 #
 # ADD A NEW AMENDMENT VARIABLE HERE AND NOWHERE ELSE. Both the frozen escape and the loop
 # read this one string, so a grant cannot be reachable in one and invisible in the other.
-AMENDMENTS="$AMENDMENT_001|$AMENDMENT_002|$AMENDMENT_002B|$AMENDMENT_002C|$AMENDMENT_003"
+AMENDMENTS="$AMENDMENT_001|$AMENDMENT_002|$AMENDMENT_002B|$AMENDMENT_002C|$AMENDMENT_002D|$AMENDMENT_003"
 SANCTIONED="$ALLOWED_FROZEN|$AMENDMENTS"
 
 if ! git rev-parse --verify --quiet "$BASE" >/dev/null; then
@@ -172,6 +181,10 @@ while IFS= read -r f; do
   fi
   if [ "$LETTER" = "e" ] && echo "$f" | grep -Eq "$AMENDMENT_002C"; then
     echo "AMENDMENT-002C (server.ts — makes the new flow the DEFAULT, read at merge): $f"
+    continue
+  fi
+  if [ "$LETTER" = "e" ] && echo "$f" | grep -Eq "$AMENDMENT_002D"; then
+    echo "AMENDMENT-002D (ingest route — the first-sync greeting): $f"
     continue
   fi
   if [ "$LETTER" = "e" ] && echo "$f" | grep -Eq "$AMENDMENT_003"; then

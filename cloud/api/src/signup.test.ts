@@ -24,6 +24,8 @@ import {
 } from "../../db/src/index.js";
 import { buildServer } from "./server.js";
 import { allowedCountryCodes, countryCodeAllowed } from "./routes/signup.js";
+import { firstSyncOffer } from "./welcome.js";
+import { parseReportRequest } from "../../brief/src/inbound.js";
 
 let app: FastifyInstance;
 
@@ -103,5 +105,43 @@ describe("signup is US-only at launch", () => {
       if (saved === undefined) delete process.env["BOI_ALLOWED_COUNTRY_CODES"];
       else process.env["BOI_ALLOWED_COUNTRY_CODES"] = saved;
     }
+  });
+});
+
+describe("the first sync offers the report", () => {
+  // Prompt 09's other end. Until this existed the earliest a new user could see their
+  // report was 8am tomorrow — and people are most curious in the ninety seconds after
+  // their history finishes loading, not the next morning.
+
+  it("says the corpus size, where it stayed, and the exact phrase to text back", () => {
+    const offer = firstSyncOffer("usr_firstsync001", {
+      corpus: { message_count: 83887, thread_count: 422 },
+    });
+    const said = offer.blocks.map((b) => (b.type === "text" ? b.text : "")).join(" ");
+
+    // The size is the first evidence anything happened on their machine, and it is
+    // checkable against their own sense of how much they text.
+    expect(said).toContain("83,887");
+    expect(said).toContain("422");
+    // The sentence the architecture exists to earn.
+    expect(said).toContain("stayed on your mac");
+    // PRINTED, not hinted at. "Just ask me for your report" is a guessing game.
+    expect(said).toContain("send my friends report");
+  });
+
+  it("is keyed so a re-uploading Mac cannot make it arrive twice", () => {
+    expect(firstSyncOffer("usr_firstsync001", {}).idempotency_key).toBe("firstsync-usr_firstsync001");
+  });
+
+  it("is the phrase the matcher actually accepts", () => {
+    // The two halves of this requirement live in different packages, and the failure is
+    // silent in both directions: a phrase nobody matches, or a matcher for a phrase
+    // nobody was given.
+    const offer = firstSyncOffer("usr_firstsync001", {});
+    const phrase = /text me: (.+)$/m.exec(
+      offer.blocks.map((b) => (b.type === "text" ? b.text : "")).join("\n"),
+    );
+    expect(phrase).not.toBeNull();
+    expect(parseReportRequest(phrase![1] as string)).toBe(true);
   });
 });
