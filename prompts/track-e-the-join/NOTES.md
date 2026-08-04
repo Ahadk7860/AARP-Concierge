@@ -865,6 +865,23 @@ representations fail to make. Swapping `.nullable()` for `.optional()` on
 wrong — and that distinction was the entire content of AMENDMENT-003. Direct assertions,
 not the differential, are what hold a required-and-nullable field in place.
 
+### A down migration that cannot run is not a rollback
+
+The first version of `009…down.sql` re-added the six-digit constraint and let Postgres
+refuse if a `boi-…` token was still stored — on the reasoning, written into the file, that
+rolling back a widening over wider data is a data question rather than a schema one.
+
+**The gate proved that wrong within one run.** `rollbackAll` is how
+`cloud/db/src/schema.test.ts` rebuilds the schema, so a single leftover token from a test
+made an entire suite of Track D's unable to start — 28 tests reported as *skipped*, which
+is the failure mode `gate.sh`'s no-silently-skipped check exists to catch, arriving from a
+direction nobody had aimed it at.
+
+The down migration now deletes the tokens it cannot represent. That is safe for this data
+in a way it would not be for a normal table: a pairing secret is single-use, at most ten
+minutes old, and reissued by signing up again. Worst case for a real user is one extra tap;
+worst case for the old behaviour was a schema that could not be rolled back at all.
+
 ### Open
 
 - **The Mac's claim of its device token is Track F's.** The account is paired before the
