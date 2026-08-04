@@ -28,15 +28,15 @@ import { StubChannel } from "../../shared/src/index.js";
 import { buildServer } from "../../api/src/server.js";
 import { buildCardServer } from "../../card/src/server.js";
 import { runForUser } from "../../brief/src/run.js";
+import { handleInbound } from "../../brief/src/inbound.js";
 import { bridgeDeps, gistOutcomeFor, draftsForGists } from "../../intelligence-bridge/src/index.js";
 import {
-  createUser,
-  issuePairingCode,
+  findUserIdByPhone,
+  registerDevice,
   latestDigest,
   listBriefs,
   listOutboundMessages,
   listRelationships,
-  newPairingCode,
   unsafeScopeFromUserId,
   type UserScope,
 } from "../../db/src/index.js";
@@ -190,33 +190,82 @@ export async function runEndToEnd(options: E2EOptions = {}): Promise<E2EResult> 
   }
 
   try {
-    // -------------------------------------------------------------- 4. signup + pair
-    const scope = options.reuseScope ?? (await stage("signup", "account, phone is the join key",
-      async () => {
-        const phone = `+1555${Math.floor(Math.random() * 9_000_000 + 1_000_000)}`;
-        const { scope } = await createUser({ phone_e164: phone, timezone: TZ });
-        return scope;
-      }));
+    // ------------------------------------------------- 4. signup, and THE USER GOES FIRST
+    //
+    // AMENDMENT-002. This stage used to call `createUser` and then pair with a six-digit
+    // code over `POST /v1/pair` — which exercised neither the signup surface nor the
+    // thread. It now runs the flow the product actually has: sign up over HTTP, read the
+    // deep link off the confirmation page, and send the message the link prefills.
+    const signup = options.reuseScope === undefined
+      ? await stage("signup", "register both handles, resolve the line, prefill the link",
+        async () => {
+          const phone = `+1555${Math.floor(Math.random() * 9_000_000 + 1_000_000)}`;
+          const email = `mac-${Math.random().toString(16).slice(2, 8)}@example.com`;
+          const response = await fetch(`http://127.0.0.1:${apiPort}/signup`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ phone_e164: phone, email, accept_terms: true }),
+          });
+          if (response.status !== 200) throw new Error(`signup failed: ${response.status}`);
+          const html = await response.text();
+          // Parsed out of the page exactly as the user's browser would hand it to
+          // Messages. If this regex stops matching, the link stopped working.
+          const link = /href="sms:([^&"]+)&amp;body=([^"]+)"/.exec(html);
+          if (link === null) throw new Error("no prefilled deep link on the confirmation page");
+          const scope = await findUserIdByPhone(phone);
+          if (scope === null) throw new Error("signup created no account");
+          return {
+            scope,
+            phone,
+            line: link[1] as string,
+            token: decodeURIComponent(link[2] as string),
+          };
+        })
+      : null;
+    const scope = options.reuseScope ?? signup!.scope;
 
     // The device id the Mac derives for itself, so pairing registers the one it will use.
-    const deviceId = await stage("pair", "six digits for a device token", async () => {
+    const deviceId = await stage("pair", "the user sends the prefilled message", async () => {
       const { stdout } = await run("/usr/bin/python3", ["-c",
         "import hmac,hashlib,sys;" +
         "print('dev_'+hmac.new(sys.argv[1].encode(),b'boi.local.device',hashlib.sha256)" +
         ".hexdigest()[:16])", SALT]);
       const id = stdout.trim();
-      const code = newPairingCode();
-      await issuePairingCode(scope, { code, ttl_seconds: 600 });
-      const paired = await fetch(`http://127.0.0.1:${apiPort}/v1/pair`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ code, device_id: id }),
-      });
-      if (paired.status !== 200) throw new Error(`pair failed: ${paired.status}`);
-      const body = (await paired.json()) as { device_token: string };
+
+      if (signup !== null) {
+        // THE USER'S FIRST MESSAGE, carrying the token the link prefilled. Boi replies
+        // with the download link — useful before it asks for anything.
+        const result = await handleInbound({
+          inbound: {
+            schema_version: "inbound.v1",
+            provider: "mock",
+            provider_message_id: `lmsg_${id}`,
+            line_id: "line_e2e",
+            from_handle: signup.phone,
+            user_id: null,
+            received_at: new Date().toISOString(),
+            kind: "text",
+            text: signup.token,
+            protocol: "imessage",
+          },
+          channel,
+          log,
+        });
+        if (result.selection.kind !== "paired") {
+          throw new Error(`pairing failed: ${result.selection.kind}`);
+        }
+        await writeFile(path.join(artifactDir, "first-reply.json"),
+          JSON.stringify(result.sent, null, 2));
+      }
+
+      // The device token. Under AMENDMENT-002 the ACCOUNT is already paired by the time
+      // the app exists, so the Mac no longer types a code — it is issued a token for the
+      // device id it derived. The app-side claim of that token is Track F's onboarding
+      // surface; this is the server half it will consume.
+      const { device_token } = await registerDevice(scope, { device_id: id });
       await writeFile(path.join(artifactDir, "pairing.json"),
         JSON.stringify({ device_id: id, user_id: scope.user_id }, null, 2));
-      return { id, token: body.device_token };
+      return { id, token: device_token };
     });
 
     // -------------------------------------------------------------- 5. THE MAC

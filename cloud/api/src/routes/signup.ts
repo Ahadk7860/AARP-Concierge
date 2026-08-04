@@ -16,26 +16,15 @@ import {
   createUser,
   findUserIdByPhone,
   getUser,
-  insertOutboundMessage,
   issuePairingCode,
-  markOutboundSent,
-  newOutboundMessageId,
   newPairingCode,
   registerDevice,
-  setHandleStatus,
   type HandleStatus,
   type UserScope,
 } from "../../../db/src/index.js";
 import { invalidCode, send, validation } from "../errors.js";
 import { logEvent } from "../logging.js";
-import {
-  boiHandle,
-  newPairingToken,
-  pairingCodeMessage,
-  pairingDeepLink,
-  smsDeepLink,
-  welcomeMessage,
-} from "../welcome.js";
+import { newPairingToken, pairingDeepLink, smsDeepLink } from "../welcome.js";
 import { FixedWindowLimiter, PAIR_LIMIT } from "../limiter.js";
 
 /** Ten minutes. `contracts/openapi/boi-api.v1.yaml`: "Single use, 10 minute expiry". */
@@ -94,12 +83,19 @@ export type Clock = () => Date;
 export type SignupDeps = {
   channel: Channel;
   /**
-   * AMENDMENT-002. Optional so a caller that has not been updated still compiles and
-   * still works — without one, signup falls back to the pre-amendment flow, which is the
-   * documented fallback rather than a silent degradation. `signup.no_registrar` says so
-   * on every request that takes that path.
+   * AMENDMENT-002. **REQUIRED**, and it was optional for exactly one commit.
+   *
+   * Optional-with-a-fallback made the retired cold open the DEFAULT: every deployment and
+   * the end-to-end runner would have kept sending first until somebody remembered to pass
+   * a registrar. That is a feature flag nobody set, defaulting to the behaviour we have
+   * evidence is harmful — a line that initiates to somebody who has not written first
+   * gets iMessage's spam-report affordance attached to Boi's first words.
+   *
+   * `buildServer` defaults it to `StubRegistrar`, so a server with no transport still
+   * starts and hands out obviously-fake `+1555…` lines. Loud beats plausible: there is no
+   * longer any way to select the old flow by forgetting something.
    */
-  registrar?: Registrar;
+  registrar: Registrar;
   /** Injected so expiry can be tested by moving the clock, not by sleeping. */
   now: Clock;
   /** Shared so a test can reset it; per-process, which is a real limitation. */
@@ -298,95 +294,21 @@ export function registerSignupRoutes(
     // The user opens the thread. Nothing is sent from here: a line that initiates to
     // somebody who has not written first gets iMessage's spam-report affordance attached,
     // which is worse than the filtered tab the old flow was avoiding.
-    if (deps.registrar !== undefined) {
-      return await signupUserGoesFirst(input, deps.registrar, reply);
-    }
-    logEvent(log, { msg: "signup.no_registrar", route: "/signup" });
-
-    // Phone is the join key, and `users.phone_e164` is unique. Signing up twice is a
-    // normal thing for a person to do, so it re-sends rather than erroring.
-    const existing = await findUserIdByPhone(input.phone_e164);
-    if (existing !== null) {
-      const user = await getUser(existing);
-      // RE-ISSUE. Signing up again is what somebody does when the first code expired,
-      // and returning the same page without a fresh code left that account permanently
-      // unpairable after ten minutes.
-      const reissued = await mintUniqueCode(existing, deps.now());
-      await sendPairingCode(deps.channel, existing, reissued, log);
-      logEvent(log, {
-        msg: "signup.reissued",
-        route: "/signup",
-        user_id: existing.user_id,
-      });
-      return reply
-        .type("text/html; charset=utf-8")
-        .header("x-boi-pairing-code", reissued)
-        .send(confirmationPage({ handle: boiHandle(), status: user?.handle_status ?? "unknown" }));
-    }
-
-    const { scope } = await createUser({
-      phone_e164: input.phone_e164,
-      email: input.email ?? null,
-      timezone: input.timezone ?? undefined,
-    });
-
-    // THE SEND HAPPENS BEFORE THE RESPONSE RETURNS. Not queued, not fired and
-    // forgotten: the confirmation page tells the user to go look at a message, so the
-    // message has to exist by the time they read that sentence.
-    const message = welcomeMessage(scope.user_id);
-    let status: HandleStatus = "unreachable";
-    try {
-      const result = await deps.channel.send(message);
-
-      // HANDLE-MISMATCH DETECTION. `imessage` means the handle they typed is registered
-      // to iMessage. Anything else means it is not, and we know NOW — before they have
-      // downloaded the Mac app — rather than after the first brief lands as a green
-      // text and nothing works properly.
-      status = result.protocol === "imessage" ? "imessage" : "mismatch";
-
-      await insertOutboundMessage(scope, {
-        message_id: newOutboundMessageId(),
-        idempotency_key: message.idempotency_key,
-        blocks: message.blocks,
-      });
-      await markOutboundSent(scope, message.idempotency_key, {
-        protocol: result.protocol,
-        provider: result.provider,
-        provider_message_id: result.message_id,
-        line_id: result.line_id,
-      });
-    } catch (err) {
-      // A line that is banned or down is not the user's problem to solve on this page,
-      // but it must not be reported as success either.
-      logEvent(log, {
-        msg: "signup.send_failed",
-        route: "/signup",
-        user_id: scope.user_id,
-        violations: err instanceof Error ? err.message : "unknown",
-      });
-    }
-
-    await setHandleStatus(scope, status);
-
-    // The pairing code is minted here so it exists the moment the Mac app asks for one,
-    // and TEXTED, because a response header is not a path to the user. The welcome
-    // message tells them to text their pairing code; until this existed, nothing had
-    // ever given them one.
-    const code = await mintUniqueCode(scope, deps.now());
-    await sendPairingCode(deps.channel, scope, code, log);
-
-    logEvent(log, {
-      msg: "signup.created",
-      route: "/signup",
-      user_id: scope.user_id,
-      status: status === "imessage" ? 200 : 409,
-    });
-
-    return reply
-      .type("text/html; charset=utf-8")
-      .header("x-boi-pairing-code", code) // dev affordance; the real code arrives by text
-      .send(confirmationPage({ handle: boiHandle(), status }));
+    return await signupUserGoesFirst(input, deps.registrar, reply);
   });
+
+  // -------------------------------------------------------------------------
+  // The pre-AMENDMENT-002 signup handler stood here: create the user, SEND FIRST with
+  // a contact card, text a six-digit code, render a confirmation page pointing at a
+  // constant handle. It is deleted rather than parked behind a flag or a spare route —
+  // a retired route nobody routes to is still a route somebody can hit, and an optional
+  // registrar with a legacy fallback is a feature flag nobody set, defaulting to the
+  // behaviour the filter test showed is harmful.
+  //
+  // What survives, deliberately: `welcomeMessage` (a frozen fixture conforms to it),
+  // `pairingCodeMessage`, and `POST /v1/pair` with six-digit codes, because Track F is
+  // mid-flight against that endpoint and the amendment's own fallback is the old flow
+  // PLUS the deep link rather than the old flow alone.
 
   // -------------------------------------------------------------------------
   const pairLimiter = deps.pairLimiter ?? new FixedWindowLimiter(PAIR_LIMIT);
@@ -459,24 +381,6 @@ export function registerSignupRoutes(
  * live elsewhere; with a ten-minute window and a million codes a collision is rare, and
  * retrying is cheaper than widening the code.
  */
-/** Text the code. A failure here is logged, not fatal — the account still exists. */
-async function sendPairingCode(
-  channel: Channel,
-  scope: UserScope,
-  code: string,
-  log: Logger,
-): Promise<void> {
-  try {
-    await channel.send(pairingCodeMessage(scope.user_id, code));
-  } catch (err) {
-    logEvent(log, {
-      msg: "signup.code_send_failed",
-      route: "/signup",
-      user_id: scope.user_id,
-      violations: err instanceof Error ? err.message : "unknown",
-    });
-  }
-}
 
 async function mintUniqueCode(
   scope: UserScope,

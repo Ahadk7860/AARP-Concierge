@@ -77,6 +77,16 @@ ALLOWED_FROZEN='^(prompts/CONTRACTS\.md$|contracts/transcripts/spectrum/|cloud/s
 #   shared/src/index.ts a one-line `export *` append.
 AMENDMENT_002B='^(cloud/api/src/pairing\.test\.ts$|cloud/db/migrations/|cloud/shared/src/(stub-registrar\.ts|index\.ts)$)'
 
+# AMENDMENT-002C — `server.ts`, granted 4 Aug. Its own variable, per the rule.
+#
+# Track E's diagnosis is why this is granted rather than deferred: `registrar` is
+# currently OPTIONAL on `SignupDeps` with a legacy fallback, which is why track D's ten
+# pairing tests are still green. That is not the amendment landing softly — it means the
+# cold-open flow the test proved harmful is STILL THE DEFAULT, and stays the default
+# until `buildServer` forwards a registrar. Make it required so the old path cannot be
+# selected by omission, and let those ten go red under the mapping table.
+AMENDMENT_002C='^cloud/api/src/server\.ts$'
+
 # AMENDMENT-003 — prompt 08, the nullable `digest_as_of`. Its own variable, same reason
 # as 002: a grant appended to a neighbouring line can be lost to a concurrent edit with
 # no conflict and no error, and the gate then goes green because the rule that would have
@@ -147,6 +157,10 @@ while IFS= read -r f; do
   fi
   if [ "$LETTER" = "e" ] && echo "$f" | grep -Eq "$AMENDMENT_002B"; then
     echo "AMENDMENT-002B (granted 4 Aug — pairing.test.ts DELETES assertions, read it at merge): $f"
+    continue
+  fi
+  if [ "$LETTER" = "e" ] && echo "$f" | grep -Eq "$AMENDMENT_002C"; then
+    echo "AMENDMENT-002C (server.ts — makes the new flow the DEFAULT, read at merge): $f"
     continue
   fi
   if [ "$LETTER" = "e" ] && echo "$f" | grep -Eq "$AMENDMENT_003"; then

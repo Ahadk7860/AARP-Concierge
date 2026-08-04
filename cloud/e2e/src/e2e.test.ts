@@ -228,7 +228,13 @@ describe("the whole pipe, end to end", () => {
     expect(images[0]?.url).toBe(result.cardUrl);
 
     // It rides the LEAD, and it rides it before the line that leads into the items.
-    const lead = result.outbound[0];
+    //
+    // Found by KEY rather than by position: since AMENDMENT-002 the channel's first
+    // message is Boi's reply to the user's pairing text, so `outbound[0]` is no longer
+    // the brief's lead. A positional assumption that was true when it was written and
+    // false two prompts later.
+    const lead = result.outbound.find((m) => m.idempotency_key.endsWith("-lead"));
+    expect(lead, JSON.stringify(result.outbound.map((m) => m.idempotency_key))).toBeDefined();
     const imageIndex = lead!.blocks.findIndex((b) => b.type === "image");
     const framingIndex = lead!.blocks.findIndex(
       (b) => b.type === "text" && /worth a message today/.test(b.text));

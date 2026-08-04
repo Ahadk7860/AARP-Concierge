@@ -13,6 +13,7 @@ ambiguity found, and every place a prompt's stated assumption turned out to be w
 | 04 | `package.json` | Appended the `e2e` script. | `npm run e2e` is the prompt's stated entry point. |
 | 05 | `package.json` | Appended the `card` script. | `cloud/card/src/main.ts` is a real entry point now that the renderer stores things; the test suite starts it as a child process to prove a card is fetchable by something that is not the test. |
 | 05 | `.env.example` | Appended `BOI_CARD_DIR`, `BOI_CARD_SIGNING_SECRET`, `BOI_CARD_PUBLIC_BASE`. | The first is the directory the renderer and `deleteUser` share instead of an import, so it has to be nameable from both sides. The second is a bearer-token secret and its default is labelled as a development value in the file itself. |
+| 08 | `cloud/db/migrations/009_pairing_token_format.*` | New migration: the `pairing_codes` shape constraint widens to accept `boi-4f2a91` as well as six digits. | The constraint is documentation. Holding an opaque token in a column whose check says "six digits" makes the schema describe the design we replaced. A second table was rejected — identical lifecycle, so it would duplicate the single-use, expiry, binding and partial index forever. |
 | 07 | `package.json` | Appended the `scheduler` script. | `npm run scheduler` is the prompt's stated entry point. |
 | 06 | `contracts/schema/draft_bundle.v1.json`, `intelligence/boi_intel/contracts.py` | `validator.failures` gains `stale_tense_gate`, in the schema and in the Python mirror. **A union widening: every document that validates today still validates.** | The gate needs a slug of its own or a failure list cannot tell a stale-tense refusal from a fabrication refusal. Both files are FROZEN; the user ruled the widening in and `ALLOWED_FROZEN` now covers the schema (the mirror was already covered). |
 | 06 | `prompts/CONTRACTS.md` | Appended three subsections to § 1 (the `as_of`/tense rule, the hedge-allowlist clarification, the empty-collection guard rule) and one to § 2 (US-only signup). Nothing reordered, nothing removed. | Prompt 06's own DoD: "Both rules land in `CONTRACTS.md` — an append". These are exactly the rules that were lost between the architecture and this file, which is why four merged tracks could not have built them. `CONTRACTS.md` is FROZEN, so `ALLOWED_FROZEN` gained it for track E — announced on every ownership run and read line-by-line at merge. |
@@ -783,6 +784,99 @@ production is a product that stops sending and looks healthy.
   to reimplement badly. A second instance exits rather than waiting, so a rolling deploy
   has a gap of up to one interval — acceptable at one sweep per five minutes against a
   fifteen-minute window, and worth revisiting before there is more than one region.
+
+## Prompt 08 — the user opens the thread
+
+The five-minute test passed on a clean device: the user sent first and the reply landed in
+the main conversation list. The second observation is the one that settles the old design
+— when the **line** initiates to somebody who has not written first, iMessage attaches the
+spam-report affordance. § 4.1 was walking into a *report junk* button under Boi's first
+words, every time. Recorded in full in `AMENDMENT-002`, including the contaminated first
+attempt: the same handle had been texted earlier that day, so the reply landed in the main
+list because of history and the test would have passed while proving nothing.
+
+### What `pairing.test.ts` lost, gained, and kept — all ten, with reasons
+
+An amendment is perfect cover for losing coverage, so this is mechanical. **Roughly half
+were about a moment that MOVED rather than a requirement that died.**
+
+| # | The assertion | Verdict | Where it went, or why it died |
+|---|---|---|---|
+| 1 | sends the welcome message BEFORE the response returns | **replaced** | → *"SENDS NOTHING at signup"*. Its logic was right for its flow — the page told the user to look at a text, so the text had to exist. There is no text now. |
+| 2 | sends both a text block and a contact_card block | **relocated** | → `inbound.test.ts`, *"pairs, and answers with the download link and the contact card"*. The card moved to Boi's first reply; the blocks are asserted where they are now sent. |
+| 3 | matches the shape of `first_contact_card.json` | **relocated** | → `welcome.test.ts`, *"still conforms to the frozen fixture"*. The fixture is frozen and unchanged; only its sender moved. |
+| 4 | records the send in `messages_out`, once, even if signup is repeated | **replaced** | → folded into #1, which asserts `messages_out` is **zero** after signup. Nothing sent, nothing recorded. |
+| 5 | puts a working `sms:` deep link on the confirmation page | **replaced** | → *"puts THAT USER'S line in the deep link, with the token prefilled"*. The old one asserted `href="sms:${boiHandle()}"` — a **constant** — and the pool is shared. |
+| 6 | rejects signup without accepted terms, and does not send | **kept** | Unchanged and still true. |
+| 7 | accepts the HTML form's urlencoded body | **kept** | Unchanged. |
+| 8 | does not treat the string `"false"` as consent | **kept** | Unchanged. |
+| 9 | flags a send that came back as sms rather than imessage | **relocated** | → *"handle-mismatch detection, relocated to the inbound"*. The fact now comes from the protocol of the message the USER sent, which is **better evidence**: an outbound says how we reached them, an inbound says what their Messages app is. |
+| 10 | records imessage when the send lands as imessage | **relocated** | Same block, plus a third case the old pair could not express: a transport reporting **no** protocol claims nothing rather than defaulting to mismatch. |
+| 11 | does not report success when the line is banned | **replaced** | → *"says so when the transport is unreachable, rather than rendering a dead link"*. The requirement survives exactly: silently succeeding at signup is the same defect in new clothes. |
+| 12 | RE-ISSUES on re-signup, so an expired code is not a dead end | **replaced** | → *"RE-ISSUES a fresh token on re-signup"*. Identical requirement; what died is the assertion that the new secret is **texted**. |
+| 13 | is TEXTED at signup, not just returned as an HTTP header | **deleted** | The only genuine deletion. It fixed a real bug — the code left only as a response header — and the amendment **dissolves** the bug rather than fixing it: the secret is prefilled into the user's own message, so it never has to reach them. |
+
+Thirteen rather than ten: two more turned up in neighbouring `describe`s once the flow
+changed. One deletion, four replacements, four relocations, four untouched.
+
+### Two near-misses, both about dependency direction
+
+**`cloud/db/src/ids.ts` is not granted**, and the pairing-token generator went there first
+because that is where `newPairingCode` lives. Moved to the onboarding surface rather than
+assuming the grant.
+
+**`firstReplyMessage` in `welcome.ts` made `cloud/brief` import `cloud/api` for the first
+time** — the same inverted arrow as the `Registrar` ruling, three files later, and it
+compiled cleanly. It now lives in `inbound.ts`, where the reply is handled.
+
+Worth stating as a standing property rather than two incidents: **dependency direction is
+something somebody has to actively defend.** It has tried to invert twice in one prompt,
+both times through a change that looked like filing two related things together. The
+compiler is no help — every one of those imports type-checks.
+
+### A stub that returns a constant makes the bug untestable
+
+`StubRegistrar` hands every user a **different** line, derived from their id. A stub
+returning one constant would let a caller build the deep link from a hard-coded number and
+pass every test — the shared pool is the whole reason the link cannot be a constant, so the
+stub would have made the defect it exists to model unreachable.
+
+New false-green shape, and the stub enables it rather than the test: **a stub that returns
+a constant where production returns a variable.**
+
+### The registrar was optional for exactly one commit
+
+And that is the finding. With an optional registrar and a legacy fallback, **all ten of
+Track D's tests stayed green** — which read like the amendment landing gently and actually
+meant the cold open was still the default, for every deployment and for the e2e, until
+`buildServer` forwarded a registrar. An optional dependency with a legacy fallback is a
+feature flag nobody set, defaulting to the behaviour the filter test showed is harmful.
+
+It is now required on `SignupDeps`, `buildServer` defaults it to `StubRegistrar`, and the
+retired handler is **deleted rather than parked** — a retired route nobody routes to is
+still a route somebody can hit.
+
+### The differential test has a documented limit
+
+Worth carrying forward for whoever adds the next schema pair: `differential.test.ts` proves
+the JSON Schema and the zod mirror **agree**. It cannot see any distinction both
+representations fail to make. Swapping `.nullable()` for `.optional()` on
+`digest_as_of` left all five differential tests green, because the two agreed on being
+wrong — and that distinction was the entire content of AMENDMENT-003. Direct assertions,
+not the differential, are what hold a required-and-nullable field in place.
+
+### Open
+
+- **The Mac's claim of its device token is Track F's.** The account is paired before the
+  app exists, so the app no longer types a code; the e2e issues the device token through
+  `registerDevice`, which is the server half F consumes. The claim mechanism itself — how
+  the download hands the app its token — is not built here.
+- **`POST /v1/pair` still accepts six-digit codes**, deliberately: F is mid-flight against
+  it and the amendment's fallback is the old flow *plus* the deep link, not the old flow
+  alone. Migration 009 keeps both shapes valid for the same reason.
+- Which handle Messages on a Mac sends from is **still unverified** — the clean run was
+  sent from a phone. Registering both handles makes the answer irrelevant, which is why it
+  did not block.
 
 ## Runtime resources
 

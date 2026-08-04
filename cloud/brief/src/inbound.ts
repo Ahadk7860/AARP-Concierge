@@ -23,6 +23,7 @@ import {
   findOutboundByProviderMessageId,
   findUserIdByHandle,
   liveCodeFor,
+  setHandleStatus,
   getPool,
   issuePairingCode,
   latestBrief,
@@ -417,6 +418,22 @@ export async function handleInbound(input: {
   // idempotency key: a provider redelivery of the pairing message must not send two
   // first replies.
   if (selection.kind === "paired") {
+    // HANDLE-MISMATCH DETECTION, RELOCATED RATHER THAN LOST.
+    //
+    // It used to come from the protocol of the welcome message we sent. Under
+    // AMENDMENT-002 nothing is sent first, so the same fact arrives from the other
+    // direction — the protocol of the message the USER sent — and it is strictly better
+    // evidence: an outbound send tells us how we reached them, an inbound tells us what
+    // their Messages app actually is.
+    //
+    // `null` protocol stays `unknown`. A transport that does not report one must not be
+    // silently recorded as a mismatch, because "we don't know whether this was blue" and
+    // "this was green" are different facts and only one of them is true.
+    const protocol = input.inbound.protocol ?? null;
+    if (protocol !== null) {
+      await setHandleStatus(scope, protocol === "imessage" ? "imessage" : "mismatch");
+    }
+
     const first = firstReplyMessage({
       user_id: scope.user_id,
       download_url: downloadUrl(),
