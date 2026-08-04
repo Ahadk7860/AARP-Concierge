@@ -16,10 +16,13 @@
 // Nothing here parses the id. It is matched, never inspected, so a transport that
 // changes its prefix changes nothing in this file.
 
+import { boiHandle } from "../../api/src/welcome.js";
 import type { Brief, Candidate, Channel, InboundMessage, OutboundMessage } from "../../shared/src/index.js";
 import {
+  consumePairingCode,
   findOutboundByProviderMessageId,
-  findUserIdByPhone,
+  findUserIdByHandle,
+  liveCodeFor,
   getPool,
   issuePairingCode,
   latestBrief,
@@ -33,12 +36,40 @@ export function parsePairingCode(text: string | null): string | null {
   return match?.[1] ?? null;
 }
 
+/**
+ * The AMENDMENT-002 pairing token, `boi-4f2a91`, ANYWHERE in the message.
+ *
+ * Loose on purpose, and in exactly one direction. The body arrives prefilled from an
+ * `sms:` link and is **user-editable**: people add "hi", they add a question mark, some
+ * of them type a whole sentence around it before hitting send. Requiring the token to
+ * stand alone would reject all of that and answer the one thing we asked them to do with
+ * a re-prompt.
+ *
+ * It cannot collide with anything else Boi understands: `1`, `2` and six bare digits are
+ * all anchored to the whole message, and no draft selection contains `boi-`.
+ */
+export function parsePairingToken(text: string | null): string | null {
+  if (text === null) return null;
+  const match = /\bboi-([0-9a-f]{6})\b/i.exec(text);
+  return match === null ? null : `boi-${match[1]!.toLowerCase()}`;
+}
+
 export type Selection =
   | { kind: "selected"; item_index: number; candidate_index: number; candidate: Candidate; brief_id: string }
   | { kind: "ambiguous"; brief_id: string; item_count: number }
   | { kind: "no_brief" }
   | { kind: "no_drafts"; item_index: number; brief_id: string }
   | { kind: "pairing_code"; code: string; bound: boolean }
+  /** AMENDMENT-002: the prefilled token came back, and the account is now paired. */
+  | { kind: "paired"; token: string }
+  /**
+   * A first message from somebody with a live token that carried no recognisable one.
+   *
+   * They deleted the prefilled body, mangled it, or sent an empty message — all three are
+   * things people do, and all three deserve the same answer. Silence would be the worst
+   * possible response: they have just done the one thing we asked and got nothing back.
+   */
+  | { kind: "needs_token"; token: string }
   | { kind: "not_a_selection" }
   | { kind: "unknown_user" }
   /** `user_id` disagreed with `from_handle`. CONTRACTS.md § 4: reject, do not correct. */
@@ -75,7 +106,10 @@ export type UserResolution =
  * *this handle belongs to that account*, and those are different claims.
  */
 export async function resolveUserStrict(inbound: InboundMessage): Promise<UserResolution> {
-  const derived = await findUserIdByPhone(inbound.from_handle);
+  // PHONE OR EMAIL. Messages on a Mac frequently sends from the Apple Account email, and
+  // an unresolvable handle is answered with silence — so resolving by phone alone would
+  // make that user's first message vanish with no error anywhere.
+  const derived = await findUserIdByHandle(inbound.from_handle);
   if (derived === null) return { kind: "unknown_handle" };
 
   const claimed = inbound.user_id;
@@ -112,6 +146,35 @@ export async function resolveSelection(
   deps: ResolveDeps = {},
 ): Promise<Selection> {
   const db = deps.db ?? getPool();
+
+  // THE PAIRING TOKEN, before anything else. AMENDMENT-002.
+  //
+  // Ordered first because it is the narrowest matcher and because it is the one message
+  // in the product that is not a reply to anything — under the inverted flow it is the
+  // first thing the user ever sends.
+  const token = parsePairingToken(inbound.text);
+  if (token !== null) {
+    // Scoped consumption IS the binding check: a token issued to A cannot be consumed
+    // under B's scope, because the update names both. Single use is the same statement —
+    // `consumed_at is null` in the where clause, so a replay updates zero rows.
+    const consumed = await consumePairingCode(scope, token, deps.now ?? new Date(), db);
+    if (consumed) return { kind: "paired", token };
+    // Expired, already used, or somebody else's. All three get the same answer, and it
+    // is a re-prompt rather than an error: the user cannot tell those apart and does not
+    // need to.
+    const live = await liveCodeFor(scope, deps.now ?? new Date(), db);
+    if (live !== null) return { kind: "needs_token", token: live };
+  }
+
+  // A FIRST MESSAGE THAT LOST ITS TOKEN. The body is editable and empty messages happen.
+  // Only for somebody who has a live secret waiting — an established user texting "hi"
+  // is not onboarding and must not be re-prompted at.
+  if (parseSelection(inbound.text) === null && parsePairingCode(inbound.text) === null) {
+    const live = await liveCodeFor(scope, deps.now ?? new Date(), db);
+    if (live !== null && live.startsWith("boi-")) {
+      return { kind: "needs_token", token: live };
+    }
+  }
 
   // A TEXTED PAIRING CODE, before anything else.
   //
@@ -229,6 +292,16 @@ export function replyBlocks(selection: Selection, display?: string): OutboundMes
             : "that code is already in use. hit sign up again and i'll text you a fresh one.",
         },
       ];
+    case "paired":
+      // The download link and the contact card are built in `handleInbound`, which is
+      // the only place that knows the user id. This branch returns nothing so the
+      // message is not sent twice.
+      return [];
+    case "needs_token":
+      // Never says what was wrong with what they sent. The honest answer would be "you
+      // deleted the code we hid in your message", which reads as a scolding for
+      // something we made invisible on purpose.
+      return [{ type: "text", text: `almost — text me this and we're set: ${selection.token}` }];
     case "not_a_selection":
       return [{ type: "text", text: "reply 1 or 2 to pick a draft." }];
     case "unknown_user":
@@ -245,6 +318,54 @@ export type HandleInboundResult = {
   /** Exactly the messages sent — always to the user, never onward. */
   sent: OutboundMessage[];
 };
+
+/**
+ * Boi's FIRST REPLY, which is now the first thing Boi ever says.
+ *
+ * Three jobs, in this order and for this reason:
+ *
+ * 1. **The download link.** This is the ordering AMENDMENT-002 turns on — Boi is useful
+ *    before it asks for anything. The Full Disk Access request then lands as "the thing I
+ *    already asked for needs this" rather than as a stranger wanting a message history,
+ *    and no other ordering buys that.
+ * 2. **The contact card**, demoted from mechanism to courtesy. The thread already exists
+ *    and Boi is already known; saving the contact is now just convenient.
+ * 3. Nothing else. The grant narration and the report offer are `08`'s neighbours, not
+ *    its content.
+ *
+ * It lives HERE rather than on the API's onboarding surface for the reason the `Registrar`
+ * port does not: `cloud/brief` has never imported `cloud/api`, and the first reply is a
+ * reply — an inbound concern. Putting it beside the signup page would point an arrow from
+ * the composer at the product surface for the sake of filing two messages together.
+ */
+export function firstReplyMessage(input: {
+  user_id: string;
+  download_url: string;
+}): OutboundMessage {
+  return {
+    schema_version: "outbound.v1",
+    user_id: input.user_id,
+    // Keyed on the user, so a duplicate inbound cannot produce two first replies:
+    // `messages_out` has `unique (user_id, idempotency_key)`.
+    idempotency_key: `firstreply-${input.user_id}`,
+    blocks: [
+      {
+        type: "text",
+        text:
+          "paired — nice to meet you. next: install the mac app and i'll read your "
+          + `message history locally, on your machine.\n${input.download_url}`,
+      },
+      { type: "contact_card", name: "Boi", handle: boiHandle() },
+    ],
+    reply_to_message_id: null,
+    requested_capabilities: ["contact_cards"],
+  };
+}
+
+/** Where the Mac app is downloaded from. Config, because it changes per environment. */
+export function downloadUrl(): string {
+  return process.env["BOI_DOWNLOAD_URL"] ?? "https://boi.app/download";
+}
 
 export async function handleInbound(input: {
   inbound: InboundMessage;
@@ -286,6 +407,28 @@ export async function handleInbound(input: {
   if (selection.kind === "no_drafts" || selection.kind === "selected") {
     const row = await latestBrief(scope, input.db ?? getPool());
     display = row?.payload.items[selection.item_index]?.display;
+  }
+
+  // THE FIRST REPLY. AMENDMENT-002's ordering: Boi delivers the download link before it
+  // asks for anything, so the Full Disk Access request that follows lands as "the thing I
+  // already asked for needs this" rather than as a stranger wanting a message history.
+  //
+  // Built here rather than in `replyBlocks` because it needs the user id for its
+  // idempotency key: a provider redelivery of the pairing message must not send two
+  // first replies.
+  if (selection.kind === "paired") {
+    const first = firstReplyMessage({
+      user_id: scope.user_id,
+      download_url: downloadUrl(),
+    });
+    await input.channel.send(first);
+    log({
+      msg: "inbound.paired",
+      user_id: scope.user_id,
+      kind: selection.kind,
+      // The token is a bearer credential. It is never logged, here or at signup.
+    });
+    return { selection, sent: [first] };
   }
 
   const blocks = replyBlocks(selection, display);

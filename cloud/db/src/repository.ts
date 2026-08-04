@@ -267,6 +267,59 @@ export async function findUserIdByPhone(
   return row === undefined ? null : unsafeScopeFromUserId(row.user_id);
 }
 
+/**
+ * The account behind an inbound handle — **phone OR email**.
+ *
+ * AMENDMENT-002. `findUserIdByPhone` was enough while Boi went first, because the only
+ * handle that could ever reply was the one we texted. Under the inverted flow the user
+ * sends from Messages, and **Messages on a Mac frequently sends from the Apple Account
+ * email rather than the phone number**. An inbound from a handle we cannot resolve is
+ * answered with silence, by design — so a user whose Mac sends from their email would
+ * text Boi, get nothing back, and have no way to tell that from the product being broken.
+ *
+ * Email is compared case-insensitively because Apple does not preserve case and users do
+ * not either. Phone stays exact: `phone_e164` is normalised at signup and a fuzzy match on
+ * a phone number is a way to resolve the WRONG account.
+ */
+export async function findUserIdByHandle(
+  handle: string,
+  db: Queryable = getPool(),
+): Promise<UserScope | null> {
+  // Unscoped by necessity, like `findUserIdByPhone`: this is the query that RESOLVES a
+  // scope. It returns an identifier and nothing else.
+  const res = await db.query<{ user_id: string }>(
+    `select user_id from users
+      where phone_e164 = $1 or lower(email) = lower($1)
+      limit 1`,
+    [handle],
+  );
+  const row = res.rows[0];
+  return row === undefined ? null : unsafeScopeFromUserId(row.user_id);
+}
+
+/**
+ * The live, unconsumed pairing secret for this user, if there is one.
+ *
+ * Exists for the re-prompt: the `sms:` body is user-editable, so somebody who deletes it
+ * and sends "hi" has to be told the one thing they need — and telling them means knowing
+ * which token is theirs. Scoped, and it returns only this user's own secret.
+ */
+export async function liveCodeFor(
+  scope: UserScope,
+  now: Date,
+  db: Queryable = getPool(),
+): Promise<string | null> {
+  const res = await scopedQuery<{ code: string }>(
+    db,
+    scope,
+    `select code from pairing_codes
+      where user_id = $1 and consumed_at is null and expires_at > $2
+      order by created_at desc limit 1`,
+    [scope.user_id, now],
+  );
+  return res.rows[0]?.code ?? null;
+}
+
 export async function registerDevice(
   scope: UserScope,
   input: { device_id: string; platform?: string },

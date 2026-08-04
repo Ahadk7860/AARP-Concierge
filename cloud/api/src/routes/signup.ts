@@ -6,9 +6,9 @@
 // than an API the Mac calls, which is probably why it is absent, but it is a shape
 // Track A and Track C can both see and I would rather it were written down.
 
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply } from "fastify";
 import type { Logger } from "pino";
-import type { Channel } from "../../../shared/src/index.js";
+import type { Channel, Registrar } from "../../../shared/src/index.js";
 import { z } from "zod";
 import {
   bootstrapLookups,
@@ -28,7 +28,14 @@ import {
 } from "../../../db/src/index.js";
 import { invalidCode, send, validation } from "../errors.js";
 import { logEvent } from "../logging.js";
-import { boiHandle, pairingCodeMessage, smsDeepLink, welcomeMessage } from "../welcome.js";
+import {
+  boiHandle,
+  newPairingToken,
+  pairingCodeMessage,
+  pairingDeepLink,
+  smsDeepLink,
+  welcomeMessage,
+} from "../welcome.js";
 import { FixedWindowLimiter, PAIR_LIMIT } from "../limiter.js";
 
 /** Ten minutes. `contracts/openapi/boi-api.v1.yaml`: "Single use, 10 minute expiry". */
@@ -86,6 +93,13 @@ export type Clock = () => Date;
 
 export type SignupDeps = {
   channel: Channel;
+  /**
+   * AMENDMENT-002. Optional so a caller that has not been updated still compiles and
+   * still works — without one, signup falls back to the pre-amendment flow, which is the
+   * documented fallback rather than a silent degradation. `signup.no_registrar` says so
+   * on every request that takes that path.
+   */
+  registrar?: Registrar;
   /** Injected so expiry can be tested by moving the clock, not by sleeping. */
   now: Clock;
   /** Shared so a test can reset it; per-process, which is a real limitation. */
@@ -108,16 +122,26 @@ function escapeHtml(s: string): string {
 export function confirmationPage(input: {
   handle: string;
   status: HandleStatus;
+  /** AMENDMENT-002: present means the user goes first, prefilled. */
+  token?: string | null;
 }): string {
-  const link = smsDeepLink(input.handle);
+  // THE HANDLE IS THAT USER'S LINE, never a constant: the pool is shared and the number
+  // differs per recipient.
+  const link = input.token
+    ? pairingDeepLink({ handle: input.handle, token: input.token })
+    : smsDeepLink(input.handle);
   const mismatch = input.status === "mismatch";
+  const heading = input.token ? "One tap, and you're set." : "Boi just texted you.";
+  const instruction = input.token
+    ? `<p>Tap below — it opens Messages with the message already written. Just hit send.</p>`
+    : `<p>Open the thread and tap the contact card to save Boi. That keeps these messages
+out of your filtered tab.</p>`;
   return `<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Boi — check your messages</title>
-<h1>Boi just texted you.</h1>
-<p>Open the thread and tap the contact card to save Boi. That keeps these messages out
-of your filtered tab.</p>
+<h1>${heading}</h1>
+${instruction}
 <p><a id="open-thread" href="${escapeHtml(link)}">Open Messages</a></p>
 <p>Boi's number: <code>${escapeHtml(input.handle)}</code></p>
 ${
@@ -130,11 +154,104 @@ instead — otherwise some things won't work.</p>`
 }`;
 }
 
+/**
+ * The page when the transport is unreachable.
+ *
+ * An honest 503 rather than a confirmation page with a dead link. Under AMENDMENT-002 the
+ * link IS the product's next step, so rendering one that opens a thread with a line the
+ * user was never assigned would surface as "I sent it and nothing happened" — which is
+ * indistinguishable from the product being broken, and unsupportable.
+ */
+export function unavailablePage(): string {
+  return `<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Boi — try again in a minute</title>
+<h1 id="signup-unavailable">We couldn't set up your line.</h1>
+<p>Your account exists and nothing was lost. This is on our side — try again in a minute
+and it should go through.</p>`;
+}
+
 export function registerSignupRoutes(
   app: FastifyInstance,
   log: Logger,
   deps: SignupDeps,
 ): void {
+
+  /**
+   * Signup under AMENDMENT-002: register, resolve, mint, render. No send.
+   *
+   * Ordering matters and is asserted. Registration happens BEFORE the line is resolved
+   * because the line is assigned by registering; the token is minted last because a
+   * token that exists before the page can render is a live credential attached to an
+   * account the user may never see.
+   */
+  async function signupUserGoesFirst(
+    input: { phone_e164: string; email?: string | undefined; timezone?: string | undefined },
+    registrar: Registrar,
+    reply: FastifyReply,
+  ): Promise<unknown> {
+    const existing = await findUserIdByPhone(input.phone_e164);
+    const scope = existing ?? (await createUser({
+      phone_e164: input.phone_e164,
+      email: input.email ?? null,
+      timezone: input.timezone ?? undefined,
+    })).scope;
+
+    // BOTH HANDLES, IN ONE CALL. Messages on a Mac frequently sends from the Apple
+    // Account email rather than the phone number, the transport cannot tell us which
+    // Apple will pick, and inbound from an unregistered handle is SILENT — no error
+    // anywhere, just a user whose first message vanishes.
+    const handles = [input.phone_e164, ...(input.email ? [input.email] : [])];
+
+    let line;
+    try {
+      await registrar.register({ user_id: scope.user_id, handles });
+      line = await registrar.lineFor(scope.user_id);
+    } catch (err) {
+      // THE TRANSPORT IS DOWN AND THE PAGE MUST SAY SO. Rendering a confirmation page
+      // with a dead link would send the user to Messages to text a number that is not
+      // theirs — the failure would surface as "I sent it and nothing happened", which is
+      // indistinguishable from the product being broken and impossible to support.
+      logEvent(log, {
+        msg: "signup.registrar_failed",
+        route: "/signup",
+        user_id: scope.user_id,
+        violations: err instanceof Error ? err.message : "unknown",
+        status: 503,
+      });
+      return reply.code(503).type("text/html; charset=utf-8").send(unavailablePage());
+    }
+
+    if (line === null) {
+      logEvent(log, {
+        msg: "signup.no_line",
+        route: "/signup",
+        user_id: scope.user_id,
+        status: 503,
+      });
+      return reply.code(503).type("text/html; charset=utf-8").send(unavailablePage());
+    }
+
+    // Single use, ten minutes, bound to one user — every property the six-digit code
+    // has, and none of them weakened because the user no longer sees it.
+    const token = await mintUniqueCode(scope, deps.now(), newPairingToken);
+
+    logEvent(log, {
+      msg: existing === null ? "signup.created" : "signup.reissued",
+      route: "/signup",
+      user_id: scope.user_id,
+      // The token is a BEARER CREDENTIAL and is never logged, here or anywhere. It rides
+      // in a URL and in a message body; a log line is the one place it has no business
+      // being, because that is the copy that outlives the thread.
+      status: 200,
+    });
+
+    return reply
+      .type("text/html; charset=utf-8")
+      .send(confirmationPage({ handle: line.handle, status: "unknown", token }));
+  }
+
   // -------------------------------------------------------------------------
   app.get("/signup", async (_req, reply) => {
     return reply.type("text/html; charset=utf-8").send(`<!doctype html>
@@ -175,6 +292,16 @@ export function registerSignupRoutes(
       );
     }
     const input = parsed.data;
+
+    // ---------------------------------------------------------------- AMENDMENT-002
+    //
+    // The user opens the thread. Nothing is sent from here: a line that initiates to
+    // somebody who has not written first gets iMessage's spam-report affordance attached,
+    // which is worse than the filtered tab the old flow was avoiding.
+    if (deps.registrar !== undefined) {
+      return await signupUserGoesFirst(input, deps.registrar, reply);
+    }
+    logEvent(log, { msg: "signup.no_registrar", route: "/signup" });
 
     // Phone is the join key, and `users.phone_e164` is unique. Signing up twice is a
     // normal thing for a person to do, so it re-sends rather than erroring.
@@ -351,9 +478,13 @@ async function sendPairingCode(
   }
 }
 
-async function mintUniqueCode(scope: UserScope, now: Date): Promise<string> {
+async function mintUniqueCode(
+  scope: UserScope,
+  now: Date,
+  mint: () => string = newPairingCode,
+): Promise<string> {
   for (let attempt = 0; attempt < 10; attempt += 1) {
-    const code = newPairingCode();
+    const code = mint();
     try {
       await issuePairingCode(scope, { code, ttl_seconds: PAIRING_TTL_SECONDS, now });
       return code;

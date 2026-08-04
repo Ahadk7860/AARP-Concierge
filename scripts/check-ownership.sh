@@ -66,6 +66,17 @@ FROZEN='^(contracts/|prompts/(CONTRACTS|MERGE-POLICY|TRACK-REVIEW|WORKTREE-PROTO
 # union from a deleted field. It is narrowed by review instead: the merge reads the diff.
 ALLOWED_FROZEN='^(prompts/CONTRACTS\.md$|contracts/transcripts/spectrum/|cloud/shared/src/contracts\.ts$|contracts/schema/(digest|brief|draft_bundle)\.v1\.json$|contracts/fixtures/digest/|mac/Sources/BoiKit/Contracts\.swift$|intelligence/boi_intel/contracts\.py$)'
 
+# AMENDMENT-002B — the rest of prompt 08, ruled 4 Aug after track E hit three walls.
+# A separate variable from AMENDMENT_002 for the same reason 002 is separate from 001:
+# appending to a neighbouring line is how a grant gets silently dropped.
+#
+#   pairing.test.ts     Track D's suite asserts the OLD onboarding as behaviour. Ten tests.
+#                       Granted to REWRITE, not to delete — see the mapping rule below.
+#   db/migrations/      the token does not fit `check (code ~ '^[0-9]{6}$')`.
+#   stub-registrar.ts   its own file; `stub-channel.ts` would under-describe its contents.
+#   shared/src/index.ts a one-line `export *` append.
+AMENDMENT_002B='^(cloud/api/src/pairing\.test\.ts$|cloud/db/migrations/|cloud/shared/src/(stub-registrar\.ts|index\.ts)$)'
+
 # AMENDMENT-003 — prompt 08, the nullable `digest_as_of`. Its own variable, same reason
 # as 002: a grant appended to a neighbouring line can be lost to a concurrent edit with
 # no conflict and no error, and the gate then goes green because the rule that would have
@@ -132,6 +143,10 @@ while IFS= read -r f; do
   fi
   if [ "$LETTER" = "e" ] && echo "$f" | grep -Eq "$AMENDMENT_002"; then
     echo "AMENDMENT-002 (onboarding surface, granted by the amendment): $f"
+    continue
+  fi
+  if [ "$LETTER" = "e" ] && echo "$f" | grep -Eq "$AMENDMENT_002B"; then
+    echo "AMENDMENT-002B (granted 4 Aug — pairing.test.ts DELETES assertions, read it at merge): $f"
     continue
   fi
   if [ "$LETTER" = "e" ] && echo "$f" | grep -Eq "$AMENDMENT_003"; then
