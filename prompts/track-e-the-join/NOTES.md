@@ -865,6 +865,42 @@ representations fail to make. Swapping `.nullable()` for `.optional()` on
 wrong — and that distinction was the entire content of AMENDMENT-003. Direct assertions,
 not the differential, are what hold a required-and-nullable field in place.
 
+### A check that says OUT OF BOUNDS about a path its own file explicitly permits
+
+The gate's ownership step failed on three files that `check-ownership.sh` **grants**:
+`cloud/shared/src/{index,stub-registrar}.ts` and `contracts/openapi/boi-api.v1.yaml`.
+`FROZEN` is tested first and exits, and `ALLOWED_FROZEN` was its only escape — so
+`AMENDMENT_002B` and `AMENDMENT_003`, consulted in the ownership loop further down, were
+never reached by a frozen path.
+
+**The grants existed, were correct, and were unreachable by control flow.** That is
+strictly harder to see than the three missing grants before it: reading the file tells you
+the permission is there, and the check still refuses. An absence you find by looking; this
+you find only by running it and disbelieving the output.
+
+Fixed by the user structurally rather than by widening `ALLOWED_FROZEN` — one composed
+`AMENDMENTS` string that both the frozen escape and the loop read, so a grant cannot be
+reachable in one branch and invisible in the other, and the next amendment does not
+rediscover the trap.
+
+### A test that was true about a moment, and the moment moved
+
+Third instance today, so it is a pattern rather than three coincidences:
+
+- `deliver.ts` never read `card_url` — the criterion asserted the stored brief, and the
+  moment the card mattered had moved to what the channel received.
+- Ten `pairing.test.ts` assertions described a flow where Boi texted first; half of them
+  were requirements that survived at a different moment, half were about the moment
+  itself.
+- `e2e.test.ts` asserted the brief's lead was `outbound[0]`, which stopped being true the
+  instant Boi's first reply became the channel's first message.
+
+None of the three was wrong when written and none failed loudly at the moment it stopped
+being true — two kept passing and one failed with an off-by-one that read like a bug in the
+test. **The defence is to assert on identity rather than position**: find the lead by its
+idempotency key, assert the card on the blocks the channel received, and say which moment a
+requirement belongs to when it moves.
+
 ### A down migration that cannot run is not a rollback
 
 The first version of `009…down.sql` re-added the six-digit constraint and let Postgres
