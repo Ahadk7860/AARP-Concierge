@@ -121,6 +121,35 @@ Signup already collects **phone and email**. Register both with the transport. T
 does not matter which one Apple sends from. One line, and it converts the largest risk in
 this design into a non-event.
 
+## RESULT — tested 4 Aug, and the amendment holds
+
+**Run on a clean device by a third party**, which is the only way it could have failed.
+A friend with an iPhone who had **never texted the debug line**, with **Screen Unknown
+Senders switched ON**, sent the first message. The reply arrived **in the main
+conversation list**, not the filtered view.
+
+So a user who initiates is not an unknown sender, and the deep-link-first flow works.
+
+**The second observation is the confirmation of the other half:** when the *line* initiates
+to someone who has not written first, iMessage presents the message with the spam-report
+affordance. That is the outcome § 4.1's original design was walking into every single time,
+and it is worse than a filtered tab — it puts a "report junk" button under Boi's first
+words.
+
+The first attempt at this test was contaminated and worth recording as a method note: the
+same handle had been texted earlier the same day, before the filter was enabled. With prior
+interaction the reply lands in the main list *because of that history*, so the test would
+have passed while proving nothing. **The clean run required a person who had never
+contacted the handle** — the test had to be able to fail before its passing meant
+anything.
+
+### What remains unverified, and why it does not block
+
+The clean run was sent from a phone, not a Mac, so *"which handle does Messages on a Mac
+send from"* is still open. It does not block: the mitigation — **register both the phone
+and the email at signup** — is already in prompt `08`, costs one line, and makes the answer
+irrelevant. Build it and stop caring which handle Apple picks.
+
 ## The five-minute test that settles it
 
 Apple does not publish the exact predicate for "previously interacted," and it is

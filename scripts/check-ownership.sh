@@ -66,6 +66,17 @@ FROZEN='^(contracts/|prompts/(CONTRACTS|MERGE-POLICY|TRACK-REVIEW|WORKTREE-PROTO
 # union from a deleted field. It is narrowed by review instead: the merge reads the diff.
 ALLOWED_FROZEN='^(prompts/CONTRACTS\.md$|contracts/transcripts/spectrum/|cloud/shared/src/contracts\.ts$|contracts/schema/(digest|brief|draft_bundle)\.v1\.json$|contracts/fixtures/digest/|mac/Sources/BoiKit/Contracts\.swift$|intelligence/boi_intel/contracts\.py$)'
 
+# AMENDMENT-003 — prompt 08, the nullable `digest_as_of`. Its own variable, same reason
+# as 002: a grant appended to a neighbouring line can be lost to a concurrent edit with
+# no conflict and no error, and the gate then goes green because the rule that would have
+# failed was removed from the gate.
+#
+# This is the FIRST grant against contracts/openapi/. The schema files were named
+# individually in ALLOWED_FROZEN and the OpenAPI document was not — an omission, not a
+# decision. Track F found the contract gap; track E found the missing grant before
+# hitting it.
+AMENDMENT_003='^contracts/openapi/boi-api\.v1\.yaml$'
+
 # AMENDMENT-002 — prompts 08 and 09, the onboarding inversion. Kept as its OWN variable
 # rather than appended to AMENDMENT_001, because a grant added to a shared line can be
 # lost when two authors edit that line concurrently. That is exactly what happened here:
@@ -121,6 +132,10 @@ while IFS= read -r f; do
   fi
   if [ "$LETTER" = "e" ] && echo "$f" | grep -Eq "$AMENDMENT_002"; then
     echo "AMENDMENT-002 (onboarding surface, granted by the amendment): $f"
+    continue
+  fi
+  if [ "$LETTER" = "e" ] && echo "$f" | grep -Eq "$AMENDMENT_003"; then
+    echo "AMENDMENT-003 (FROZEN OpenAPI, granted by the amendment — read this diff at merge): $f"
     continue
   fi
   if echo "$f" | grep -Eq "$SHARED"; then
