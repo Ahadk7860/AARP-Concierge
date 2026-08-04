@@ -1027,6 +1027,32 @@ None was wrong; each was a count over a population that grew. Scoped to identity
 brief messages by key prefix, brief leads by suffix — which is the same repair as
 `outbound[0]`, three tests later.
 
+## An unexplained gate red, recorded so the next one has something to test against
+
+`gate.sh e` went **red on the tests step once**, at `339b820`, and green on an immediate
+re-run with no change. All three suites pass individually (`vitest=0 pytest=0 swift=0`).
+No root cause.
+
+Written down rather than shrugged off, because **a gate that can go red without cause
+teaches everyone to discount a red gate** — the next genuine failure reads as "probably
+that flake again" and the evidence mechanism quietly stops working.
+
+Two hypotheses, stated so the next occurrence can confirm or eliminate rather than start
+from zero:
+
+1. **A stale child renderer holding port 3043.** `e2e.test.ts` spawns
+   `cloud/card/src/main.ts` as its own process and kills it in `afterAll`. A run killed
+   between those two leaves the port bound, and the next suite's `waitForServer` would
+   answer against the corpse rather than its own child. **Test:** `lsof -i :3043` before
+   the run; if a stale process is there, this is it.
+2. **The database suite lock, from overlapping runs.** Several suites take
+   `acquireSuiteLock()`; I had been running individual files while the full suite ran.
+   **Test:** does it reproduce with nothing else touching `boi_dev_d`? If it only ever
+   happens alongside a second run, it is not a product problem at all.
+
+**If it recurs before `10` finishes, stop and diagnose.** Two unexplained reds is a
+pattern; one is an anecdote.
+
 ## Runtime resources
 
 `CONTRACTS.md` § 9 has no row for Track E. Reusing Track D's `3041` and Track A's

@@ -456,6 +456,28 @@ differently has to be pinned. Three are:
   *"there isn't enough of it"* (a claim about them, only sayable once we have looked).
   Those two are one careless copy edit apart, and getting them backwards tells a
   brand-new user their friendships are too thin to measure when nobody has looked.
+### The `sms:` deep-link format — pinned 4 Aug, empirically
+
+```
+sms:<E.164 line>&body=<percent-encoded body>
+```
+
+**`&body=`, not `?body=`.** Verified on a real device against the project's live line: the
+link opened Messages with the body prefilled, blue, delivered. The other separator was not
+assumed wrong — this one was observed right, which is the only reason it is pinned.
+
+This string is composed **in two languages** — `welcome.ts` in TypeScript and
+`ThreadHandoff.link` in Swift — and a one-character divergence produces a link that opens
+Messages with an **empty body**, silently dropping the pairing token, while both sides pass
+their own tests. That is the fourth cross-language seam in this project and the second to
+be pinned rather than discovered broken.
+
+A schema catches a wrong field. It does not catch two correct implementations of two
+different readings of the same sentence, and a separator is exactly that. So the format is
+pinned here **and** asserted by `testTheSwiftAndTypeScriptDeepLinksAgree`, which computes
+both sides from scratch and never asserts one against a literal — the shape that made
+`contact_id` the only cross-language value that has never diverged.
+
 - **Never auto-send.** Ever. The approval tap costs nothing and buys everything.
 - **Don't ship reciprocity.** Across 25 real relationships the spread was 0.465–0.615,
   sd 0.034 — it carries almost no information, and it is the most legally dangerous
