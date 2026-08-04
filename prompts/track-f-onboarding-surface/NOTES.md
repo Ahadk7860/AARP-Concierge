@@ -21,6 +21,7 @@
 | 01 | DoD: "every `GrantWatcher` state renders a distinct screen — waiting, granted, relaunching, verified, failed". | `GrantWatcher.Event` has **four** cases and `verified`/`failed` are not among them, while `noDatabase` is and is absent from the list. The five failure paths in Scope are a different, larger set. | Ruled by the user: enumerate against **onboarding** states. `GrantStage` has 14 cases, is `CaseIterable`, and the suite asserts over all of them rather than over the five somebody remembered. |
 | 01 | Scope: "grant given to the wrong entry" is a detectable failure path. | **It is not detectable.** A grant given to the wrong app and a user who never flipped anything both leave the probe `denied`, byte-identical. macOS exposes nothing that separates them. | Reported honestly as an **escalation, not a detection**: `.waitingStalled` names the two things worth checking and offers a way out, and claims no diagnosis. Confirmed as the right call by the user. |
 | 01 | DoD: "a flapping grant produces at most one signal per minute". | Taken literally this **cuts against the track's own anchor** — a limiter that applies to the first `false→true` delays the one message the track exists to send. | Ruled by the user: the first transition fires immediately; the cap governs flaps thereafter. Both halves are asserted, each with its mutation. |
+| 01 | TRACK.md fact: "the grant binds to the responsible process, which is the app bundle in `/Applications`". | **`~/Applications` holds the grant too.** This project's own `boi.log` records `~/Applications/Boi.app` holding Full Disk Access on 3 Aug and completing a sync of **94,897 messages**. The first implementation required `/Applications` exactly and would have told that user to move a working install — and moving the bundle is precisely what breaks a TCC grant. The criterion would have read green while the screen gave destructive advice. | Widened to both Applications folders, matched on the enclosing directory with symlinks resolved. `~/Downloads`, `/Volumes`, `/tmp` and Gatekeeper's randomized `AppTranslocation` paths are still rejected — translocation is the genuinely fatal one, since that path changes on every launch. Commit `ece7c33`. |
 
 ## Observations
 
@@ -51,6 +52,19 @@ the user is told — is a judgement no test can read. This is why `GrantStage`,
 `PermissionModel` is thin wiring over them. It was forced by the package layout rather
 than chosen, and it is worth knowing before somebody "tidies" logic back into the view
 model where the suite goes blind to it.
+
+**An app bundle run from `/tmp` renders a 141×118 window off the left edge of the screen,
+and it is not a code bug.** Chasing the first manual run, `Boi.app` built into
+`/tmp/boi-a/app/` came up with no visible window despite `.frame(minWidth: 560, minHeight:
+460)`. Building the **previous commit** and running it from the same place reproduced it
+exactly (141×118 at X=-239), which is what established it was not this track's change.
+Copying the identical bundle to `~/Applications` produced a correct 900×488 window on the
+first launch.
+
+So: **build the bundle, then run it from an Applications folder.** A `/tmp` build is fine
+to compile and useless to look at. This matters because it is a trap that reads as "the
+onboarding UI is broken" — the exact conclusion a reviewer would draw — when nothing is
+wrong with it.
 
 **A worktree needs its own `.venv`.** `FactExtractorTests` shells out to
 `.venv/bin/python`, falling back to `/usr/bin/python3` — which on macOS is 3.9 and cannot
