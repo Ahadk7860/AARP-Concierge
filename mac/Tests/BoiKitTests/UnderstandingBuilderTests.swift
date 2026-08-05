@@ -157,6 +157,48 @@ final class UnderstandingBuilderTests: XCTestCase {
         }
     }
 
+    func testBoundedUncertaintyAndPlanPatternsRemainOpen() {
+        for (offset, text) in [
+            "still coming",
+            "tonight still good",
+            "weekend maybe",
+            "perhaps meet tomorrow",
+            "plans for tonight"
+        ].enumerated() {
+            let output = UnderstandingBuilder().build(messages: [
+                message("open-\(offset)", text, fromMe: false, day: offset + 1)
+            ], identities: [identity])
+            XCTAssertEqual(output[0].lastExchangeShape, .planUnresolved, text)
+            XCTAssertEqual(output[0].openThread, "plan appears unresolved", text)
+        }
+    }
+
+    func testPlanLexemesWithoutUncertaintyAndUncertaintyWithoutPlanRemainStatements() {
+        for (offset, text) in [
+            "I’m coming tonight",
+            "will be there at 8",
+            "weekend was great",
+            "still working",
+            "maybe"
+        ].enumerated() {
+            let output = UnderstandingBuilder().build(messages: [
+                message("closed-\(offset)", text, fromMe: false, day: offset + 1)
+            ], identities: [identity])
+            XCTAssertEqual(output[0].lastExchangeShape, .statementFromThem, text)
+            XCTAssertNil(output[0].openThread, text)
+        }
+    }
+
+    func testUnresolvedPlanCanaryCannotAppearInDerivedOutput() {
+        let output = UnderstandingBuilder().build(messages: [
+            message("open-canary", canary + " weekend maybe", fromMe: false, day: 1)
+        ], identities: [identity])
+
+        XCTAssertEqual(output[0].lastExchangeShape, .planUnresolved)
+        XCTAssertEqual(output[0].openThread, "plan appears unresolved")
+        XCTAssertFalse(rendered(output[0]).contains(canary))
+    }
+
     private func rendered(_ value: RelationshipUnderstanding) -> String {
         [value.contactID, value.register.rawValue, value.relationshipKind.rawValue,
          value.openThread ?? "", value.lastExchangeShape.rawValue,

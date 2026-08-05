@@ -217,9 +217,23 @@ struct UnderstandingBuilder {
 
     private static func containsPlanMarker(_ text: String) -> Bool {
         let words = Set(lexicalWords(in: text))
-        // Directional confirmations such as "I'm coming tonight" close uncertainty;
-        // they do not create it. The stronger plan nouns/verbs are the bounded signal.
-        return !words.isDisjoint(with: ["plan", "planned", "planning", "plans"])
+        // Explicit plan language remains a bounded signal on its own. Directional
+        // confirmations such as "I'm coming tonight" are statements, though: time or
+        // movement words become unresolved only when the same bubble also carries one
+        // of this deliberately small set of uncertainty markers.
+        let explicitPlanWords: Set<String> = ["plan", "planned", "planning", "plans"]
+        if !words.isDisjoint(with: explicitPlanWords) { return true }
+
+        let uncertaintyWords: Set<String> = [
+            "maybe", "perhaps", "possibly", "still", "tentative", "tentatively",
+            "uncertain", "unsure"
+        ]
+        let planContextWords: Set<String> = [
+            "come", "coming", "meet", "meeting", "tomorrow", "tonight", "weekend",
+            "weekends"
+        ]
+        return !words.isDisjoint(with: uncertaintyWords)
+            && !words.isDisjoint(with: planContextWords)
     }
 
     private func topics(in messages: [MirrorDatabase.StoredMessage]) -> [String] {
