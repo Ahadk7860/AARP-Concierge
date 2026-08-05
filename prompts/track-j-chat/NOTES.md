@@ -43,6 +43,11 @@
 - `DraftProposal` is an in-process, frozen capability tracked by Track J. A caller cannot
   forge a lookalike `{contact_id,text}` and route it into delivery; join must compose the
   frozen wire `DraftDelivery` before crossing a process or persistence boundary.
+- Recipient resolution must come directly from Track I's vault-backed resolver. Track J
+  verifies the resolver's `contact_id`, copies and freezes its recipient, then consumes
+  the proposal capability exactly once. A failed contact mismatch does not consume it,
+  so a corrected vault lookup can retry. Durable Track I delivery idempotency remains the
+  replay defense after the frozen `DraftDelivery` crosses the process boundary.
 - Review hardening removed arbitrary provider prose from the production path. The
   provider may select only one of two closed, deterministic acknowledgement templates
   and must license it to the exact selected open thread. Track J renders the final text.

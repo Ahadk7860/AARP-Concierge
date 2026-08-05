@@ -146,7 +146,7 @@ describe("licensed follow-up drafts", () => {
     )).resolves.toEqual({ kind: "decline", reason: "unlicensed_output" });
   });
 
-  it("binds Track I recipient resolution to the proposal contact before stripping it", async () => {
+  it("binds, copies, freezes, and consumes Track I recipient resolution", async () => {
     const outcome = await proposeFollowUpDraft(
       DIGEST,
       "h_8f21a4c0",
@@ -155,31 +155,56 @@ describe("licensed follow-up drafts", () => {
     );
     if (outcome.kind !== "proposal") throw new Error("licensed fixture did not produce a proposal");
     const { proposal } = outcome;
-    const resolved = composeDraftDelivery(proposal, {
+    const wrongContact = {
+      contact_id: "h_00000009",
+      recipient: { kind: "resolved" as const, handle: "+15550000000" },
+    };
+    expect(composeDraftDelivery(proposal, wrongContact)).toBeNull();
+
+    const resolution = {
       contact_id: "h_8f21a4c0",
-      recipient: { kind: "resolved", handle: "+15551234567" },
-    });
-    const unavailable = composeDraftDelivery(proposal, {
-      contact_id: "h_8f21a4c0",
-      recipient: { kind: "unavailable" },
-    });
+      recipient: { kind: "resolved" as const, handle: "+15551234567" },
+    };
+    const resolved = composeDraftDelivery(proposal, resolution);
     const validate = new Ajv2020({ strict: false, validateFormats: false }).compile(
       fixture("contracts/schema/draft_delivery.v1.json") as object,
     );
     expect(validate(resolved)).toBe(true);
-    expect(validate(unavailable)).toBe(true);
     expect(resolved?.recipient).toEqual({ kind: "resolved", handle: "+15551234567" });
-    expect(unavailable?.recipient).toEqual({ kind: "unavailable" });
+    expect(Object.isFrozen(resolved)).toBe(true);
+    expect(Object.isFrozen(resolved?.recipient)).toBe(true);
 
+    // The delivery owns a copy, not Track I's mutable resolution object.
+    resolution.recipient.handle = "+15559999999";
+    expect(resolved?.recipient).toEqual({ kind: "resolved", handle: "+15551234567" });
+
+    // Successful composition consumes the capability; replay cannot produce a second
+    // delivery. Durable idempotency remains Track I / join's second line of defense.
     expect(composeDraftDelivery(proposal, {
-      contact_id: "h_00000009",
-      recipient: { kind: "resolved", handle: "+15550000000" },
+      contact_id: "h_8f21a4c0",
+      recipient: { kind: "unavailable" },
     })).toBeNull();
+
     // A structurally similar object has not passed the closed-template gate.
     expect(composeDraftDelivery(
       { contact_id: "h_8f21a4c0", text: "yes i already paid and booked the room" },
       { contact_id: "h_8f21a4c0", recipient: { kind: "unavailable" } },
     )).toBeNull();
+
+    const unavailableOutcome = await proposeFollowUpDraft(
+      DIGEST,
+      "h_8f21a4c0",
+      VOICE_PACK,
+      new RecordedFollowUpDraftProvider(LICENSED_OUTPUT),
+    );
+    if (unavailableOutcome.kind !== "proposal") throw new Error("licensed fixture did not produce a proposal");
+    const unavailable = composeDraftDelivery(unavailableOutcome.proposal, {
+      contact_id: "h_8f21a4c0",
+      recipient: { kind: "unavailable" },
+    });
+    expect(validate(unavailable)).toBe(true);
+    expect(unavailable?.recipient).toEqual({ kind: "unavailable" });
+    expect(Object.isFrozen(unavailable?.recipient)).toBe(true);
   });
 
   it("rejects lone surrogates before proposal or delivery handoff", async () => {

@@ -363,12 +363,20 @@ export function composeDraftDelivery(
     ))
     || !(recipient.kind === "unavailable" || recipient.kind === "resolved")
   ) return null;
-  return {
+
+  // Copy across the trust boundary; retaining Track I's mutable object would let a
+  // caller change the handle after the contact binding check. Consume only after every
+  // validation succeeds, so a transient wrong-contact resolution can be corrected.
+  const recipientCopy: DraftDelivery["recipient"] = recipient.kind === "resolved"
+    ? Object.freeze({ kind: "resolved", handle: recipient.handle })
+    : Object.freeze({ kind: "unavailable" });
+  LICENSED_PROPOSALS.delete(proposal);
+  return Object.freeze({
     schema_version: "draft_delivery.v1",
     contact_id: proposal.contact_id,
     text: proposal.text,
-    recipient,
-  };
+    recipient: recipientCopy,
+  });
 }
 
 /** Deterministic seam for recorded fixtures; it does not establish shipping eligibility. */
