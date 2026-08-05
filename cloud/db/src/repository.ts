@@ -49,6 +49,10 @@ export interface Phase2PrivateRepository {
   purgeExpiredTurns(now: Date): Promise<number>;
 }
 
+// Implemented in Track I's owned module and re-exported here so existing repository
+// consumers receive the concrete ciphertext-only seam through `db/src/index.ts`.
+export { PostgresPhase2PrivateRepository } from "./encrypted.js";
+
 export type UserRow = {
   user_id: string;
   phone_e164: string;
