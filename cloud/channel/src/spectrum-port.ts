@@ -41,6 +41,18 @@ export type SpectrumService = "iMessage" | "SMS" | "RCS" | "unknown";
 
 export type SpectrumPart =
   | { kind: "text"; text: string }
+  /**
+   * The agent's own contact card, NATIVELY.
+   *
+   * Photon has `nativeContactCard()` and the first mapping degraded this block to a line
+   * of text — which the dry run showed arriving in the thread as `Boi: +15550100123`,
+   * reading like debug output at the exact moment AMENDMENT-002 moved the card to.
+   *
+   * It carries no fields: the card is the PROJECT's own identity, which the transport
+   * already holds. `outbound.v1`'s `name` and `handle` are what a channel without native
+   * support would need, and are deliberately not passed through.
+   */
+  | { kind: "contact_card" }
   | {
       kind: "attachment";
       url: string;

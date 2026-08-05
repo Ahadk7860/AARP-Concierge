@@ -185,9 +185,10 @@ export class SpectrumChannel implements Channel {
 /**
  * `outbound.v1` blocks to Photon parts.
  *
- * A `contact_card` block has no Spectrum equivalent that survives the shared tier, so it
- * degrades to its handle as text rather than being dropped: a contact card the user never
- * receives is the difference between "save me" and silence.
+ * A `contact_card` block maps to Photon's `nativeContactCard()`, which sends the
+ * project's own card. The block's `name` and `handle` are not passed through: the
+ * transport already knows its own identity, and a card built from what the composer
+ * happens to think our handle is would be wrong exactly when the config is.
  */
 export function blocksToParts(msg: OutboundMessage): SpectrumPart[] {
   const parts: SpectrumPart[] = [];
@@ -205,7 +206,11 @@ export function blocksToParts(msg: OutboundMessage): SpectrumPart[] {
         name: "boi-card.png",
       });
     } else {
-      parts.push({ kind: "text", text: `${block.name}: ${block.handle}` });
+      // NATIVE, not text. The first version wrote `${name}: ${handle}` and the dry run
+      // showed it arriving as `Boi: +15550100123` — a line that reads like debug output,
+      // in the first reply, which is exactly where AMENDMENT-002 moved the contact card
+      // to make it a courtesy rather than a mechanism.
+      parts.push({ kind: "contact_card" });
     }
   }
   return parts;

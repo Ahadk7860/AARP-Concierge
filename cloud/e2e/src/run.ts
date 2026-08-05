@@ -24,7 +24,7 @@ import type {
   Gist,
   OutboundMessage,
 } from "../../shared/src/index.js";
-import { StubChannel } from "../../shared/src/index.js";
+import { StubChannel, type Channel } from "../../shared/src/index.js";
 import { buildServer } from "../../api/src/server.js";
 import { buildCardServer } from "../../card/src/server.js";
 import { runForUser } from "../../brief/src/run.js";
@@ -43,6 +43,7 @@ import {
 } from "../../db/src/index.js";
 import { migrate } from "../../db/src/migrate.js";
 import { renderCardForDigest } from "./card-client.js";
+import { dryRunSpectrumChannel, writeDryRunReport } from "./spectrum-dry-run.js";
 
 const run = promisify(execFile);
 
@@ -108,6 +109,15 @@ export type E2EOptions = {
    * is never attached to a brief.
    */
   corpusProfile?: "minimal" | "rich";
+  /**
+   * `spectrum-dry` swaps `StubChannel` for the REAL `SpectrumChannel` over a port that
+   * records instead of transmitting — prompt 10's pre-send step 3.
+   *
+   * Everything above the port is production: the composer, the card, `deliverBrief`, the
+   * block-to-part mapping. The only thing that does not happen is the request, which is
+   * what makes it the last thing worth reading before a real phone rings.
+   */
+  channel?: "stub" | "spectrum-dry";
   /** Reuse an existing account, to exercise idempotency on a second run. */
   reuseScope?: UserScope;
   artifactRoot?: string;
@@ -177,7 +187,29 @@ export async function runEndToEnd(options: E2EOptions = {}): Promise<E2EResult> 
     });
 
   // ---------------------------------------------------------------- 3. servers
-  const channel = new StubChannel();
+  // THE CHANNEL. Named in the seam report, because a run that quietly used a stub and a
+  // run that exercised the real mapping must not be told apart by reading the source.
+  const dryRun = options.channel === "spectrum-dry"
+    ? dryRunSpectrumChannel({
+      handle: process.env["SPECTRUM_DRY_RUN_HANDLE"] ?? "+15550100001",
+      line: process.env["SPECTRUM_LINE_E164"] ?? "+16465792868",
+      log,
+    })
+    : null;
+  const channel: Channel = dryRun?.channel ?? new StubChannel();
+
+  // WHAT THE RUNNER HANDED THE CHANNEL, recorded here rather than read off the stub.
+  //
+  // `StubChannel.sent` exists; `SpectrumChannel` has no such thing and should not — a
+  // production channel that accumulated every message it ever sent is a memory leak with
+  // a nice name. Wrapping `send` records the same evidence for either implementation, and
+  // keeps every assertion in `e2e.test.ts` working across the substitution.
+  const handed: OutboundMessage[] = [];
+  const channelSend = channel.send.bind(channel);
+  channel.send = async (msg: OutboundMessage) => {
+    handed.push(msg);
+    return channelSend(msg);
+  };
   const api = buildServer({ channel });
   await api.listen({ port: 0, host: "127.0.0.1" });
   const apiPort = (api.server.address() as { port: number }).port;
@@ -349,7 +381,7 @@ export async function runEndToEnd(options: E2EOptions = {}): Promise<E2EResult> 
     // one, with no scheduler and no waiting until 8am tomorrow. `report.png` is the
     // artifact — the card exactly as it arrives in the thread.
     await stage("report", "send my friends report", async () => {
-      const before = channel.sent.length;
+      const before = handed.length;
       const result = await handleInbound({
         inbound: {
           schema_version: "inbound.v1",
@@ -383,7 +415,7 @@ export async function runEndToEnd(options: E2EOptions = {}): Promise<E2EResult> 
       // The IMAGE THE USER RECEIVED, fetched back from the URL that reached the thread —
       // not the bytes the renderer returned. A card that renders and does not resolve is
       // the defect prompt 05 was written to end.
-      const image = channel.sent.slice(before)
+      const image = handed.slice(before)
         .flatMap((m) => m.blocks)
         .find((b) => b.type === "image");
       if (image !== undefined && image.type === "image") {
@@ -403,7 +435,7 @@ export async function runEndToEnd(options: E2EOptions = {}): Promise<E2EResult> 
         }
       }
       await writeFile(path.join(artifactDir, "report.json"),
-        JSON.stringify(channel.sent.slice(before), null, 2));
+        JSON.stringify(handed.slice(before), null, 2));
       return result;
     });
 
@@ -416,9 +448,17 @@ export async function runEndToEnd(options: E2EOptions = {}): Promise<E2EResult> 
     await writeFile(path.join(artifactDir, "brief.json"),
       JSON.stringify({ outcome, briefs: storedBriefs.map((b) => b.payload) }, null, 2));
     await writeFile(path.join(artifactDir, "outbound.json"),
-      JSON.stringify(channel.sent, null, 2));
+      JSON.stringify(handed, null, 2));
     await writeFile(path.join(artifactDir, "relationships.json"),
       JSON.stringify(await listRelationships(scope), null, 2));
+
+    if (dryRun !== null) {
+      // The dry-run report is the artifact this mode exists to produce. Written before the
+      // seam report so that a run which fails afterwards still leaves the thing a human
+      // was going to read.
+      const text = await writeDryRunReport(artifactDir, dryRun.port.records);
+      process.stdout.write(`\n${text}\n`);
+    }
 
     const report = seamReport(stages);
     await writeFile(path.join(artifactDir, "seam-report.md"), report);
@@ -428,12 +468,12 @@ export async function runEndToEnd(options: E2EOptions = {}): Promise<E2EResult> 
       artifactDir,
       stages,
       scope,
-      sent: channel.sent.length,
+      sent: handed.length,
       cardUrl,
       cardKind,
       briefItems: outboundRows.length,
       status: outcome.status,
-      outbound: channel.sent,
+      outbound: handed,
       briefs: storedBriefs.map((b) => b.payload),
       gists: gistOutcome.gists,
       drafts: [...drafts.values()],

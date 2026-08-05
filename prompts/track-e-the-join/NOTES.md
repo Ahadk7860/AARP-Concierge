@@ -1122,6 +1122,81 @@ needs to know it was a deliberate trade rather than a leak.
 person loses the same twenty minutes, and because the workaround is not obvious from the
 error, which names a utility (`execFileNoThrow`) that does not exist in this repo.
 
+### The ordering trap, third instance — and a claim I nearly wrote down as true
+
+I moved the Spectrum tests from `cloud/channel/src/` to the granted
+`cloud/channel/test/`, ran `check-ownership.sh e` **with the move uncommitted**, saw
+`OUT OF BOUNDS: cloud/channel/src/spectrum-channel.test.ts`, and concluded that a
+within-branch move leaves the old path in the diff forever. I rewrote the commit on that
+basis and was about to record it as a durable lesson.
+
+**It is false.** Reproduced in a scratch repo:
+
+```
+add src/a.test.ts   -> commit
+git mv to test/     -> commit
+git diff --name-only main...HEAD   =>   test/a.test.ts
+```
+
+Only the new path. `main...HEAD` is a net comparison against the merge base, and `src/`
+exists in neither tree.
+
+What actually happened is the **third instance of the ordering trap**: the file was at
+`test/` in the working tree and still at `src/` in `HEAD`, so the check was reporting an
+intermediate commit accurately and I read it as a permanent property. Same shape as the
+gate over a dirty tree and the green gate over an overwritten grant line — *a check is
+valid only for the tree that existed when it ran.* `gate.sh` refuses a dirty tree;
+**`check-ownership.sh` run directly does not**, which is the gap between them.
+
+The lesson is not about git. It is that I diagnosed from a symptom instead of reproducing
+the mechanism — the same standard I applied to Track F's install-location claim and to the
+four-seams list, skipped one commit later. Reproducing it costs thirty seconds.
+
+## Prompt 10 — the dry run, and the two things it caught
+
+`npm run e2e` with `channel: "spectrum-dry"` runs the whole pipe through the **real**
+`SpectrumChannel` over a port that records instead of transmitting, and writes
+`dry-run.md`: every message, every part, in the order a phone would receive them. Seven
+messages on a fresh account — first reply, first-sync offer, brief lead + three items,
+report.
+
+It earned its place immediately. **Both of these would have gone to a real phone.**
+
+### 1. The contact card arrived as debug output
+
+The first block mapping degraded `contact_card` to `` `${name}: ${handle}` ``, on the
+grounds that a card the user never receives is worse than a line of text. The dry run
+showed what that line actually is:
+
+```
+> Boi: +15550100123
+```
+
+In the **first reply** — the exact message AMENDMENT-002 moved the contact card to, to
+make it a courtesy rather than a mitigation. Photon has `nativeContactCard()`; the mapping
+now uses it, and the block's `name`/`handle` are deliberately **not** passed through: the
+transport knows its own identity, and a card built from what the composer thinks our
+handle is would be wrong precisely when the config is.
+
+### 2. The card URL is `http://127.0.0.1:…`
+
+Visible in the dry run's attachment line, and it is a **blocking pre-send condition**
+rather than a finding: `BOI_CARD_PUBLIC_BASE` must be a hostname a phone can resolve
+before anything is sent, or the acquisition artifact arrives as a link that cannot load.
+
+This is exactly what the dry run is for, and it is worth stating as the general case:
+**the last artifact anybody reads before a real send should be the bytes, produced by the
+real channel.** A `StubChannel` run is a test of the composer; this is a test of the
+message.
+
+### `channel.sent` is a stub-only affordance
+
+The runner used to read `StubChannel.sent` directly, which does not exist on
+`SpectrumChannel` and should not — a production channel accumulating every message it ever
+sent is a memory leak with a nice name. The runner now records what it hands the channel,
+which is the same evidence for either implementation and keeps every assertion in
+`e2e.test.ts` working across the substitution.
+
 ## Runtime resources
 
 `CONTRACTS.md` § 9 has no row for Track E. Reusing Track D's `3041` and Track A's

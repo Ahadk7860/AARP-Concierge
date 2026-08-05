@@ -115,11 +115,16 @@ describe("blocks to parts", () => {
     expect(parts[1]).toMatchObject({ kind: "text" });
   });
 
-  it("degrades a contact card to text rather than dropping it", () => {
-    // A contact card the user never receives is the difference between "save me" and
-    // silence.
+  it("sends a contact card NATIVELY, not as a line of text", () => {
+    // The dry run caught this: the first mapping wrote `Boi: +15550100123`, which arrives
+    // in the thread reading like debug output — in the FIRST REPLY, which is exactly where
+    // AMENDMENT-002 moved the contact card to.
     const parts = blocksToParts(outbound([{ type: "contact_card", name: "Boi", handle: "+1646" }]));
-    expect(parts).toEqual([{ kind: "text", text: "Boi: +1646" }]);
+    expect(parts).toEqual([{ kind: "contact_card" }]);
+    // The composer's idea of our handle is not passed through: the transport knows its
+    // own identity, and a card built from stale config would be wrong precisely when the
+    // config is.
+    expect(JSON.stringify(parts)).not.toContain("+1646");
   });
 });
 
