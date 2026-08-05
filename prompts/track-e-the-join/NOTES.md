@@ -1298,6 +1298,50 @@ is what it sounds like when it fails.
 Not fixed here: it needs either a bundle-level rule in the contract or a variety check in
 the validator, and both are decisions rather than repairs.
 
+## The first brief asks before it lists — a delivery-shape change
+
+**The live send failed, and the failure was the design telling us something.** Four
+messages went out unprompted into a conversation the user had never written to; the card
+landed and then Photon refused the rest:
+
+```
+SendTextMessage RESOURCE_EXHAUSTED
+  [upstream] New contact has sent 1 of 3 messages; replies are limited to 10 until they respond
+```
+
+The first brief is now **one message**: the card, and *"3 people are waiting on a reply
+from you — want me to list them?"* The items follow when they answer.
+
+Three reasons, and the transport one is the least important:
+
+1. **Four unprompted messages from an unknown number is what the spam affordances exist
+   for. One question is not.** This is AMENDMENT-002's reasoning applied one message
+   later — we inverted onboarding so the user opens the thread, then sent a four-message
+   brief into a thread they had never written to.
+2. **The reply is engagement data we were discarding.** A user who answers wanted the
+   brief; one who does not, did not. That distinction is free and nothing was capturing it.
+3. It fits the new-conversation cap **by construction**, so the constraint becomes the
+   design rather than something routed around.
+
+**A non-affirmative reply does not send the list.** "No" meaning "yes" is what gets an
+assistant muted, and finding out was the point of asking. `pendingOpener` reads
+`messages_out` rather than a flag on the brief — "did we ask" and "did we answer" are the
+same kind of fact, so neither can drift from the other.
+
+### One `send` per part cost the message that mattered
+
+`LiveSpectrumPort` issued a call per block so a partial failure would be attributable. The
+lead — image plus text — therefore spent **two** of the three messages a new contact gets,
+and the card arrived with its explanation refused. Batched now, and batching is required
+rather than tidy; attribution comes from the parts list logged beside the call.
+
+### What the dry run could not have caught
+
+A recording port has no upstream, so no amount of dry-running would have surfaced a
+server-side conversation cap. The dry run proves *what we would send*; only a live send
+proves *what the transport will accept*. Both were needed and the order was right — the
+expired date would have reached a person if the dry run had been skipped.
+
 ## Runtime resources
 
 `CONTRACTS.md` § 9 has no row for Track E. Reusing Track D's `3041` and Track A's

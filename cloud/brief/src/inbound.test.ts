@@ -25,7 +25,8 @@ import {
 } from "../../db/src/index.js";
 import { acquireSuiteLock, releaseSuiteLock } from "../../db/src/test-lock.js";
 import { newPairingToken } from "../../api/src/welcome.js";
-import { handleInbound, parsePairingToken, parseReportRequest } from "./inbound.js";
+import { handleInbound, parseAffirmative, parsePairingToken, parseReportRequest, replyBlocks } from "./inbound.js";
+import { deliverBrief } from "./deliver.js";
 import { cardFieldsForTest } from "./run.js";
 import type { Digest, Relationship } from "../../shared/src/index.js";
 import { insertDigest, newDigestId, upsertRelationships } from "../../db/src/index.js";
@@ -583,4 +584,60 @@ describe("a cached card's URL is rebuilt, not replayed", () => {
     // A FRESH signature, not the dead one that was cached.
     expect(image?.type === "image" && image.url).not.toContain("sig=dead");
   }, 120_000);
+});
+
+describe("the first brief asks before it lists", () => {
+  // One message, not four. Three reasons and the transport one is the least important:
+  // four unprompted messages from an unknown number is what the spam affordances exist
+  // for; the reply is engagement data we were discarding; and Photon caps a new
+  // conversation until the recipient answers — found the hard way, with RESOURCE_EXHAUSTED
+  // after the card had landed and its explanation had not.
+
+  it("sends the card and a question, and withholds the items", async () => {
+    const { scope } = await seed();
+    await seedDigest(scope);
+    const channel = new StubChannel();
+    const brief = {
+      schema_version: "brief.v1" as const,
+      user_id: scope.user_id,
+      scheduled_for: NOW.toISOString(),
+      staleness: { digest_as_of: NOW.toISOString(), hours_stale: 1, warn: false },
+      card_url: "https://cards.skylerluk.com/cards/x/card_a.png?exp=1&sig=a",
+      card_kind: "standard" as const,
+      items: [0, 1, 2].map((i) => ({
+        contact_id: `h_000000000000000${i}`, display: `Person ${i}`,
+        headline: "waiting", gist: "they are waiting", remedy: "reply" as const, drafts: null,
+      })),
+    };
+
+    await deliverBrief({ brief, channel, firstContact: true });
+
+    expect(channel.sent.length, "one message, not four").toBe(1);
+    const blocks = channel.sent[0]!.blocks;
+    expect(blocks.filter((b) => b.type === "image").length).toBe(1);
+    const said = blocks.map((b) => (b.type === "text" ? b.text : "")).join(" ");
+    expect(said).toContain("3 people are waiting on a reply from you");
+    expect(said).toContain("want me to list them?");
+    // The people are NOT named yet.
+    expect(said).not.toContain("Person 0");
+    expect(channel.sent[0]!.idempotency_key).toContain("-opener");
+  }, 120_000);
+
+  it("matches yes and its usual spellings, and nothing else", () => {
+    for (const yes of ["y", "yes", "yeah", "sure", "ok", "okay", "list", "show me", "Yep."]) {
+      expect(parseAffirmative(yes), yes).toBe(true);
+    }
+    for (const no of ["no", "not now", "stop", "yes but later", "1", "who?", null]) {
+      expect(parseAffirmative(no), String(no)).toBe(false);
+    }
+  });
+
+  it("a NON-affirmative reply acknowledges and sends nothing", () => {
+    // "No" meaning "yes" is the kind of thing that gets an assistant muted, and finding
+    // out was the entire point of asking.
+    const blocks = replyBlocks({ kind: "awaiting_list", brief_id: "brf_x" });
+    const said = blocks.map((b) => (b.type === "text" ? b.text : "")).join(" ");
+    expect(said).toContain("no problem");
+    expect(said).not.toContain("waiting on a reply");
+  });
 });

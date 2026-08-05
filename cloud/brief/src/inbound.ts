@@ -18,6 +18,7 @@
 
 import { boiHandle } from "../../api/src/welcome.js";
 import { readTodaysCard, todaysCardUrl, writeTodaysCard } from "../../card/src/store.js";
+import { itemBlocks } from "./deliver.js";
 import { localDayKey } from "./scheduler.js";
 import type { Brief, Candidate, Channel, InboundMessage, OutboundMessage } from "../../shared/src/index.js";
 import {
@@ -25,6 +26,7 @@ import {
   findOutboundByProviderMessageId,
   findUserIdByHandle,
   liveCodeFor,
+  listOutboundMessages,
   setHandleStatus,
   getPool,
   issuePairingCode,
@@ -79,6 +81,19 @@ export function parseReportRequest(text: string | null): boolean {
   return /\breports?\b/i.test(text);
 }
 
+/**
+ * `yes`, and the handful of ways people write it.
+ *
+ * Anchored to the whole message, unlike the report intent: `yes` inside a sentence is
+ * usually not an answer to our question, and this matcher is only consulted when a brief
+ * is actually waiting on one.
+ */
+export function parseAffirmative(text: string | null): boolean {
+  if (text === null) return false;
+  return /^\s*(?:y|ya|yea|yeah|yes|yep|sure|ok|okay|please|list|show me|go on|do it)\s*[.!]?\s*$/i
+    .test(text);
+}
+
 export type Selection =
   | { kind: "selected"; item_index: number; candidate_index: number; candidate: Candidate; brief_id: string }
   | { kind: "ambiguous"; brief_id: string; item_count: number }
@@ -102,6 +117,16 @@ export type Selection =
    * architecture names as the failure that costs trust permanently, and it is one `if`
    * away at all times.
    */
+  /**
+   * The opener asked "want me to list them?" and they said yes.
+   *
+   * The three items follow. A NON-affirmative reply deliberately does not produce this —
+   * see `awaiting_list`: "no" meaning "yes" is the kind of thing that gets an assistant
+   * muted, and the whole point of asking was to find out.
+   */
+  | { kind: "list_items"; brief_id: string; item_count: number }
+  /** A brief is waiting on an answer and the reply was not one. Acknowledge, send nothing. */
+  | { kind: "awaiting_list"; brief_id: string }
   | { kind: "report"; outcome: "no_corpus" | "refusal" | "standard"; cached: boolean }
   /** AMENDMENT-002: the prefilled token came back, and the account is now paired. */
   | { kind: "paired"; token: string }
@@ -183,6 +208,27 @@ export const PAIRING_TTL_SECONDS = 600;
  * rather than guessing. "Handling a reply that matches no brief, without guessing"
  * applies just as much to a reply that matches three items equally well.
  */
+
+/**
+ * A brief whose opener went out and whose items have not.
+ *
+ * Detected from `messages_out` rather than from a flag on the brief: the opener and the
+ * items are both send records, so "did we ask" and "did we answer" are the same kind of
+ * fact and neither can drift from the other.
+ */
+async function pendingOpener(
+  scope: UserScope,
+  db: Parameters<typeof latestBrief>[1],
+): Promise<{ brief_id: string; items: number } | null> {
+  const row = await latestBrief(scope, db);
+  if (row === null) return null;
+  const sent = await listOutboundMessages(scope, db);
+  const asked = sent.some((m) => m.idempotency_key.endsWith("-opener"));
+  const listed = sent.some((m) => m.idempotency_key.includes("-item-"));
+  if (!asked || listed) return null;
+  return { brief_id: row.brief_id, items: row.payload.items.length };
+}
+
 export async function resolveSelection(
   inbound: InboundMessage,
   scope: UserScope,
@@ -238,6 +284,22 @@ export async function resolveSelection(
       // of a live code under an advisory lock, so refusing is the only safe answer —
       // rebinding would hand this user's Mac somebody else's account.
       return { kind: "pairing_code", code, bound: false };
+    }
+  }
+
+  // THE ANSWER TO THE OPENER, before the report intent and before the 1/2 fallback.
+  //
+  // Only consulted when a brief actually went out as an opener and its items have not
+  // been sent — otherwise "ok" from an established user would replay this morning's list
+  // at them.
+  const pending = await pendingOpener(scope, db);
+  if (pending !== null) {
+    if (parseAffirmative(inbound.text)) {
+      return { kind: "list_items", brief_id: pending.brief_id, item_count: pending.items };
+    }
+    if (parseSelection(inbound.text) === null && parsePairingToken(inbound.text) === null) {
+      // Anything that is not a yes is not a yes. Acknowledged, and the list is not sent.
+      return { kind: "awaiting_list", brief_id: pending.brief_id };
     }
   }
 
@@ -343,6 +405,16 @@ export function replyBlocks(selection: Selection, display?: string): OutboundMes
             : "that code is already in use. hit sign up again and i'll text you a fresh one.",
         },
       ];
+    case "list_items":
+      // The items are built in `handleInbound`, which holds the brief. Nothing here.
+      return [];
+    case "awaiting_list":
+      // Acknowledged, and the list is NOT sent. Treating anything-but-no as yes is how an
+      // assistant gets muted, and asking was the point.
+      return [{
+        type: "text",
+        text: "no problem — say the word any time and i'll run through them.",
+      }];
     case "report":
       // The image and the standard-card lead-in are built in `handleInbound`, which holds
       // the renderer and the user id. Only the two TEXT-ONLY outcomes are answered here.
@@ -600,6 +672,27 @@ export async function handleInbound(input: {
   if (selection.kind === "no_drafts" || selection.kind === "selected") {
     const row = await latestBrief(scope, input.db ?? getPool());
     display = row?.payload.items[selection.item_index]?.display;
+  }
+
+  // THE ITEMS, now that they have said yes. One message per person, into a conversation
+  // the user has just opened — which is what lifts the new-contact cap as well as being
+  // the polite shape.
+  if (selection.kind === "list_items") {
+    const row = await latestBrief(scope, input.db ?? getPool());
+    const sent: OutboundMessage[] = [];
+    for (const [index, item] of (row?.payload.items ?? []).entries()) {
+      const message: OutboundMessage = {
+        schema_version: "outbound.v1",
+        user_id: scope.user_id,
+        idempotency_key: `brief-${scope.user_id}-${row?.payload.scheduled_for}-item-${index}`,
+        blocks: itemBlocks(item),
+        reply_to_message_id: null,
+      };
+      await input.channel.send(message);
+      sent.push(message);
+    }
+    log({ msg: "brief.items_listed", user_id: scope.user_id, items: sent.length });
+    return { selection, sent };
   }
 
   // THE REPORT, ON REQUEST — the path that makes the kill test runnable.
