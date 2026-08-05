@@ -1,7 +1,7 @@
 # Track H — Prompt 01 evidence
 
 - `npm run typecheck` passed.
-- `npx vitest run cloud/api/src/main.test.ts` passed (10 tests after review fixes).
+- `npx vitest run cloud/api/src/main.test.ts` passed (16 tests after review fixes).
 - `bash scripts/check-ownership.sh h` passes after the commit.
 
 ## Prompt 01 review fixes
@@ -15,6 +15,10 @@
   timeout and expose/log component slugs only.
 - The handle-envelope master key is consumed by an injected runtime key-provider
   capability for Track I; this track still does not implement private-row storage.
+- The runtime-created Postgres pool is installed before API construction. A repository-
+  backed authenticated request, readiness query, and shutdown all prove they observe
+  that exact object; the production secret matrix removes every currently required
+  secret independently and fails closed.
 
 ## Deferred integration facts
 

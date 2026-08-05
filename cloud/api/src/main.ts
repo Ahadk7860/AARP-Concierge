@@ -17,7 +17,12 @@ import type {
   SendResult,
 } from "../../shared/src/index.js";
 import { StubChannel, StubRegistrar } from "../../shared/src/index.js";
-import type { Queryable } from "../../db/src/index.js";
+import {
+  closePool,
+  installPool,
+  isInstalledPool,
+  type Queryable,
+} from "../../db/src/index.js";
 import { SpectrumChannel } from "../../channel/src/spectrum-channel.js";
 import { LiveSpectrumPort } from "../../channel/src/spectrum-live.js";
 import { SpectrumRegistrar } from "../../channel/src/spectrum-registrar.js";
@@ -149,12 +154,11 @@ export function createHandleEnvelopeKeyProvider(masterKey: Buffer): HandleEnvelo
 }
 
 type SpaceOps = { create(handle: string): Promise<Space>; get(id: string): Promise<Space> };
-type DatabaseResource = { db: Queryable; close(): Promise<void> };
 type SpectrumResource = { spaces: SpaceOps; stop(): Promise<void> };
 type RuntimeLog = (event: { msg: string; component?: string; outcome?: string }) => void;
 
 export type RuntimeFactories = {
-  openDatabase(url: string): Promise<DatabaseResource>;
+  openDatabase(url: string): Promise<pg.Pool>;
   connectSpectrum(config: SpectrumConfig): Promise<SpectrumResource>;
   createKeyProvider(key: Buffer): HandleEnvelopeKeyProvider;
   createSpectrumChannel(input: {
@@ -203,8 +207,7 @@ async function rememberSpectrumSpace(db: Queryable, userId: string, spaceId: str
 
 export const defaultRuntimeFactories: RuntimeFactories = {
   async openDatabase(url) {
-    const pool = new pg.Pool({ connectionString: url, max: 8 });
-    return { db: pool, close: () => pool.end() };
+    return new pg.Pool({ connectionString: url, max: 8 });
   },
   async connectSpectrum(config) {
     const app = await Spectrum({
@@ -295,11 +298,17 @@ export async function startRuntime(
   const factories = { ...defaultRuntimeFactories, ...overrides };
   const cleanups: Cleanup[] = [];
   let closing = false;
-  let database: DatabaseResource;
+  let database: pg.Pool;
   let spectrum: SpectrumResource | null = null;
   try {
     database = await factories.openDatabase(config.databaseUrl ?? LOCAL_DATABASE_URL);
-    cleanups.unshift(() => database.close());
+    // Register cleanup before installation: if another live pool is already installed,
+    // installPool throws and this newly-created resource still has to be closed.
+    cleanups.unshift(async () => {
+      if (isInstalledPool(database)) await closePool();
+      else await database.end();
+    });
+    installPool(database);
 
     let channel: Channel;
     let registrar: Registrar;
@@ -309,7 +318,7 @@ export async function startRuntime(
       const port = new LiveSpectrumPort(spectrum.spaces);
       channel = factories.createSpectrumChannel({
         port,
-        db: database.db,
+        db: database,
         webhookSecret: config.spectrum.webhookSecret,
       });
       registrar = new SpectrumRegistrar(port, config.spectrum.lineE164);
@@ -322,7 +331,7 @@ export async function startRuntime(
       ? null
       : factories.createKeyProvider(config.contactKeyEnvelopeMasterKey);
     const status = createRuntimeStatus({
-      db: database.db,
+      db: database,
       channel,
       timeoutMs: config.readinessTimeoutMs,
       isClosing: () => closing,

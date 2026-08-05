@@ -1,7 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+import type { Pool } from "pg";
 
 import { StubChannel } from "../../shared/src/index.js";
-import type { Queryable } from "../../db/src/index.js";
+import {
+  closePool,
+  getPool,
+  isInstalledPool,
+  type Queryable,
+} from "../../db/src/index.js";
 import { registerHealthRoutes } from "./health.js";
 import { buildServer } from "./server.js";
 import {
@@ -30,13 +36,20 @@ function db(query: () => Promise<unknown> = async () => queryResult): Queryable 
   return { query: query as Queryable["query"] };
 }
 
+function fakePool(
+  query: () => Promise<unknown> = async () => queryResult,
+  end: () => Promise<void> = async () => {},
+): Pool {
+  return { query: query as Pool["query"], end } as unknown as Pool;
+}
+
 function productionConfig(): RuntimeConfig {
   return loadRuntimeConfig(productionEnv);
 }
 
 function testFactories(overrides: Partial<RuntimeFactories> = {}): Partial<RuntimeFactories> {
   return {
-    openDatabase: async () => ({ db: db(), close: async () => {} }),
+    openDatabase: async () => fakePool(),
     connectSpectrum: async () => ({ spaces: {} as never, stop: async () => {} }),
     createSpectrumChannel: () => new StubChannel(),
     listen: async () => {},
@@ -46,12 +59,24 @@ function testFactories(overrides: Partial<RuntimeFactories> = {}): Partial<Runti
   };
 }
 
+afterEach(async () => {
+  await closePool();
+});
+
 describe("runtime configuration", () => {
-  it("fails closed in production when a mandatory deployment secret is absent", () => {
-    const { DATABASE_URL: _ignored, ...withoutDatabase } = productionEnv;
-    expect(() => loadRuntimeConfig(withoutDatabase)).toThrow(RuntimeConfigError);
-    try { loadRuntimeConfig(withoutDatabase); } catch (error) {
-      expect(error).toMatchObject({ missing: ["DATABASE_URL"] });
+  it.each([
+    "DATABASE_URL",
+    "SPECTRUM_PROJECT_ID",
+    "SPECTRUM_PROJECT_SECRET",
+    "SPECTRUM_LINE_E164",
+    "SPECTRUM_WEBHOOK_SECRET",
+    "CONTACT_KEY_ENVELOPE_MASTER_KEY",
+  ])("fails closed when production omits %s", (name) => {
+    const incomplete: NodeJS.ProcessEnv = { ...productionEnv };
+    delete incomplete[name];
+    expect(() => loadRuntimeConfig(incomplete)).toThrow(RuntimeConfigError);
+    try { loadRuntimeConfig(incomplete); } catch (error) {
+      expect(error).toMatchObject({ missing: expect.arrayContaining([name]) });
     }
   });
 
@@ -79,7 +104,7 @@ describe("configuration propagation", () => {
     const runtime = await startRuntime(productionConfig(), testFactories({
       openDatabase: async (url) => {
         seen["databaseUrl"] = url;
-        return { db: db(), close: async () => {} };
+        return fakePool();
       },
       connectSpectrum: async (config) => {
         seen["spectrum"] = config;
@@ -109,6 +134,40 @@ describe("configuration propagation", () => {
     expect(runtime.capabilities.handleEnvelopeKeys?.key()).toEqual(Buffer.alloc(32, 7));
     await runtime.close();
   });
+
+  it("installs one pool for repository traffic, readiness, and shutdown", async () => {
+    const sql: string[] = [];
+    let opened = 0;
+    let ended = 0;
+    const installed = fakePool(
+      async (text?: unknown) => {
+        sql.push(String(text));
+        return queryResult;
+      },
+      async () => { ended += 1; },
+    );
+    const runtime = await startRuntime(productionConfig(), testFactories({
+      openDatabase: async () => { opened += 1; return installed; },
+    }));
+
+    expect(getPool()).toBe(installed);
+    expect(isInstalledPool(installed)).toBe(true);
+    const response = await runtime.app.inject({
+      method: "POST",
+      url: "/v1/digest",
+      headers: { authorization: "Bearer usr_12345678.not-a-real-secret" },
+      payload: {},
+    });
+    expect(response.statusCode).toBe(401);
+    expect(sql.some((statement) => statement.includes("from devices"))).toBe(true);
+    await runtime.status.ready();
+    expect(sql.filter((statement) => statement === "select 1").length).toBeGreaterThanOrEqual(2);
+    expect(opened).toBe(1);
+
+    await runtime.close();
+    expect(ended).toBe(1);
+    expect(isInstalledPool(installed)).toBe(false);
+  });
 });
 
 describe("startup and shutdown safety", () => {
@@ -116,7 +175,7 @@ describe("startup and shutdown safety", () => {
     const events: string[] = [];
     const connectError = new Error("connect failed");
     await expect(startRuntime(productionConfig(), testFactories({
-      openDatabase: async () => ({ db: db(), close: async () => { events.push("db.close"); } }),
+      openDatabase: async () => fakePool(undefined, async () => { events.push("db.close"); }),
       connectSpectrum: async () => { throw connectError; },
     }))).rejects.toBe(connectError);
     expect(events).toEqual(["db.close"]);
@@ -126,7 +185,7 @@ describe("startup and shutdown safety", () => {
     const events: string[] = [];
     const listenError = new Error("listen failed");
     await expect(startRuntime(productionConfig(), testFactories({
-      openDatabase: async () => ({ db: db(), close: async () => { events.push("db.close"); } }),
+      openDatabase: async () => fakePool(undefined, async () => { events.push("db.close"); }),
       connectSpectrum: async () => ({ spaces: {} as never, stop: async () => { events.push("spectrum.stop"); } }),
       listen: async () => { throw listenError; },
       closeApp: async (app) => {
@@ -142,7 +201,7 @@ describe("startup and shutdown safety", () => {
     const events: string[] = [];
     const appCloseError = new Error("app close failed");
     const runtime = await startRuntime(productionConfig(), testFactories({
-      openDatabase: async () => ({ db: db(), close: async () => { events.push("db.close"); } }),
+      openDatabase: async () => fakePool(undefined, async () => { events.push("db.close"); }),
       connectSpectrum: async () => ({
         spaces: {} as never,
         stop: async () => { events.push("spectrum.stop"); throw new Error("stop failed"); },
