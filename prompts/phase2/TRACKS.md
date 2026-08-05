@@ -2,7 +2,7 @@
 
 | Track | Owned outcome | Green against |
 |---|---|---|
-| G | signed app artifact and measured four scheduled wakes | local app/wake tests; release dry-run |
+| G | signed app artifact and measured four scheduled wakes; owns `BoiApp/**`, `WakeScheduler*.swift`, `LaunchAgentPlist.swift`, and their focused tests | local app/wake tests; release dry-run |
 | H | API/card process entrypoints and deploy wiring | health endpoint and migration dry-run |
 | M | on-device two-way understanding and contextual voice packs | v2 fixtures and no-verbatim mutations |
 | I | Spectrum stream, encrypted inbound turns, tap-to-send delivery | recorded stream fixtures and absent-handle fixture |
