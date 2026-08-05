@@ -67,11 +67,14 @@ async function fixture<T>(...parts: string[]): Promise<T> {
  */
 const TABLES_PROMPT_01_SPECIFIED = [
   "briefs",
+  "contact_handles",
   "devices",
   "digests",
+  "inbound_outbox",
   "messages_out",
   "pairing_codes",
   "relationships",
+  "turns",
   "users",
   "voice_packs",
 ];

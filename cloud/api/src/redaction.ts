@@ -23,7 +23,7 @@
 // A pack that fails here is rejected with `422 redaction_failed` and stored NOWHERE.
 // This is a frozen anchor. Do not weaken a pattern to make a checklist green.
 
-import type { VoicePack } from "../../shared/src/index.js";
+import type { VoicePack, VoicePackV2 } from "../../shared/src/index.js";
 
 export type RedactedField = "exemplars" | "apology_openers" | "abbreviations" | "top_emoji";
 
@@ -77,9 +77,14 @@ const PATTERNS: ReadonlyArray<{ pattern: RedactionViolation["pattern"]; re: RegE
  * here is that adding a free-text field to `voice_pack.v1` and forgetting to scan it
  * requires editing this function, not merely failing to.
  */
-export function freeTextFields(pack: VoicePack): Array<{ field: RedactedField; values: readonly string[] }> {
+export function freeTextFields(pack: VoicePack | VoicePackV2): Array<{ field: RedactedField; values: readonly string[] }> {
   return [
-    { field: "exemplars", values: pack.exemplars ?? [] },
+    {
+      field: "exemplars",
+      values: pack.exemplars.map((exemplar) =>
+        typeof exemplar === "string" ? exemplar : exemplar.text,
+      ),
+    },
     { field: "apology_openers", values: pack.register?.apology_openers ?? [] },
     { field: "abbreviations", values: pack.register?.abbreviations ?? [] },
     { field: "top_emoji", values: pack.register?.top_emoji ?? [] },
@@ -91,7 +96,7 @@ export function freeTextFields(pack: VoicePack): Array<{ field: RedactedField; v
  * `exemplars`. Returning all of them means one rejection tells the Mac everything it
  * has to fix rather than sending it round the loop once per bad string.
  */
-export function findRedactionViolations(pack: VoicePack): RedactionViolation[] {
+export function findRedactionViolations(pack: VoicePack | VoicePackV2): RedactionViolation[] {
   const violations: RedactionViolation[] = [];
   for (const { field, values } of freeTextFields(pack)) {
     values.forEach((value, index) => {
