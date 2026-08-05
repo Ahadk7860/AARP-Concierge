@@ -88,10 +88,26 @@ export function parseReportRequest(text: string | null): boolean {
  * usually not an answer to our question, and this matcher is only consulted when a brief
  * is actually waiting on one.
  */
+const AFFIRMATIVE = new Set([
+  "y", "ya", "yea", "yeah", "yes", "yep", "yup", "sure", "ok", "okay", "k",
+  "please", "pls", "list", "show", "them", "me", "go", "on", "do", "it", "definitely",
+]);
+
 export function parseAffirmative(text: string | null): boolean {
   if (text === null) return false;
-  return /^\s*(?:y|ya|yea|yeah|yes|yep|sure|ok|okay|please|list|show me|go on|do it)\s*[.!]?\s*$/i
-    .test(text);
+  // EVERY word must be affirmative, rather than the whole reply being one token.
+  //
+  // The first version was anchored to a single word, and the first real human reply was
+  // **"yes sure"** — two affirmatives in a row, which is how people actually answer, and
+  // exactly what the anchor rejected. The reasoning behind anchoring was sound (a `yes`
+  // buried in a sentence is not always an answer) and the implementation was too literal.
+  //
+  // Still narrow in the direction that matters: "yes but not now" contains `but` and
+  // `now`, so it is NOT a yes. Treating anything containing "yes" as consent is how an
+  // assistant sends a list to somebody who was declining.
+  const words = text.toLowerCase().replace(/[.!,?]/g, " ").split(/\s+/).filter(Boolean);
+  if (words.length === 0 || words.length > 4) return false;
+  return words.every((w) => AFFIRMATIVE.has(w));
 }
 
 export type Selection =

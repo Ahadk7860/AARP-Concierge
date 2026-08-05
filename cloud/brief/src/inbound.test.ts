@@ -624,10 +624,13 @@ describe("the first brief asks before it lists", () => {
   }, 120_000);
 
   it("matches yes and its usual spellings, and nothing else", () => {
-    for (const yes of ["y", "yes", "yeah", "sure", "ok", "okay", "list", "show me", "Yep."]) {
+    // "yes sure" is what the first real user typed, and the first version rejected it.
+    for (const yes of ["y", "yes", "yeah", "sure", "ok", "okay", "list", "show me", "Yep.",
+      "yes sure", "yeah ok", "ok sure", "yes please", "sure, go on"]) {
       expect(parseAffirmative(yes), yes).toBe(true);
     }
-    for (const no of ["no", "not now", "stop", "yes but later", "1", "who?", null]) {
+    for (const no of ["no", "not now", "stop", "yes but later", "1", "who?", null,
+      "yes but not now", "maybe later", "who is waiting"]) {
       expect(parseAffirmative(no), String(no)).toBe(false);
     }
   });
