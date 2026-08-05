@@ -35,7 +35,20 @@ export type FleetHealth = {
   devices: number;
   quiet: number;
   quiet_share: number;
+  /**
+   * Reporting, and has never produced a digest. AMENDMENT-003's bucket.
+   *
+   * **Not healthy and not quiet, which is the whole point.** A Mac with Full Disk Access
+   * that heartbeats every hour and has never synced is a BROKEN SYNC — a different
+   * failure from a Mac nobody has opened, with a different fix. Before `digest_as_of`
+   * could be null the state was unrepresentable, so these devices counted as healthy and
+   * the most diagnostic thing the fleet knows was invisible.
+   */
+  never_synced: number;
+  never_synced_share: number;
   alarm: boolean;
+  /** The second alarm: a fleet-wide share reporting and producing nothing. */
+  sync_alarm: boolean;
   /**
    * Quiet share per `app_version`.
    *
@@ -44,7 +57,9 @@ export type FleetHealth = {
    * NOTES.md), but `app_version` does, and "every device on 1.4.0 went quiet on Tuesday"
    * names the release without it.
    */
-  by_app_version: Array<{ app_version: string | null; devices: number; quiet: number }>;
+  by_app_version: Array<{
+    app_version: string | null; devices: number; quiet: number; never_synced: number;
+  }>;
 };
 
 /**
@@ -75,12 +90,23 @@ export async function fleetHeartbeatHealth(
   // A device that has NEVER reported counts as quiet. It is a Mac that paired and then
   // never came back, which is the same fleet symptom and arguably the worst version of
   // it — the grant may never have worked at all.
-  const res = await db.query<{ app_version: string | null; devices: string; quiet: string }>(
+  const res = await db.query<{
+    app_version: string | null; devices: string; quiet: string; never_synced: string;
+  }>(
     `select app_version,
             count(*)::text as devices,
             count(*) filter (
               where last_heartbeat_at is null or last_heartbeat_at < $1
-            )::text as quiet
+            )::text as quiet,
+            -- REPORTING and never synced. The liveness clause is repeated on purpose:
+            -- a device that is quiet AND has never synced is counted as quiet, because
+            -- "we have not heard from it" is the more fundamental fact and double
+            -- counting would make the two shares add up to more than the fleet.
+            count(*) filter (
+              where last_heartbeat_at is not null
+                and last_heartbeat_at >= $1
+                and digest_as_of is null
+            )::text as never_synced
        from devices
       group by app_version
       order by app_version nulls last`,
@@ -91,29 +117,43 @@ export async function fleetHeartbeatHealth(
     app_version: r.app_version,
     devices: Number(r.devices),
     quiet: Number(r.quiet),
+    never_synced: Number(r.never_synced),
   }));
   const devices = byVersion.reduce((n, r) => n + r.devices, 0);
   const quiet = byVersion.reduce((n, r) => n + r.quiet, 0);
+  const neverSynced = byVersion.reduce((n, r) => n + r.never_synced, 0);
   const quietShare = devices === 0 ? 0 : quiet / devices;
+  const neverSyncedShare = devices === 0 ? 0 : neverSynced / devices;
 
   return {
     as_of: now.toISOString(),
     devices,
     quiet,
     quiet_share: quietShare,
+    never_synced: neverSynced,
+    never_synced_share: neverSyncedShare,
     alarm: devices >= minimumDevices && quietShare >= alarmShare,
+    sync_alarm: devices >= minimumDevices && neverSyncedShare >= alarmShare,
     by_app_version: byVersion,
   };
 }
 
 /** The log line. Structured JSON, no user content — `CONTRACTS.md` § 6. */
 export function fleetHealthEvent(health: FleetHealth): Record<string, unknown> {
+  // Two alarms, two causes, two fixes. Collapsing them into one "fleet unhealthy" line
+  // would send somebody to look at TCC grants when the grants are fine and the sync is
+  // broken, which is the failure this bucket exists to prevent.
+  const msg = health.alarm
+    ? "fleet.quiet_alarm"
+    : health.sync_alarm ? "fleet.never_synced_alarm" : "fleet.health";
   return {
-    msg: health.alarm ? "fleet.quiet_alarm" : "fleet.health",
-    level: health.alarm ? "error" : "info",
+    msg,
+    level: health.alarm || health.sync_alarm ? "error" : "info",
     devices: health.devices,
     quiet: health.quiet,
     quiet_share: Number(health.quiet_share.toFixed(3)),
+    never_synced: health.never_synced,
+    never_synced_share: Number(health.never_synced_share.toFixed(3)),
     by_app_version: health.by_app_version,
     as_of: health.as_of,
     ...(health.alarm
@@ -122,6 +162,15 @@ export function fleetHealthEvent(health: FleetHealth): Record<string, unknown> {
             "a fleet-wide share of Macs stopped reporting. Check whether an auto-update "
             + "changed the bundle path and dropped Full Disk Access for everyone on that "
             + "version at once.",
+        }
+      : {}),
+    ...(health.sync_alarm
+      ? {
+          consequence:
+            "a fleet-wide share of Macs are REPORTING and have never produced a digest. "
+            + "The grant is fine and the sync is not: look at the reader, the mirror, or "
+            + "a release that broke it. These devices are not quiet and must not be "
+            + "counted as healthy.",
         }
       : {}),
   };

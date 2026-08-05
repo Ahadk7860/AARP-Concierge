@@ -17,14 +17,16 @@ import {
   deleteUser,
   deviceBelongsToUser,
   insertDigest,
+  latestDigest,
   newDigestId,
   recordHeartbeat,
   upsertVoicePack,
 } from "../../../db/src/index.js";
-import type { Digest, VoicePack } from "../../../shared/src/index.js";
+import type { Channel, Digest, VoicePack } from "../../../shared/src/index.js";
 import { authenticate, ownsUser } from "../auth.js";
 import { duplicate, redactionFailed, send, unauthorized, validation } from "../errors.js";
 import { bodyHash, logEvent } from "../logging.js";
+import { firstSyncOffer } from "../welcome.js";
 import { digestSchema, heartbeatSchema, voicePackSchema } from "../schemas.js";
 import { describeViolations, findRedactionViolations } from "../redaction.js";
 
@@ -47,7 +49,22 @@ function parse<T>(schema: ZodType<T>, body: unknown): { ok: true; value: T } | {
     : { ok: false, detail: detailFrom(result.error) };
 }
 
-export function registerIngestRoutes(app: FastifyInstance, log: Logger): void {
+export type IngestDeps = {
+  /**
+   * The channel, so the first sync can offer the report.
+   *
+   * Optional: an API built without one still ingests, and the offer is the one thing that
+   * does not happen. It is logged either way — a silently absent offer is a funnel step
+   * nobody knows is missing.
+   */
+  channel?: Channel;
+};
+
+export function registerIngestRoutes(
+  app: FastifyInstance,
+  log: Logger,
+  deps: IngestDeps = {},
+): void {
   // -------------------------------------------------------------------------
   app.post("/v1/digest", async (req, reply) => {
     const principal = await authenticate(req, reply);
@@ -77,9 +94,40 @@ export function registerIngestRoutes(app: FastifyInstance, log: Logger): void {
     }
 
     const digest_id = newDigestId();
+    // Asked BEFORE the insert, because after it the answer is always "no".
+    const first = (await latestDigest(principal.scope)) === null;
     try {
       const stored = await insertDigest(principal.scope, { digest_id, digest });
       const received_at = new Date().toISOString();
+
+      // THE FIRST SYNC, AND THE OFFER. Prompt 09's other end.
+      //
+      // People are most curious in the ninety seconds after their history finishes
+      // loading, and until this existed the earliest anyone could see their report was
+      // 8am tomorrow — we were asking them to sleep on it. The offer goes out exactly
+      // once, on the first digest, and names the phrase to text back rather than hinting
+      // that one exists.
+      //
+      // Failure here must not fail the upload: the digest is stored, the Mac is waiting
+      // on a 202, and a transport hiccup is not a reason to make it retry a corpus it
+      // already delivered.
+      if (first && deps?.channel !== undefined) {
+        try {
+          await deps.channel.send(firstSyncOffer(principal.scope.user_id, digest));
+          logEvent(log, {
+            msg: "sync.offer_sent",
+            route: "/v1/digest",
+            user_id: principal.scope.user_id,
+          });
+        } catch (err) {
+          logEvent(log, {
+            msg: "sync.offer_failed",
+            route: "/v1/digest",
+            user_id: principal.scope.user_id,
+            violations: err instanceof Error ? err.message : "unknown",
+          });
+        }
+      }
       logEvent(log, {
         msg: "digest.ingested",
         route: "/v1/digest",

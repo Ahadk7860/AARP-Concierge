@@ -124,7 +124,8 @@ export type OutboundMessage = {
 
 export type InboundMessage = {
   schema_version: "inbound.v1";
-  provider: "linq" | "mock" | "twilio";
+  /** Widened for prompt 10: `spectrum`. A union widening; nothing that compiled stops. */
+  provider: "linq" | "mock" | "twilio" | "spectrum";
   provider_message_id: string; line_id: string;
   from_handle: string; user_id: string | null;
   received_at: ISO8601;
@@ -143,7 +144,20 @@ export type Capabilities = {
 export type SendResult = {
   message_id: string;
   provider: string;
-  protocol: "imessage" | "rcs" | "sms";
+  /**
+   * **NULLABLE from prompt 10, and this is a widening of a frozen type — not free.**
+   * `deliver.ts` and Track C's adapter both read it.
+   *
+   * Photon reports four services (`iMessage | SMS | RCS | unknown`) against these three
+   * protocols. `unknown` must not become `"sms"`: "we do not know whether this was blue"
+   * and "this was green" are different facts and only one of them is true, and the wrong
+   * one drives the handle-mismatch flag that tells a user their number is not on iMessage.
+   *
+   * `null` rather than a fourth string, for consistency: `inbound.v1.protocol` already
+   * encodes exactly this fact as `null`, so both directions end up with ONE encoding for
+   * "we do not know" instead of two.
+   */
+  protocol: "imessage" | "rcs" | "sms" | null;
   line_id: string;
 };
 
@@ -182,4 +196,53 @@ export interface Channel {
    * `401 bad_signature`, never a 500.
    */
   normalizeInbound(rawBody: Buffer | string, signature: string): InboundMessage;
+}
+
+/** A line the transport has assigned to one user. */
+export type AssignedLine = {
+  /** The transport's own id for the line. */
+  line_id: string;
+  /** The handle the USER texts. Shared-pool means this differs per recipient. */
+  handle: string;
+};
+
+/**
+ * Registering a user with the transport, and finding out which line they were given.
+ *
+ * ADDITIVE, AMENDMENT-002. A separate port rather than two more methods on `Channel`,
+ * because registration is not a sending concern and `Channel` is the line above which no
+ * provider semantics appear. It lives here, beside `Channel`, for one reason worth
+ * stating: `cloud/channel` and `cloud/api` both import from `cloud/shared`, and
+ * `cloud/channel` has never imported from `cloud/api`. Defining this on the product
+ * surface would force `spectrum-channel.ts` to import a type from the API in order to
+ * implement it — an inverted arrow that is invisible until the second implementation
+ * exists and permanent afterwards.
+ *
+ * **TWO OPERATIONS, AND IT MUST STAY TWO.** Register these handles for this user; tell
+ * me which line is theirs. The moment this acquires a `send`, or learns what a message
+ * is, or grows a capability query, the seam has moved and the frozen `Channel` line
+ * stops meaning anything — there would be two interfaces that both know how to talk to a
+ * transport and no rule about which one owns what. If you are here because you need one
+ * more method: the answer is almost certainly a new port, or `Channel`.
+ */
+export interface Registrar {
+  /**
+   * Every handle this user might send from, in ONE call.
+   *
+   * One call rather than one per handle, deliberately: **Messages on a Mac frequently
+   * sends from the Apple Account email rather than the phone number**, the transport
+   * cannot tell us which Apple will pick, and an API that lets a caller register only
+   * one is an API that invites getting it wrong. The failure it prevents is silent —
+   * inbound from an unregistered handle looks like nothing happening at all.
+   */
+  register(input: { user_id: string; handles: readonly string[] }): Promise<void>;
+
+  /**
+   * The line assigned to this user, or `null` if they have none yet.
+   *
+   * Resolving must not send: a "new conversation" is the first message a line SENDS, so
+   * reading the assignment has to be free of quota and free of a cold-open message to
+   * somebody who has not written first.
+   */
+  lineFor(userId: string): Promise<AssignedLine | null>;
 }

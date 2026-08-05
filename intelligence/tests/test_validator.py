@@ -26,6 +26,8 @@ from boi_intel.validator import (
     APOLOGY_OPENER_ALLOWANCE,
     EMOJI_RATE_FLOOR,
     EXTRA_FORBIDDEN_PHRASES,
+    days_until_next_occurrence,
+    expired_specifics,
     explain,
     fabricated_specifics,
     length_limit,
@@ -664,3 +666,75 @@ def test_the_retry_note_for_a_stale_tense_failure_says_what_to_do_instead():
     # rephrasing the same claim.
     note = retry_note(["stale_tense_gate"])
     assert "a while" in note
+
+
+# ------------------------------------------------- a specific the corpus has outrun
+#
+# CONTRACTS.md section 1 has always said a specific is "falsifiable against a calendar."
+# Nothing ever checked one. `gist.facts` licenses a token because it APPEARED IN THE
+# CORPUS, and the corpus can be months old -- so "the 14th", extracted from a message sent
+# 54 days ago, licensed "friday the 14th works for me" and committed the user to a date
+# that had already gone. Found in the dry run for the first live send, one gate before a
+# real person read it.
+
+
+def _gist_silent(days: int) -> dict:
+    return {
+        "gist_id": "g_expired0001",
+        "as_of": "2026-08-05T03:44:38Z",
+        "days_silent": days,
+        "facts": {
+            "dates": ["friday", "the 14th"],
+            "times": [],
+            "places": [],
+            "amounts": [],
+            "names": [],
+        },
+    }
+
+
+_EXPIRED_PAIR = [
+    {"stance": "answer", "text": "sorry been mia for ages, friday the 14th works for me"},
+    {"stance": "defer", "text": "sorry been mia for ages, can i let u know about the 14th"},
+]
+
+
+def test_a_date_the_thread_has_outrun_is_not_licensed():
+    # 54 days of silence. The next Friday is at most 7 days out and the next 14th at most
+    # 31, so both have certainly passed -- and the draft offers them as upcoming.
+    failures = validate_candidates(_EXPIRED_PAIR, _gist_silent(54), {"register": _REGISTER}, _NOW)
+    assert "fabrication_gate" in failures
+
+
+def test_the_same_date_on_a_RECENT_thread_stays_licensed():
+    # The case the blunt rule would have thrown away, and the one the product is best at:
+    # a recent thread with a real pending date is where a committing draft is worth most.
+    # 3 < 31, so "the 14th" is still plausibly ahead.
+    failures = validate_candidates(_EXPIRED_PAIR, _gist_silent(3), {"register": _REGISTER}, _NOW)
+    assert failures == []
+
+
+def test_the_horizon_matches_how_often_each_shape_recurs():
+    assert days_until_next_occurrence("friday") == 7
+    assert days_until_next_occurrence("the 14th") == 31
+    assert days_until_next_occurrence("aug 3") == 366
+    assert days_until_next_occurrence("tomorrow") == 2
+    # Not date-shaped: no horizon, no rule.
+    assert days_until_next_occurrence("the ferry building") is None
+
+
+def test_a_fully_qualified_date_is_left_alone():
+    # `8/14/2026` is unambiguous and this reasoning does not apply to it. Rare, because
+    # facts are capped at three words and forty characters, but a rule that blocked
+    # "March 14 2027" would simply be wrong.
+    gist = _gist_silent(400)
+    gist["facts"]["dates"] = ["8/14/2026"]
+    assert expired_specifics("see you 8/14/2026", gist) == []
+
+
+def test_a_weekday_expires_sooner_than_an_ordinal():
+    # 10 days of silence: the next Friday has passed, the next 14th has not. The rule is
+    # per-shape rather than one threshold, which is the whole reason it does not over-block.
+    gist = _gist_silent(10)
+    assert expired_specifics("friday works", gist) == ["friday"]
+    assert expired_specifics("the 14th works", gist) == []

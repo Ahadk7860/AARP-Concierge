@@ -39,7 +39,7 @@ import { migrate } from "../../db/src/migrate.js";
 import { acquireSuiteLock, releaseSuiteLock } from "../../db/src/test-lock.js";
 import { slotFor } from "../../brief/src/scheduler.js";
 import { acquireSchedulerLock } from "./lock.js";
-import { fleetHeartbeatHealth } from "./fleet.js";
+import { fleetHealthEvent, fleetHeartbeatHealth } from "./fleet.js";
 import { sweepOnce, type SweepDeps } from "./sweep.js";
 
 const REPO_ROOT = path.resolve(import.meta.dirname, "..", "..", "..");
@@ -336,7 +336,9 @@ describe("the fleet heartbeat read", () => {
   }
 
   /** N devices, `quiet` of them last seen `staleHours` ago, the rest seen just now. */
-  async function fleet(total: number, quiet: number, now: Date, appVersion = "1.4.0") {
+  async function fleet(
+    total: number, quiet: number, now: Date, appVersion = "1.4.0", neverSynced = 0,
+  ) {
     for (let i = 0; i < total; i += 1) {
       const scope = await user(LA, now);
       const deviceId = newDeviceId();
@@ -344,7 +346,15 @@ describe("the fleet heartbeat read", () => {
       const seenAt = i < quiet
         ? new Date(now.getTime() - 72 * 3_600_000)
         : new Date(now.getTime() - 60_000);
-      await recordHeartbeat(scope, deviceId, seenAt, { app_version: appVersion });
+      // AMENDMENT-003: a device that is reporting and has never synced sends
+      // `digest_as_of: null`, which is a claim rather than an omission.
+      const synced = i >= quiet && i < quiet + neverSynced
+        ? null
+        : new Date(now.getTime() - 2 * 3_600_000);
+      await recordHeartbeat(scope, deviceId, seenAt, {
+        app_version: appVersion,
+        digest_as_of: synced?.toISOString() ?? null,
+      });
     }
   }
 
@@ -376,6 +386,48 @@ describe("the fleet heartbeat read", () => {
     // never crosses the wire, `app_version` does.
     expect(alarmed.by_app_version[0]?.app_version).toBe("1.4.0");
     expect(alarmed.by_app_version[0]?.quiet).toBe(8);
+  }, 300_000);
+
+  it("puts granted-but-never-synced in its OWN bucket rather than counting it healthy",
+    async () => {
+      // AMENDMENT-003's reason for existing. These Macs have Full Disk Access, heartbeat
+      // every hour, and have never produced a digest — a BROKEN SYNC, which is a
+      // different failure from a quiet Mac with a different fix. Before `digest_as_of`
+      // could be null the state was unrepresentable and they counted as healthy.
+      const now = new Date(Date.UTC(2026, 8, 14, 16, 0, 0));
+      await clearFleet();
+      await fleet(10, 0, now, "1.4.0", 8);
+
+      const health = await fleetHeartbeatHealth({ now });
+      expect(health.devices).toBe(10);
+      // Not quiet: every one of them is reporting.
+      expect(health.quiet).toBe(0);
+      expect(health.alarm).toBe(false);
+      // And not healthy either.
+      expect(health.never_synced).toBe(8);
+      expect(health.sync_alarm).toBe(true);
+      expect(health.by_app_version[0]?.never_synced).toBe(8);
+
+      // The two alarms are different events with different remedies. A single
+      // "fleet unhealthy" line would send somebody to look at TCC grants when the
+      // grants are fine.
+      const event = fleetHealthEvent(health);
+      expect(event["msg"]).toBe("fleet.never_synced_alarm");
+      expect(String(event["consequence"])).toContain("grant is fine and the sync is not");
+    }, 300_000);
+
+  it("counts a device that is BOTH quiet and never-synced as quiet, once", async () => {
+    // Otherwise the two shares add up to more than the fleet, and "we have not heard
+    // from it" is the more fundamental fact — a device we cannot reach tells us nothing
+    // about whether its sync works.
+    const now = new Date(Date.UTC(2026, 8, 14, 16, 0, 0));
+    await clearFleet();
+    await fleet(6, 6, now, "1.4.0", 6);
+
+    const health = await fleetHeartbeatHealth({ now });
+    expect(health.quiet).toBe(6);
+    expect(health.never_synced).toBe(0);
+    expect(health.quiet + health.never_synced).toBeLessThanOrEqual(health.devices);
   }, 300_000);
 
   it("does not alarm on a fleet too small to mean anything", async () => {

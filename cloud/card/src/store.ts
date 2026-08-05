@@ -143,3 +143,80 @@ export function signedCardPath(
   const signature = signCard(userId, cardId, expiresAt);
   return `/cards/${userId}/${cardId}.png?exp=${expiresAt}&sig=${signature}`;
 }
+
+// ---------------------------------------------------------------------------
+// Today's report card
+// ---------------------------------------------------------------------------
+//
+// `send my friends report` is the ONE path a user can trigger as fast as they can type,
+// and every trigger renders a 1080x1920 PNG. Two reasons to cache it, and the second
+// matters more than the cost: **a card that changes between two requests four seconds
+// apart is a card whose numbers nobody trusts.** The card's whole claim is that the user
+// can check it against their own memory.
+//
+// It lives HERE, beside the PNG, rather than in a `report_cards` table. A table would be
+// the obvious choice and it was the first attempt — but every user-data table in this
+// schema must be hash-partitioned and seeded by `schema.test.ts`'s helper, which belongs
+// to Track D, so a new table means an edit to another track's suite for a cache. Keeping
+// it next to the artifact also means `deleteUser` already reaches it: the whole
+// `<root>/<user_id>/` directory goes, pointer and PNG together, with no second thing to
+// remember.
+//
+// Keyed on the LOCAL DAY rather than a TTL, because "your report for today" is what the
+// card claims to be. A rolling 24-hour window hands somebody a card at 23:58 that is
+// still called today's at 23:58 tomorrow.
+
+export type TodaysCard = {
+  /** Carried so the URL can be rebuilt without the caller having to remember whose it is. */
+  user_id_for_url: string;
+  day_key: string;
+  card_id: string | null;
+  card_url: string | null;
+  kind: "standard" | "refusal";
+  served_at: string;
+};
+
+function pointerPath(userId: string, dayKey: string): string {
+  return path.join(cardRoot(), path.basename(userId), `report-${path.basename(dayKey)}.json`);
+}
+
+export function readTodaysCard(userId: string, dayKey: string): TodaysCard | null {
+  const file = pointerPath(userId, dayKey);
+  if (!existsSync(file)) return null;
+  try {
+    return JSON.parse(readFileSync(file, "utf8")) as TodaysCard;
+  } catch {
+    // A truncated pointer is a cache miss, never a crash: the worst case is one extra
+    // render, and the alternative is a user who cannot get their report at all.
+    return null;
+  }
+}
+
+/**
+ * Today's card as a URL that is valid NOW, rebuilt from the stored `card_id`.
+ *
+ * **The pointer stores the id; the URL is derived at serve time.** Caching an absolute
+ * URL looked equivalent and is not: a signed URL carries an expiry and a host, so a cached
+ * one breaks when the signature ages out, when the signing key rotates, and when the
+ * service moves — and it breaks by handing the user a link that 401s or refuses to
+ * connect, which reads to them as the product being broken.
+ *
+ * Found in the end-to-end runner, where each run gets an ephemeral port and a second run
+ * on the same day held a URL whose server was gone. That is the same bug wearing a
+ * costume: the host that issued a cached URL is not guaranteed to be the host that serves
+ * it later.
+ *
+ * Falls back to the stored URL when there is no `card_id` — pointers written before this
+ * existed, and refusals, which have no stored card at all.
+ */
+export function todaysCardUrl(card: TodaysCard, base: string | null): string | null {
+  if (card.card_id === null || base === null || base === "") return card.card_url;
+  return `${base.replace(/\/$/, "")}${signedCardPath(card.user_id_for_url, card.card_id)}`;
+}
+
+export function writeTodaysCard(userId: string, card: Omit<TodaysCard, "user_id_for_url">): void {
+  const file = pointerPath(userId, card.day_key);
+  mkdirSync(path.dirname(file), { recursive: true });
+  writeFileSync(file, `${JSON.stringify({ ...card, user_id_for_url: userId }, null, 2)}\n`,
+    { mode: 0o600 });
+}

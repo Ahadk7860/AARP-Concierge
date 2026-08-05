@@ -16,6 +16,8 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 
 import { StubChannel } from "../../shared/src/index.js";
@@ -72,6 +74,12 @@ async function waitForServer(base: string, attempts = 100): Promise<void> {
 beforeAll(async () => {
   await acquireSuiteLock();
   await migrate();
+  // Pinned BEFORE the child is spawned, and this is the bug it prevents: the child runs
+  // under `vite-node`, which loads `.env`; this suite runs under `vitest`, which does not.
+  // Left to themselves they sign and verify with different keys, and every fetch is a 401
+  // that reads as a signature bug rather than as two processes disagreeing about a file.
+  process.env["BOI_CARD_SIGNING_SECRET"] ??= randomBytes(32).toString("hex");
+  process.env["BOI_CARD_WRITE_SECRET"] ??= randomBytes(24).toString("hex");
   childRenderer = spawn(
     process.execPath,
     [path.join(REPO_ROOT, "node_modules", "vite-node", "vite-node.mjs"),
@@ -201,7 +209,9 @@ describe("the whole pipe, end to end", () => {
     const result = await runEndToEnd({ artifactRoot: ARTIFACT_ROOT, log: () => {} });
     const url = viaChild(result.cardUrl as string);
     expect((await fetch(url)).status).toBe(200);
-    expect(countCardsFor(result.scope.user_id)).toBe(1);
+    // At least one: the brief's card, plus the report's if the run asked for one. The
+    // assertion that matters is the one after the delete.
+    expect(countCardsFor(result.scope.user_id)).toBeGreaterThanOrEqual(1);
 
     const deleted = await deleteUser(result.scope);
     expect(deleted.deleted).toBe(true);
@@ -220,15 +230,26 @@ describe("the whole pipe, end to end", () => {
 
     // GAP 5. Asserted over the blocks `StubChannel` received — the stored `card_url`
     // below was already true on the run that found this, and the card still never left.
-    const images = result.outbound.flatMap((m) =>
+    // Scoped to the BRIEF's messages. Since prompt 09 the run also answers a report
+    // request, which carries its own card — a count over every outbound would be
+    // asserting "how many cards exist" rather than "did the brief carry one".
+    const briefMessages = result.outbound.filter((m) =>
+      m.idempotency_key.startsWith("brief-"));
+    const images = briefMessages.flatMap((m) =>
       m.blocks.filter((b): b is { type: "image"; url: string; alt?: string | null } =>
         b.type === "image"),
     );
-    expect(images.length, JSON.stringify(result.outbound)).toBe(1);
+    expect(images.length, JSON.stringify(briefMessages)).toBe(1);
     expect(images[0]?.url).toBe(result.cardUrl);
 
     // It rides the LEAD, and it rides it before the line that leads into the items.
-    const lead = result.outbound[0];
+    //
+    // Found by KEY rather than by position: since AMENDMENT-002 the channel's first
+    // message is Boi's reply to the user's pairing text, so `outbound[0]` is no longer
+    // the brief's lead. A positional assumption that was true when it was written and
+    // false two prompts later.
+    const lead = result.outbound.find((m) => m.idempotency_key.endsWith("-lead"));
+    expect(lead, JSON.stringify(result.outbound.map((m) => m.idempotency_key))).toBeDefined();
     const imageIndex = lead!.blocks.findIndex((b) => b.type === "image");
     const framingIndex = lead!.blocks.findIndex(
       (b) => b.type === "text" && /worth a message today/.test(b.text));
@@ -288,7 +309,12 @@ describe("the whole pipe, end to end", () => {
     });
 
     expect(second.status).toBe("already_sent");
-    expect(second.sent, JSON.stringify(second.outbound)).toBe(0);
+    // No second BRIEF. The report intent legitimately answers again — a user may ask
+    // twice and gets the cached card with "same card as earlier today" — so counting
+    // every send would assert that the product ignores its own user.
+    const secondLeads = second.outbound.filter((m) => m.idempotency_key.endsWith("-lead"));
+    expect(secondLeads.length, JSON.stringify(second.outbound.map((m) => m.idempotency_key)))
+      .toBe(0);
 
     // Nothing new in the outbox either, so this is not passing because a fresh channel
     // simply had not been used yet.
@@ -320,5 +346,79 @@ describe("the whole pipe, end to end", () => {
         if (block.type === "text") expect(block.text).not.toContain("card.png");
       }
     }
+  }, TIMEOUT);
+});
+
+describe("the write route is not on the public prefix, and is authenticated anyway", () => {
+  // The card is a named breakdown of one person's relationships, and the public hostname
+  // is fronted by a tunnel whose ingress matches HOSTNAME AND PATH ONLY — a Go regex,
+  // `^/cards/`, with no method matching. A write route sharing that prefix is forwarded by
+  // the edge whatever verb it carries.
+  //
+  // So: it lives at `/internal/cards/:user_id`, which the existing rule excludes, AND it
+  // checks a shared secret. Relying on the edge rule alone means a mistyped regex or a
+  // deleted DNS record silently reopens an unauthenticated write into any user's card
+  // directory, and nothing in the app would notice.
+
+  const digest = () => JSON.parse(readFileSync(
+    path.join(REPO_ROOT, "contracts", "fixtures", "digest", "healthy.json"), "utf8"));
+
+  /**
+   * A fresh id per run, because the card store is a DIRECTORY that outlives the process.
+   *
+   * The first version used a fixed `usr_writeprobe01` and asserted nothing had been
+   * written — which was true until a falsification run disabled the auth check, stored a
+   * card under that id, and left it there. The test then failed on the leftover rather
+   * than on the behaviour, one run later and for a reason with no connection to what it
+   * was asserting.
+   */
+  const probeUser = () => `usr_wp${randomBytes(5).toString("hex")}`;
+
+  it("refuses a write with no secret, a wrong secret, and the old public path", async () => {
+    const user = probeUser();
+    const body = JSON.stringify(digest());
+    const json = { "content-type": "application/json" };
+
+    // No secret at all.
+    const none = await fetch(`${CHILD_CARD_BASE}/internal/cards/${user}`, {
+      method: "POST", headers: json, body,
+    });
+    expect(none.status).toBe(401);
+
+    // A wrong one, same length as the real secret so this fails on the comparison rather
+    // than on the length check.
+    const real = process.env["BOI_CARD_WRITE_SECRET"] as string;
+    const wrong = await fetch(`${CHILD_CARD_BASE}/internal/cards/${user}`, {
+      method: "POST",
+      headers: { ...json, "x-boi-card-write": "z".repeat(real.length) },
+      body,
+    });
+    expect(wrong.status).toBe(401);
+
+    // And the old path is gone from the server entirely, so the tunnel's `^/cards/` rule
+    // has nothing to forward even if it were pointed at a POST.
+    const oldPath = await fetch(`${CHILD_CARD_BASE}/cards/${user}`, {
+      method: "POST", headers: json, body,
+    });
+    expect(oldPath.status).toBe(404);
+
+    // Nothing was written by any of the three.
+    expect(countCardsFor(user)).toBe(0);
+  }, TIMEOUT);
+
+  it("accepts the write with the secret, so the 401s above are not a broken route", async () => {
+    const response = await fetch(`${CHILD_CARD_BASE}/internal/cards/${probeUser()}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-boi-card-write": process.env["BOI_CARD_WRITE_SECRET"] as string,
+      },
+      body: JSON.stringify(digest()),
+    });
+    expect([200, 201]).toContain(response.status);
+    // The fixture digest is below the renderer's bar, so this is a refusal — which is
+    // rendered and deliberately NOT stored.
+    const card = (await response.json()) as { kind: string };
+    expect(["standard", "refusal"]).toContain(card.kind);
   }, TIMEOUT);
 });

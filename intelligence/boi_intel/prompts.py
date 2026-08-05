@@ -155,6 +155,11 @@ def render_gist(gist: dict, now: datetime | None = None) -> str:
         f"situation: {gist.get('gist')}",
         f"state: {gist.get('state')}",
         f"days since the last message: {gist.get('days_silent')}",
+        # Said plainly, because a model that knows the thread is two months old is less
+        # likely to offer a date from it as though it were upcoming. The GATE is what
+        # guarantees it; this is what stops the retry being necessary.
+        "any date in ALLOWED SPECIFICS came from that message, so if the gap above is "
+        "larger than the date is far away, it has already passed — do not name it",
         f"they asked a question: {'yes' if gist.get('unanswered_question') else 'no'}",
         f"as of: {gist.get('as_of')} — every number above was measured then, not now",
     ]
@@ -182,6 +187,11 @@ def render_gist(gist: dict, now: datetime | None = None) -> str:
 _RETRY_GUIDANCE = {
     "length_gate": "Both were too long. Match the typical length above, not a paragraph.",
     "register_gate": "Wrong register: match the capitalisation, full stops and emoji use exactly.",
+    "expired_specific": (
+        "You named a date that has already passed — the thread has been silent longer "
+        "than that date could be away. Do not name it; hedge, or use a date the summary "
+        "still licenses."
+    ),
     "fabrication_gate": (
         "You named a date, time, place, amount or person that is NOT in ALLOWED "
         "SPECIFICS. Use only what is listed, or nothing."

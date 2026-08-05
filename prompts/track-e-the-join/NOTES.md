@@ -13,6 +13,8 @@ ambiguity found, and every place a prompt's stated assumption turned out to be w
 | 04 | `package.json` | Appended the `e2e` script. | `npm run e2e` is the prompt's stated entry point. |
 | 05 | `package.json` | Appended the `card` script. | `cloud/card/src/main.ts` is a real entry point now that the renderer stores things; the test suite starts it as a child process to prove a card is fetchable by something that is not the test. |
 | 05 | `.env.example` | Appended `BOI_CARD_DIR`, `BOI_CARD_SIGNING_SECRET`, `BOI_CARD_PUBLIC_BASE`. | The first is the directory the renderer and `deleteUser` share instead of an import, so it has to be nameable from both sides. The second is a bearer-token secret and its default is labelled as a development value in the file itself. |
+| 10 | `package.json` | `spectrum-ts@^12.7.0` (pulls `@spectrum-ts/core` and `@spectrum-ts/imessage`). Installed by the user. | The channel cannot be compiled against a remembered API. Real type definitions are what caught `space.phone` being `"shared"` rather than a number — prose in `SPECTRUM_INTEGRATION.md` said "read its `phone`" and the type says nothing about what is in it. |
+| 08 | `cloud/db/migrations/009_pairing_token_format.*` | New migration: the `pairing_codes` shape constraint widens to accept `boi-4f2a91` as well as six digits. | The constraint is documentation. Holding an opaque token in a column whose check says "six digits" makes the schema describe the design we replaced. A second table was rejected — identical lifecycle, so it would duplicate the single-use, expiry, binding and partial index forever. |
 | 07 | `package.json` | Appended the `scheduler` script. | `npm run scheduler` is the prompt's stated entry point. |
 | 06 | `contracts/schema/draft_bundle.v1.json`, `intelligence/boi_intel/contracts.py` | `validator.failures` gains `stale_tense_gate`, in the schema and in the Python mirror. **A union widening: every document that validates today still validates.** | The gate needs a slug of its own or a failure list cannot tell a stale-tense refusal from a fabrication refusal. Both files are FROZEN; the user ruled the widening in and `ALLOWED_FROZEN` now covers the schema (the mirror was already covered). |
 | 06 | `prompts/CONTRACTS.md` | Appended three subsections to § 1 (the `as_of`/tense rule, the hedge-allowlist clarification, the empty-collection guard rule) and one to § 2 (US-only signup). Nothing reordered, nothing removed. | Prompt 06's own DoD: "Both rules land in `CONTRACTS.md` — an append". These are exactly the rules that were lost between the architecture and this file, which is why four merged tracks could not have built them. `CONTRACTS.md` is FROZEN, so `ALLOWED_FROZEN` gained it for track E — announced on every ownership run and read line-by-line at merge. |
@@ -783,6 +785,562 @@ production is a product that stops sending and looks healthy.
   to reimplement badly. A second instance exits rather than waiting, so a rolling deploy
   has a gap of up to one interval — acceptable at one sweep per five minutes against a
   fifteen-minute window, and worth revisiting before there is more than one region.
+
+## Prompt 08 — the user opens the thread
+
+The five-minute test passed on a clean device: the user sent first and the reply landed in
+the main conversation list. The second observation is the one that settles the old design
+— when the **line** initiates to somebody who has not written first, iMessage attaches the
+spam-report affordance. § 4.1 was walking into a *report junk* button under Boi's first
+words, every time. Recorded in full in `AMENDMENT-002`, including the contaminated first
+attempt: the same handle had been texted earlier that day, so the reply landed in the main
+list because of history and the test would have passed while proving nothing.
+
+### What `pairing.test.ts` lost, gained, and kept — all ten, with reasons
+
+An amendment is perfect cover for losing coverage, so this is mechanical. **Roughly half
+were about a moment that MOVED rather than a requirement that died.**
+
+| # | The assertion | Verdict | Where it went, or why it died |
+|---|---|---|---|
+| 1 | sends the welcome message BEFORE the response returns | **replaced** | → *"SENDS NOTHING at signup"*. Its logic was right for its flow — the page told the user to look at a text, so the text had to exist. There is no text now. |
+| 2 | sends both a text block and a contact_card block | **relocated** | → `inbound.test.ts`, *"pairs, and answers with the download link and the contact card"*. The card moved to Boi's first reply; the blocks are asserted where they are now sent. |
+| 3 | matches the shape of `first_contact_card.json` | **relocated** | → `welcome.test.ts`, *"still conforms to the frozen fixture"*. The fixture is frozen and unchanged; only its sender moved. |
+| 4 | records the send in `messages_out`, once, even if signup is repeated | **replaced** | → folded into #1, which asserts `messages_out` is **zero** after signup. Nothing sent, nothing recorded. |
+| 5 | puts a working `sms:` deep link on the confirmation page | **replaced** | → *"puts THAT USER'S line in the deep link, with the token prefilled"*. The old one asserted `href="sms:${boiHandle()}"` — a **constant** — and the pool is shared. |
+| 6 | rejects signup without accepted terms, and does not send | **kept** | Unchanged and still true. |
+| 7 | accepts the HTML form's urlencoded body | **kept** | Unchanged. |
+| 8 | does not treat the string `"false"` as consent | **kept** | Unchanged. |
+| 9 | flags a send that came back as sms rather than imessage | **relocated** | → *"handle-mismatch detection, relocated to the inbound"*. The fact now comes from the protocol of the message the USER sent, which is **better evidence**: an outbound says how we reached them, an inbound says what their Messages app is. |
+| 10 | records imessage when the send lands as imessage | **relocated** | Same block, plus a third case the old pair could not express: a transport reporting **no** protocol claims nothing rather than defaulting to mismatch. |
+| 11 | does not report success when the line is banned | **replaced** | → *"says so when the transport is unreachable, rather than rendering a dead link"*. The requirement survives exactly: silently succeeding at signup is the same defect in new clothes. |
+| 12 | RE-ISSUES on re-signup, so an expired code is not a dead end | **replaced** | → *"RE-ISSUES a fresh token on re-signup"*. Identical requirement; what died is the assertion that the new secret is **texted**. |
+| 13 | is TEXTED at signup, not just returned as an HTTP header | **deleted** | The only genuine deletion. It fixed a real bug — the code left only as a response header — and the amendment **dissolves** the bug rather than fixing it: the secret is prefilled into the user's own message, so it never has to reach them. |
+
+Thirteen rather than ten: two more turned up in neighbouring `describe`s once the flow
+changed. One deletion, four replacements, four relocations, four untouched.
+
+### Two near-misses, both about dependency direction
+
+**`cloud/db/src/ids.ts` is not granted**, and the pairing-token generator went there first
+because that is where `newPairingCode` lives. Moved to the onboarding surface rather than
+assuming the grant.
+
+**`firstReplyMessage` in `welcome.ts` made `cloud/brief` import `cloud/api` for the first
+time** — the same inverted arrow as the `Registrar` ruling, three files later, and it
+compiled cleanly. It now lives in `inbound.ts`, where the reply is handled.
+
+Worth stating as a standing property rather than two incidents: **dependency direction is
+something somebody has to actively defend.** It has tried to invert twice in one prompt,
+both times through a change that looked like filing two related things together. The
+compiler is no help — every one of those imports type-checks.
+
+### A stub that returns a constant makes the bug untestable
+
+`StubRegistrar` hands every user a **different** line, derived from their id. A stub
+returning one constant would let a caller build the deep link from a hard-coded number and
+pass every test — the shared pool is the whole reason the link cannot be a constant, so the
+stub would have made the defect it exists to model unreachable.
+
+New false-green shape, and the stub enables it rather than the test: **a stub that returns
+a constant where production returns a variable.**
+
+### The registrar was optional for exactly one commit
+
+And that is the finding. With an optional registrar and a legacy fallback, **all ten of
+Track D's tests stayed green** — which read like the amendment landing gently and actually
+meant the cold open was still the default, for every deployment and for the e2e, until
+`buildServer` forwarded a registrar. An optional dependency with a legacy fallback is a
+feature flag nobody set, defaulting to the behaviour the filter test showed is harmful.
+
+It is now required on `SignupDeps`, `buildServer` defaults it to `StubRegistrar`, and the
+retired handler is **deleted rather than parked** — a retired route nobody routes to is
+still a route somebody can hit.
+
+### The differential test has a documented limit
+
+Worth carrying forward for whoever adds the next schema pair: `differential.test.ts` proves
+the JSON Schema and the zod mirror **agree**. It cannot see any distinction both
+representations fail to make. Swapping `.nullable()` for `.optional()` on
+`digest_as_of` left all five differential tests green, because the two agreed on being
+wrong — and that distinction was the entire content of AMENDMENT-003. Direct assertions,
+not the differential, are what hold a required-and-nullable field in place.
+
+### A check that says OUT OF BOUNDS about a path its own file explicitly permits
+
+The gate's ownership step failed on three files that `check-ownership.sh` **grants**:
+`cloud/shared/src/{index,stub-registrar}.ts` and `contracts/openapi/boi-api.v1.yaml`.
+`FROZEN` is tested first and exits, and `ALLOWED_FROZEN` was its only escape — so
+`AMENDMENT_002B` and `AMENDMENT_003`, consulted in the ownership loop further down, were
+never reached by a frozen path.
+
+**The grants existed, were correct, and were unreachable by control flow.** That is
+strictly harder to see than the three missing grants before it: reading the file tells you
+the permission is there, and the check still refuses. An absence you find by looking; this
+you find only by running it and disbelieving the output.
+
+Fixed by the user structurally rather than by widening `ALLOWED_FROZEN` — one composed
+`AMENDMENTS` string that both the frozen escape and the loop read, so a grant cannot be
+reachable in one branch and invisible in the other, and the next amendment does not
+rediscover the trap.
+
+### A test that was true about a moment, and the moment moved
+
+Third instance today, so it is a pattern rather than three coincidences:
+
+- `deliver.ts` never read `card_url` — the criterion asserted the stored brief, and the
+  moment the card mattered had moved to what the channel received.
+- Ten `pairing.test.ts` assertions described a flow where Boi texted first; half of them
+  were requirements that survived at a different moment, half were about the moment
+  itself.
+- `e2e.test.ts` asserted the brief's lead was `outbound[0]`, which stopped being true the
+  instant Boi's first reply became the channel's first message.
+
+None of the three was wrong when written and none failed loudly at the moment it stopped
+being true — two kept passing and one failed with an off-by-one that read like a bug in the
+test. **The defence is to assert on identity rather than position**: find the lead by its
+idempotency key, assert the card on the blocks the channel received, and say which moment a
+requirement belongs to when it moves.
+
+### A down migration that cannot run is not a rollback
+
+The first version of `009…down.sql` re-added the six-digit constraint and let Postgres
+refuse if a `boi-…` token was still stored — on the reasoning, written into the file, that
+rolling back a widening over wider data is a data question rather than a schema one.
+
+**The gate proved that wrong within one run.** `rollbackAll` is how
+`cloud/db/src/schema.test.ts` rebuilds the schema, so a single leftover token from a test
+made an entire suite of Track D's unable to start — 28 tests reported as *skipped*, which
+is the failure mode `gate.sh`'s no-silently-skipped check exists to catch, arriving from a
+direction nobody had aimed it at.
+
+The down migration now deletes the tokens it cannot represent. That is safe for this data
+in a way it would not be for a normal table: a pairing secret is single-use, at most ten
+minutes old, and reissued by signing up again. Worst case for a real user is one extra tap;
+worst case for the old behaviour was a schema that could not be rolled back at all.
+
+### Open
+
+- **The Mac's claim of its device token is Track F's.** The account is paired before the
+  app exists, so the app no longer types a code; the e2e issues the device token through
+  `registerDevice`, which is the server half F consumes. The claim mechanism itself — how
+  the download hands the app its token — is not built here.
+- **`POST /v1/pair` still accepts six-digit codes**, deliberately: F is mid-flight against
+  it and the amendment's fallback is the old flow *plus* the deep link, not the old flow
+  alone. Migration 009 keeps both shapes valid for the same reason.
+- Which handle Messages on a Mac sends from is **still unverified** — the clean run was
+  sent from a phone. Registering both handles makes the answer irrelevant, which is why it
+  did not block.
+
+## Prompt 09 — ask Boi for your report
+
+The path that makes the kill test runnable. Twenty people asking and screenshotting is the
+same evidence as twenty receiving, and it needs no scheduler and no waiting until 8am
+tomorrow — people are most curious in the ninety seconds after their history loads, and
+the scheduled brief asks them to sleep on it.
+
+### Three outcomes, and the first two are different claims
+
+The prompt described two. AMENDMENT-002 created the third **after** it was written, and it
+is now the likeliest of the three: the thread exists before the Mac app does, so the most
+probable report request in the entire product arrives before any digest exists.
+
+| Outcome | What it says | Whose claim it is |
+|---|---|---|
+| `no_corpus` | "i don't have your history yet — finish setting up the app" | **ours** |
+| `refusal` | "i've read your history and there isn't enough of it" | **theirs** |
+| `standard` | the card | — |
+
+Getting the first two backwards tells a brand-new user their friendships are too thin to
+measure when we simply have not looked yet — the confident wrong answer the architecture
+names as the failure that costs trust permanently, and it is one `if` away at all times.
+Asserted in both directions: the no-corpus answer must **not** contain "isn't enough", and
+must name the step that fixes it.
+
+**A refusal card on request is fine**, which is the opposite of the standing rule for a
+scheduled brief, and deliberately so. Daily and unasked it is a reproach; asked for
+directly it is the honest answer to a direct question. It must say what would change it —
+a refusal with no remedy is the guilt-without-agency the product conventions forbid.
+
+### The 7am request and the 8am brief
+
+Two code paths, same user, one hour apart. The decision: **the brief goes out without the
+image.** Its subject is the three people; the card is an artifact they already have, and a
+dated figure repeated an hour later with nothing said is how it starts reading as a live
+one. `card.already_served_today` says which happened, and the counter-case is asserted too
+— a user who did not ask still gets their card.
+
+### The cache is beside the artifact, not in a table
+
+First attempt was a `report_cards` table. It failed on Track D's `schema.test.ts`, which
+requires **every** user-data table to be hash-partitioned and seeded by a helper in a file
+this track does not own — so a new table for a cache means editing another track's suite.
+
+It lives at `<BOI_CARD_DIR>/<user_id>/report-<day>.json` instead, next to the PNG it points
+at. `deleteUser` already removes that directory, so there is no second thing to remember,
+and the residue check covers it unchanged. Keyed on the **local day** rather than a TTL,
+because "your report for today" is what the card claims to be — a rolling 24-hour window
+hands somebody a card at 23:58 that is still called today's at 23:58 tomorrow.
+
+*(The stray table survived in `boi_dev_d` after the migration was deleted and failed
+Track D's catalog walk until it was dropped by hand. A migration that has run is not
+undone by deleting its file.)*
+
+### A cached URL outlives only the host that issued it
+
+The cache stores an absolute signed URL. In production that is the long-lived card service
+and the signature is good for seven days. In the e2e every run gets an ephemeral port, so a
+second run against the same account on the same day holds a URL whose server is gone — the
+artifact step tolerates it and logs `report.cached_url_unreachable`.
+
+Worth carrying: **storing `card_id` and rebuilding the URL at serve time would be
+strictly better** — fresh expiry, no dependence on the issuing host — and is a small change
+whenever the card service gets a stable hostname.
+
+### The cache is per-process, and that is a deploy-time fact
+
+A file-based cache means **two API instances have two caches**, so a user could get two
+renders on the same local day from different hosts. Harmless today — one process — and it
+is written down here rather than discovered at deploy: the moment there are two, the fix is
+a shared store, not a bigger file.
+
+### A migration that ran is not undone by deleting its file
+
+`010_report_cards` was written, applied to `boi_dev_d`, then abandoned in favour of the
+file-based cache. Deleting the `.sql` left the **table** behind, and Track D's catalog walk
+— which enumerates user-data tables rather than reading a list — correctly failed on a
+table that was partitioned by nobody and seeded by nothing. Dropped by hand.
+
+### A figure meant to be checked reads as live if it silently repeats
+
+The 7am/8am rule generalises past the cache, and it is a property of **the card** rather
+than of the mechanism: the card's whole claim is that the user can check it against their
+own memory, which means it has to be legible as *dated*. Sending the same number again an
+hour later without saying so converts a snapshot into a live reading, and the user has no
+way to tell. Anywhere a dated artifact can be re-delivered, either say when it was made or
+do not send it twice.
+
+### Three more assertions that counted globally
+
+Adding the report stage broke three e2e tests, all of which counted across *every* outbound
+message: "exactly one image", "exactly one stored card", "the second run sends nothing".
+None was wrong; each was a count over a population that grew. Scoped to identity now —
+brief messages by key prefix, brief leads by suffix — which is the same repair as
+`outbound[0]`, three tests later.
+
+## An unexplained gate red, recorded so the next one has something to test against
+
+`gate.sh e` went **red on the tests step once**, at `339b820`, and green on an immediate
+re-run with no change. All three suites pass individually (`vitest=0 pytest=0 swift=0`).
+No root cause.
+
+Written down rather than shrugged off, because **a gate that can go red without cause
+teaches everyone to discount a red gate** — the next genuine failure reads as "probably
+that flake again" and the evidence mechanism quietly stops working.
+
+Two hypotheses, stated so the next occurrence can confirm or eliminate rather than start
+from zero:
+
+1. **A stale child renderer holding port 3043.** `e2e.test.ts` spawns
+   `cloud/card/src/main.ts` as its own process and kills it in `afterAll`. A run killed
+   between those two leaves the port bound, and the next suite's `waitForServer` would
+   answer against the corpse rather than its own child. **Test:** `lsof -i :3043` before
+   the run; if a stale process is there, this is it.
+2. **The database suite lock, from overlapping runs.** Several suites take
+   `acquireSuiteLock()`; I had been running individual files while the full suite ran.
+   **Test:** does it reproduce with nothing else touching `boi_dev_d`? If it only ever
+   happens alongside a second run, it is not a product problem at all.
+
+**If it recurs before `10` finishes, stop and diagnose.** Two unexplained reds is a
+pattern; one is an anecdote.
+
+## Prompt 10 — the quota probe, and what it found instead
+
+### The quota question: answered, and free for a stronger reason than the docs give
+
+`im.space.create("+16465792868")` against the real project, twice:
+
+```json
+{ "msg": "probe.space_created",       "space_id": "any;-;+16465792868", "phone": "shared", "ms": 1 }
+{ "msg": "probe.space_created_twice", "same_id": true,                  "phone": "shared" }
+```
+
+**One millisecond, and a deterministic id.** On the shared tier `space.create` is not a
+remote call at all — it constructs `any;-;<handle>` locally. So it cannot consume the
+50-new-conversations-per-line-per-day quota, and the answer does not depend on Photon's
+definition of "new conversation" holding: **there is no request to count.** That is the
+one limit that would have capped onboarding at 50 users a day rather than degrading it,
+and it is not a limit.
+
+### `space.phone` is the literal string `"shared"`, not a line
+
+**AMENDMENT-002 assumes the deep link's number comes from resolving the user's assigned
+line — "create the space and read its `phone`".** On the Free tier that reads back
+`"shared"`. There is no per-recipient number to resolve, because on a shared pool the line
+is chosen at send time, not at assignment time.
+
+Consequences, in order of how much they cost:
+
+1. **`Registrar.lineFor` cannot be implemented against `space.create` on Free.** The line
+   has to come from **config** — the project's assigned number, known from the dashboard
+   (`+1 646 579-2868`, verified end to end today). The port's `createSpace` still returns
+   a `SpectrumSpaceRef`, and its `phone` is honest about being unresolved rather than
+   fabricating one.
+2. **The deep link is a constant on this tier after all** — for the opposite reason to the
+   one the amendment feared. Not because we hard-coded it, but because the pool genuinely
+   has one number per project until a dedicated line is bought. `StubRegistrar` handing
+   every user a *different* line stays correct: it models the tier we will be on, and the
+   code that consumes it must not assume constancy.
+3. The prompt's chat-GUID persistence still matters, but not for quota — for stability.
+   `any;-;<handle>` is derived from the handle, so it is stable by construction today;
+   persisting it means a future tier that returns opaque ids does not silently change
+   behaviour.
+
+**Not fixed in this session.** The registrar and the channel are unwritten, and this is
+the finding that shapes both.
+
+### The chat-GUID column is `channel_space_id`, and it is a tradeoff
+
+Not `spectrum_space_id`: the column sits on `users`, which is **above the channel line**,
+and `CONTRACTS.md` is explicit that no provider semantics appear there. A vendor name in a
+core table reads as permanent the moment anyone else sees it.
+
+The honest accounting, because this is not obviously right: **transport-scoped data is
+living in a transport-agnostic table.** That is a small violation of the same rule the name
+avoids. It is accepted because the alternative — a `channel_spaces` table — drags in the
+hash-partitioning requirement and a seed helper in `schema.test.ts`, which belongs to
+Track D. On a transport swap the column becomes meaningless, and whoever finds it then
+needs to know it was a deliberate trade rather than a leak.
+
+### A hook blocked a write for a pattern it misread
+
+`spectrum-signature.ts` failed to write with a security warning about
+`child_process.exec()` — triggered by `RegExp.prototype.exec` in
+`signature.match(/^v0=…/)`'s predecessor. There is no `child_process` in the file.
+
+`String.prototype.match` sidesteps it and is equivalent here. Recorded because the next
+person loses the same twenty minutes, and because the workaround is not obvious from the
+error, which names a utility (`execFileNoThrow`) that does not exist in this repo.
+
+### The ordering trap, third instance — and a claim I nearly wrote down as true
+
+I moved the Spectrum tests from `cloud/channel/src/` to the granted
+`cloud/channel/test/`, ran `check-ownership.sh e` **with the move uncommitted**, saw
+`OUT OF BOUNDS: cloud/channel/src/spectrum-channel.test.ts`, and concluded that a
+within-branch move leaves the old path in the diff forever. I rewrote the commit on that
+basis and was about to record it as a durable lesson.
+
+**It is false.** Reproduced in a scratch repo:
+
+```
+add src/a.test.ts   -> commit
+git mv to test/     -> commit
+git diff --name-only main...HEAD   =>   test/a.test.ts
+```
+
+Only the new path. `main...HEAD` is a net comparison against the merge base, and `src/`
+exists in neither tree.
+
+What actually happened is the **third instance of the ordering trap**: the file was at
+`test/` in the working tree and still at `src/` in `HEAD`, so the check was reporting an
+intermediate commit accurately and I read it as a permanent property. Same shape as the
+gate over a dirty tree and the green gate over an overwritten grant line — *a check is
+valid only for the tree that existed when it ran.* `gate.sh` refuses a dirty tree;
+**`check-ownership.sh` run directly does not**, which is the gap between them.
+
+The lesson is not about git. It is that I diagnosed from a symptom instead of reproducing
+the mechanism — the same standard I applied to Track F's install-location claim and to the
+four-seams list, skipped one commit later. Reproducing it costs thirty seconds.
+
+## Prompt 10 — the dry run, and the two things it caught
+
+`npm run e2e` with `channel: "spectrum-dry"` runs the whole pipe through the **real**
+`SpectrumChannel` over a port that records instead of transmitting, and writes
+`dry-run.md`: every message, every part, in the order a phone would receive them. Seven
+messages on a fresh account — first reply, first-sync offer, brief lead + three items,
+report.
+
+It earned its place immediately. **Both of these would have gone to a real phone.**
+
+### 1. The contact card arrived as debug output
+
+The first block mapping degraded `contact_card` to `` `${name}: ${handle}` ``, on the
+grounds that a card the user never receives is worse than a line of text. The dry run
+showed what that line actually is:
+
+```
+> Boi: +15550100123
+```
+
+In the **first reply** — the exact message AMENDMENT-002 moved the contact card to, to
+make it a courtesy rather than a mitigation. Photon has `nativeContactCard()`; the mapping
+now uses it, and the block's `name`/`handle` are deliberately **not** passed through: the
+transport knows its own identity, and a card built from what the composer thinks our
+handle is would be wrong precisely when the config is.
+
+### 2. The card URL is `http://127.0.0.1:…`
+
+Visible in the dry run's attachment line, and it is a **blocking pre-send condition**
+rather than a finding: `BOI_CARD_PUBLIC_BASE` must be a hostname a phone can resolve
+before anything is sent, or the acquisition artifact arrives as a link that cannot load.
+
+This is exactly what the dry run is for, and it is worth stating as the general case:
+**the last artifact anybody reads before a real send should be the bytes, produced by the
+real channel.** A `StubChannel` run is a test of the composer; this is a test of the
+message.
+
+### `channel.sent` is a stub-only affordance
+
+The runner used to read `StubChannel.sent` directly, which does not exist on
+`SpectrumChannel` and should not — a production channel accumulating every message it ever
+sent is a memory leak with a nice name. The runner now records what it hands the channel,
+which is the same evidence for either implementation and keeps every assertion in
+`e2e.test.ts` working across the substitution.
+
+## Before exposing the card service — what the probe found
+
+The card is a named breakdown of one person's relationships, so this is the one place in
+the product where a mistake publishes somebody else's data to anyone who guesses a URL.
+Answered with a live probe against every route rather than by reading:
+
+```
+200  GET A's card, A's signature
+401  GET A's card, NO signature
+401  GET B's card, A's signature          <- the cross-user case
+401  GET B's card, A's sig, A's card_id
+404  GET nonexistent card, valid sig
+401  GET directory listing
+```
+
+**Reads are sound.** The signature covers `user_id/card_id/exp` as one string, so A's
+signature does not verify on B's path and moving A's `card_id` onto B's path fails too.
+There is no enumeration route.
+
+**Writes were not.** `POST /cards/:user_id` was unauthenticated, and the tunnel's ingress
+matches **hostname and path only** — a Go regex with no method matching — so a write route
+sharing the `/cards/` prefix is forwarded by the edge whatever verb it carries. Fixed
+twice over: the route moved to `/internal/cards/:user_id`, which the existing rule
+excludes, **and** it checks a shared secret, because an edge rule alone means a mistyped
+regex or a deleted DNS record silently reopens an unauthenticated write and nothing in the
+app notices.
+
+`writeAuthorised` **fails closed when unset**. No development default — that is exactly
+the mistake below.
+
+### Two secrets that were not secrets
+
+**`BOI_CARD_SIGNING_SECRET` was the literal string `openssl rand -hex 32`** — the command,
+not its output, 20 characters, guessable by anyone who has read a setup instruction. Every
+card URL in the system was signed with it. Found by printing the secret's first bytes
+during an unrelated debug, not by reading the file, and it would have gone under a public
+hostname.
+
+**`signingSecret()` still falls back to `dev-card-secret-change-me` when unset**, which is
+the same failure with a friendlier name — and unset is the normal state, because:
+
+### `.env` is not loaded by anything, and the runner decides
+
+Proven both ways: a `vitest` test prints `BOI_CARD_SIGNING_SECRET: (unset)`, while a
+`vite-node` script in the same repo prints the real value. **Vite loads `.env`; vitest does
+not.**
+
+That is not a test-harness curiosity. `npm run card` and `npm run scheduler` are
+`vite-node`, so they pick up `.env`; anything started another way silently uses the
+built-in default. **A signature scheme whose key depends on which launcher started the
+process is not a signature scheme** — and it bit exactly that way here: the e2e suite
+(vitest, default key) minted URLs that its own child renderer (vite-node, real key)
+rejected with 401, which reads as a signature bug rather than as two processes disagreeing
+about a file.
+
+The suite now pins both secrets in `beforeAll` before spawning the child, and
+`runEndToEnd` does the same. **The deployment rule is the same fact from the other side:
+the process environment is the source of truth, never the file** — `set -a; source .env;
+set +a`, or a process manager that does it.
+
+## The last gate before the send — two findings in the drafts
+
+The Gemini dry run put four real candidates in front of a human for the first time. Both
+findings came from reading them, not from a test.
+
+### A specific the thread had already outrun
+
+Kit's drafts said **"friday the 14th works for me"** on a thread silent for **54 days**.
+Checked, because the reviewer asked the right question and the answer had three possible
+shapes:
+
+- **Cross-item contamination?** No. `the 14th` is in Kit's *own* `facts.dates`. Falsified:
+  a date present only in another item's facts returns `['fabrication_gate']` against Kit's
+  gist, and `[]` against a gist that licenses it. The allowlist is per-gist; nothing merges.
+  All three items looked alike because the synthetic corpus draws every person's inbound
+  lines from **one shared pool** — a fixture artefact.
+- **Stale measurements?** No. `hours_stale = 0.089`; the digest was six minutes old. The
+  prompt-06 gate ran and correctly passed, and would pass on a four-day-old digest too —
+  its question is *"are our measurements current"*, and `"they asked you a question 54 days
+  ago"` is a true present-tense claim.
+- **A third thing, and the real one.** `gist.facts` licenses a token because it appeared in
+  the corpus. Nothing checked whether the date it names is still ahead. See `CONTRACTS.md`
+  § 1 for the rule and the class; the horizon is per-shape (weekday 7, ordinal 31,
+  month-day 366, relative 2) so a recent thread with a genuine pending date keeps its
+  committing draft.
+
+### Four candidates, one opener
+
+Every candidate in the bundle began **"sorry been mia for ages"**. Corpus register rather
+than drafter behaviour — it is drawn from the voice pack's `apology_openers` — but the
+contract gap it exposes is real:
+
+**`draft_bundle.v1` requires two stances within a pair and says nothing about variety
+across a bundle.** Four identical openers satisfy it completely. And **a richer corpus will
+not surface it, because nothing asserts it** — the register would vary and no test would
+notice either way. "In your own voice" is the product's distinctive claim, and a template
+is what it sounds like when it fails.
+
+Not fixed here: it needs either a bundle-level rule in the contract or a variety check in
+the validator, and both are decisions rather than repairs.
+
+## The first brief asks before it lists — a delivery-shape change
+
+**The live send failed, and the failure was the design telling us something.** Four
+messages went out unprompted into a conversation the user had never written to; the card
+landed and then Photon refused the rest:
+
+```
+SendTextMessage RESOURCE_EXHAUSTED
+  [upstream] New contact has sent 1 of 3 messages; replies are limited to 10 until they respond
+```
+
+The first brief is now **one message**: the card, and *"3 people are waiting on a reply
+from you — want me to list them?"* The items follow when they answer.
+
+Three reasons, and the transport one is the least important:
+
+1. **Four unprompted messages from an unknown number is what the spam affordances exist
+   for. One question is not.** This is AMENDMENT-002's reasoning applied one message
+   later — we inverted onboarding so the user opens the thread, then sent a four-message
+   brief into a thread they had never written to.
+2. **The reply is engagement data we were discarding.** A user who answers wanted the
+   brief; one who does not, did not. That distinction is free and nothing was capturing it.
+3. It fits the new-conversation cap **by construction**, so the constraint becomes the
+   design rather than something routed around.
+
+**A non-affirmative reply does not send the list.** "No" meaning "yes" is what gets an
+assistant muted, and finding out was the point of asking. `pendingOpener` reads
+`messages_out` rather than a flag on the brief — "did we ask" and "did we answer" are the
+same kind of fact, so neither can drift from the other.
+
+### One `send` per part cost the message that mattered
+
+`LiveSpectrumPort` issued a call per block so a partial failure would be attributable. The
+lead — image plus text — therefore spent **two** of the three messages a new contact gets,
+and the card arrived with its explanation refused. Batched now, and batching is required
+rather than tidy; attribution comes from the parts list logged beside the call.
+
+### What the dry run could not have caught
+
+A recording port has no upstream, so no amount of dry-running would have surfaced a
+server-side conversation cap. The dry run proves *what we would send*; only a live send
+proves *what the transport will accept*. Both were needed and the order was right — the
+expired date would have reached a person if the dry run had been skipped.
 
 ## Runtime resources
 

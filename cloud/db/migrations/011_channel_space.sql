@@ -1,0 +1,23 @@
+-- 011_channel_space — where the transport's conversation id lives.
+--
+-- Reversible: yes — 011_channel_space.down.sql
+--
+-- NOT `spectrum_space_id`. `users` sits ABOVE the channel line, and CONTRACTS.md is
+-- explicit that no provider semantics appear there — a vendor name in a core table reads
+-- as permanent the moment anyone else sees it. The meaning of this column is defined by
+-- whichever `Channel` implementation is configured; everything above the channel treats
+-- it as opaque and never parses it.
+--
+-- THE TRADEOFF, recorded because it is not obviously right: this is transport-scoped data
+-- in a transport-agnostic table, which is a smaller version of the same violation the name
+-- avoids. It is accepted because the alternative — a `channel_spaces` table — drags in the
+-- hash-partitioning requirement and a seeding helper in `schema.test.ts`, a suite this
+-- track does not own. On a transport swap this column becomes meaningless, and whoever
+-- finds it then should know it was a deliberate trade rather than a leak.
+--
+-- Why persist it at all, now that the quota reason is gone: the probe showed
+-- `space.create` is LOCAL on the shared tier — one millisecond, id derived from the handle
+-- — so it consumes no quota and costs nothing to repeat. Persistence is for STABILITY: a
+-- dedicated line or a future tier may return an opaque id, and a conversation that
+-- silently re-keys itself is a thread the user sees split in two.
+alter table users add column if not exists channel_space_id text;
