@@ -363,12 +363,24 @@ describe("the write route is not on the public prefix, and is authenticated anyw
   const digest = () => JSON.parse(readFileSync(
     path.join(REPO_ROOT, "contracts", "fixtures", "digest", "healthy.json"), "utf8"));
 
+  /**
+   * A fresh id per run, because the card store is a DIRECTORY that outlives the process.
+   *
+   * The first version used a fixed `usr_writeprobe01` and asserted nothing had been
+   * written — which was true until a falsification run disabled the auth check, stored a
+   * card under that id, and left it there. The test then failed on the leftover rather
+   * than on the behaviour, one run later and for a reason with no connection to what it
+   * was asserting.
+   */
+  const probeUser = () => `usr_wp${randomBytes(5).toString("hex")}`;
+
   it("refuses a write with no secret, a wrong secret, and the old public path", async () => {
+    const user = probeUser();
     const body = JSON.stringify(digest());
     const json = { "content-type": "application/json" };
 
     // No secret at all.
-    const none = await fetch(`${CHILD_CARD_BASE}/internal/cards/usr_writeprobe01`, {
+    const none = await fetch(`${CHILD_CARD_BASE}/internal/cards/${user}`, {
       method: "POST", headers: json, body,
     });
     expect(none.status).toBe(401);
@@ -376,7 +388,7 @@ describe("the write route is not on the public prefix, and is authenticated anyw
     // A wrong one, same length as the real secret so this fails on the comparison rather
     // than on the length check.
     const real = process.env["BOI_CARD_WRITE_SECRET"] as string;
-    const wrong = await fetch(`${CHILD_CARD_BASE}/internal/cards/usr_writeprobe01`, {
+    const wrong = await fetch(`${CHILD_CARD_BASE}/internal/cards/${user}`, {
       method: "POST",
       headers: { ...json, "x-boi-card-write": "z".repeat(real.length) },
       body,
@@ -385,17 +397,17 @@ describe("the write route is not on the public prefix, and is authenticated anyw
 
     // And the old path is gone from the server entirely, so the tunnel's `^/cards/` rule
     // has nothing to forward even if it were pointed at a POST.
-    const oldPath = await fetch(`${CHILD_CARD_BASE}/cards/usr_writeprobe01`, {
+    const oldPath = await fetch(`${CHILD_CARD_BASE}/cards/${user}`, {
       method: "POST", headers: json, body,
     });
     expect(oldPath.status).toBe(404);
 
     // Nothing was written by any of the three.
-    expect(countCardsFor("usr_writeprobe01")).toBe(0);
+    expect(countCardsFor(user)).toBe(0);
   }, TIMEOUT);
 
   it("accepts the write with the secret, so the 401s above are not a broken route", async () => {
-    const response = await fetch(`${CHILD_CARD_BASE}/internal/cards/usr_writeprobe02`, {
+    const response = await fetch(`${CHILD_CARD_BASE}/internal/cards/${probeUser()}`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
