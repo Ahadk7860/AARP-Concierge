@@ -205,6 +205,105 @@ public struct VoicePack: Codable, Sendable {
     public var as_of: String
 }
 
+// MARK: - Phase 2 wire contracts
+
+/// Closed vocabularies are separate from the v1 metric types so v1 documents keep
+/// decoding byte-for-byte while the Phase 2 producer adopts the wider contract.
+public enum UnderstandingRegisterV2: String, Codable, Sendable {
+    case casual, warm, terse, formal, mixed
+}
+
+public enum RelationshipKindV2: String, Codable, Sendable {
+    case closeFriend = "close_friend"
+    case logistics, work, family
+    case dormantClose = "dormant_close"
+    case other
+}
+
+public enum LastExchangeShapeV2: String, Codable, Sendable {
+    case questionFromThem = "question_from_them"
+    case statementFromThem = "statement_from_them"
+    case statementFromYou = "statement_from_you"
+    case planUnresolved = "plan_unresolved"
+    case none
+}
+
+/// The context attached to a user-authored exemplar. `statement_from_you` is
+/// intentionally absent: an exemplar describes what the user's message answered.
+public enum AnsweredShapeV2: String, Codable, Sendable {
+    case questionFromThem = "question_from_them"
+    case statementFromThem = "statement_from_them"
+    case planUnresolved = "plan_unresolved"
+    case none
+}
+
+/// Redacted USER-authored text only. Counterpart prose has no field in this type.
+public struct ContextualVoiceExemplarV2: Codable, Sendable, Equatable {
+    public var text: String
+    public var answered: AnsweredShapeV2
+    public var register: UnderstandingRegisterV2
+
+    public init(text: String, answered: AnsweredShapeV2,
+                register: UnderstandingRegisterV2) {
+        self.text = text
+        self.answered = answered
+        self.register = register
+    }
+}
+
+public struct RelationshipUnderstandingV2: Codable, Sendable, Equatable {
+    public var register: UnderstandingRegisterV2
+    public var relationship_kind: RelationshipKindV2
+    public var open_thread: String?
+    public var last_exchange_shape: LastExchangeShapeV2
+    public var topics: [String]
+    public var cadence_norm: String?
+    public var voice_exemplars: [ContextualVoiceExemplarV2]
+}
+
+/// The deliberately narrower Phase 2 relationship projection. Optional v1 metrics are
+/// not copied here because `digest.v2` has `additionalProperties: false`.
+public struct RelationshipV2: Codable, Sendable {
+    public var contact_id: String
+    public var display: String
+    public var is_group: Bool
+    public var message_count: Int
+    public var sent_count: Int
+    public var received_count: Int
+    public var days_since_last_contact: Int
+    public var momentum_90d: Double
+    public var initiation_ratio: Double
+    public var last_from_me: Bool
+    public var max_gap_days: Int
+    public var unanswered_question: Bool
+    public var facts: Facts
+    public var as_of: String
+    public var understanding: RelationshipUnderstandingV2
+}
+
+public struct DigestV2: Codable, Sendable {
+    public var schema_version: String = "digest.v2"
+    public var user_id: String
+    public var device_id: String
+    public var generated_at: String
+    public var synced_through: String
+    public var corpus: CorpusSummary
+    public var relationships: [RelationshipV2]
+    public var whole_life: WholeLife
+}
+
+public struct VoicePackV2: Codable, Sendable {
+    public var schema_version: String = "voice_pack.v2"
+    public var voice_pack_version: String
+    public var contact_id: String?
+    public var scope: String
+    /// Optional because the frozen schema declares the property but does not require it.
+    public var n_exemplars: Int?
+    public var register: Register
+    public var exemplars: [ContextualVoiceExemplarV2]
+    public var as_of: String
+}
+
 /// FDA today, scoped bookmarks at launch. Everything above this protocol -- reader,
 /// metrics, digest -- never learns which one it got, so the swap costs an afternoon
 /// instead of a rewrite.

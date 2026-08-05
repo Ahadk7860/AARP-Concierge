@@ -42,6 +42,42 @@ final class FoundationTests: XCTestCase {
         XCTAssertEqual(pack.register.punctuation, .lowercaseNoPeriod)
     }
 
+    func testDigestV2FixtureRoundTripsThroughItsSwiftMirror() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let data = try Data(contentsOf:
+            root.appendingPathComponent("contracts/fixtures/digest_v2/understood.json"))
+        let digest = try JSONDecoder().decode(DigestV2.self, from: data)
+
+        XCTAssertEqual(digest.schema_version, "digest.v2")
+        XCTAssertEqual(digest.synced_through, "2026-08-01T09:10:00Z")
+        let relationship = try XCTUnwrap(digest.relationships.first)
+        XCTAssertEqual(relationship.understanding.relationship_kind, .closeFriend)
+        XCTAssertEqual(relationship.understanding.last_exchange_shape, .questionFromThem)
+        XCTAssertEqual(relationship.understanding.voice_exemplars.first?.answered,
+                       .questionFromThem)
+
+        let roundTrip = try JSONDecoder().decode(
+            DigestV2.self, from: JSONEncoder().encode(digest))
+        XCTAssertEqual(roundTrip.relationships.first?.understanding.topics, ["climbing"])
+    }
+
+    func testVoicePackV2FixtureHasOnlyContextualUserExemplars() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let data = try Data(contentsOf:
+            root.appendingPathComponent("contracts/fixtures/voice_pack_v2/maya.json"))
+        let pack = try JSONDecoder().decode(VoicePackV2.self, from: data)
+
+        XCTAssertEqual(pack.schema_version, "voice_pack.v2")
+        XCTAssertEqual(pack.n_exemplars, pack.exemplars.count)
+        XCTAssertEqual(pack.exemplars.first?.answered, .questionFromThem)
+        XCTAssertEqual(pack.exemplars.first?.register, .warm)
+        XCTAssertFalse(try JSONEncoder().encode(pack).isEmpty)
+    }
+
     func testEveryDataSourceIsNamed() {
         XCTAssertEqual(Set(DataSource.allCases.map(\.rawValue)),
                        ["messages", "attachments", "contacts", "callHistory"])

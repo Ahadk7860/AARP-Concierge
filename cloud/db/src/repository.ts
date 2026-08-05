@@ -199,12 +199,10 @@ export async function getUser(
  * nothing was stored — the moment hosting landed it went live, which is why hosting and
  * this ship together.
  *
- * The stored cards live at `<BOI_CARD_DIR>/<user_id>/<card_id>.png`, written by
- * `cloud/card/src/store.ts`. **This function does not import that module and never
- * should.** The two share a directory the way two services share a bucket name; an import
- * would make a legal guarantee depend on which module a given process happened to load,
- * and the API process does not import the renderer. The swap to object storage replaces
- * the two calls below and nothing else.
+ * This function does not import the renderer. Local development installs the filesystem
+ * adapter below; a split production runtime installs a private card-service adapter
+ * before listening. Either implementation must return the residue count after deletion,
+ * so an unreachable service or unwritable volume can never be reported as verified.
  */
 export async function deleteUser(
   scope: UserScope,
@@ -230,16 +228,67 @@ export async function deleteUser(
   // that then rolls back is a card deleted for a user who still exists — and the
   // filesystem has no rollback. The rows are gone first; if this throws, it throws
   // loudly with the user already deleted, which is the safe direction to fail in.
-  const cardsRemaining = deleteStoredCards(scope.user_id);
-  if (cardsRemaining > 0) {
-    throw new ResidualUserDataError({ [CARD_STORE]: cardsRemaining });
-  }
+  const verifiedCardStore = await deleteExternalCards(scope.user_id);
 
-  return { ...result, verified_external: [CARD_STORE] };
+  return { ...result, verified_external: [verifiedCardStore] };
 }
 
 /** The one external store, named so the residue error says which one leaked. */
 const CARD_STORE = "cards(filesystem)";
+
+export type ExternalCardStore = {
+  /** Stable, non-secret diagnostic label returned by deleteUser. */
+  name: string;
+  /** Delete this user's artifacts and return the residue count after deletion. */
+  deleteAndCount(userId: string): Promise<number> | number;
+};
+
+const localCardStore: ExternalCardStore = {
+  name: CARD_STORE,
+  deleteAndCount: deleteStoredCards,
+};
+let externalCardStore: ExternalCardStore = localCardStore;
+
+/**
+ * Install the card-store boundary used by the running API process.
+ *
+ * Local development keeps the filesystem implementation. A split production topology
+ * installs a private-service adapter before accepting traffic, so account deletion
+ * reaches the volume owned by the card service rather than inspecting the API
+ * container's unrelated filesystem and falsely reporting success.
+ *
+ * The returned restore function is for isolated runtime tests. It refuses to clobber a
+ * newer installation, preventing parallel tests from silently swapping dependencies.
+ */
+export function installExternalCardStore(store: ExternalCardStore): () => void {
+  if (!/^[a-z][a-z0-9()_-]{2,63}$/i.test(store.name)) {
+    throw new Error("external card store name must be a bounded diagnostic token");
+  }
+  const previous = externalCardStore;
+  externalCardStore = store;
+  return () => {
+    if (externalCardStore !== store) {
+      throw new Error("external card store changed before restore");
+    }
+    externalCardStore = previous;
+  };
+}
+
+/** Delete through the installed boundary and verify a trustworthy residue count. */
+export async function deleteExternalCards(userId: string): Promise<string> {
+  if (!/^usr_[0-9A-Za-z]{8,32}$/.test(userId)) {
+    throw new Error("refusing external deletion for invalid user id");
+  }
+  const store = externalCardStore;
+  const remaining = await store.deleteAndCount(userId);
+  if (!Number.isSafeInteger(remaining) || remaining < 0) {
+    throw new Error(`${store.name} returned an invalid residue count`);
+  }
+  if (remaining > 0) {
+    throw new ResidualUserDataError({ [store.name]: remaining });
+  }
+  return store.name;
+}
 
 /**
  * Remove every stored card for a user and return WHAT IS LEFT, not what was removed.
