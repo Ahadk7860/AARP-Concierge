@@ -19,22 +19,24 @@ import SwiftUI
 /// point: TCC is per-responsible-process, so the scheduled run has to be this bundle.
 @main
 enum Entry {
-    static func main() {
+    static func main() async {
         // Both paths log to disk. A GUI app launched from the Finder and a job launched
         // by `launchd` both have a stdout nobody will ever read, and "did the relaunch
         // happen inside two seconds" is not a question a screenshot can answer.
         StructuredLog.setFileSink(URL(fileURLWithPath: SyncRun.Paths.installed().stateDirectory)
             .appendingPathComponent("boi.log"))
         if CommandLine.arguments.contains("--sync") {
-            HeadlessSync.run()
-            exit(0)
+            exit(await HeadlessSync.run())
         }
         // Registering the agent needs the bundle but not the window, so it is reachable
         // headlessly — otherwise the only way to verify `launchctl list` shows it is to
         // click a button, which is not evidence anybody can reproduce.
         if CommandLine.arguments.contains("--register-agent") {
-            StructuredLog.emit("agent.register", fields: [
-                "result": ScheduledSync.register(),
+            let result = await ScheduledSync.register()
+            StructuredLog.emit("agent.register",
+                               level: result.degradation == nil ? .info : .warn,
+                               fields: [
+                "result": result.summary,
                 "status": ScheduledSync.statusDescription,
                 "label": AppInfo.launchAgentLabel,
                 "plist": LaunchAgentPlist.fileName,
@@ -59,12 +61,25 @@ enum Entry {
 }
 
 enum HeadlessSync {
-    static func run() {
+    static func run(
+        scheduleNextWake: @escaping WakeSchedulerLifecycle.AsyncSchedule = {
+            try await WakeHelperClient().scheduleNextWake()
+        }
+    ) async -> Int32 {
+        let result = await WakeSchedulerLifecycle.runEligibleSyncAsync(
+            sync: attempt,
+            schedule: scheduleNextWake
+        )
+        return result.exitCode
+    }
+
+    private static func attempt() -> WakeSchedulerLifecycle.SyncDisposition {
         guard let salt = ContactResolver.developmentSalt() else {
+            let detail = "no \(ContactResolver.developmentSaltVariable)"
             StructuredLog.emit("sync.failed", level: .error, fields: [
-                "detail": "no \(ContactResolver.developmentSaltVariable)",
+                "detail": detail,
             ])
-            exit(1)
+            return .failed(detail: detail)
         }
         let paths = SyncRun.Paths.installed()
         let force = CommandLine.arguments.contains("--force")
@@ -83,6 +98,7 @@ enum HeadlessSync {
                     "elapsed_s": (outcome.elapsed * 1000).rounded() / 1000,
                     "app_version": AppInfo.version,
                 ])
+                return .completed
             } else {
                 // The idempotent guard. launchd fires on wake as well as on schedule, so
                 // this is the common case on a laptop, not an error.
@@ -92,10 +108,12 @@ enum HeadlessSync {
                     "mirror_message_count": outcome.mirrorMessageCount,
                     "minimum_hours_between_runs": SyncRun.defaultMinimumHoursBetweenRuns,
                 ])
+                return .skipped(reason: outcome.skippedReason ?? "unknown")
             }
         } catch {
-            StructuredLog.emit("sync.failed", level: .error, fields: ["detail": "\(error)"])
-            exit(1)
+            let detail = String(describing: error)
+            StructuredLog.emit("sync.failed", level: .error, fields: ["detail": detail])
+            return .failed(detail: detail)
         }
     }
 }
@@ -142,37 +160,98 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 /// Registers the scheduled sync.
 ///
-/// `SMAppService.agent` reads the plist from `Contents/Library/LaunchAgents/` inside this
-/// bundle. That location is the reason it works: an agent registered from inside the app
-/// bundle runs *as* the app, so it inherits the responsible process and therefore the
-/// Full Disk Access grant. A plist dropped in `~/Library/LaunchAgents` pointing at a
-/// helper does not, and its failure mode is silence.
+/// The LaunchAgent still runs the main app for TCC-protected Messages reads. The separate
+/// LaunchDaemon has no TCC role: it exposes one authenticated, argument-free request and
+/// performs only the root-required RTC wake operation.
+@MainActor
 enum ScheduledSync {
 
+    struct RegistrationResult {
+        let serviceResult: String
+        let wake: WakeSchedulerLifecycle.ScheduleDisposition?
+
+        var summary: String {
+            guard let wake else { return serviceResult }
+            switch wake {
+            case .scheduled(let date):
+                return "\(serviceResult); wake scheduled \(StructuredLog.timestamp(date))"
+            case .alreadyScheduled(let date):
+                return "\(serviceResult); wake already scheduled \(StructuredLog.timestamp(date))"
+            case .failed(let detail):
+                return "\(serviceResult); wake scheduling degraded: \(detail)"
+            }
+        }
+
+        var degradation: String? {
+            if serviceResult.hasPrefix("agent failed:") {
+                return "Background refresh could not be registered. Boi still works when opened."
+            }
+            guard case .failed(let detail) = wake else { return nil }
+            return "Closed-lid freshness is unavailable: \(detail). "
+                + "Boi still works when opened, but reports can be stale until then."
+        }
+    }
+
     static var service: SMAppService { .agent(plistName: LaunchAgentPlist.fileName) }
+    static var wakeService: SMAppService {
+        .daemon(plistName: WakeHelperContract.plistName)
+    }
 
     @discardableResult
-    static func register() -> String {
-        do {
-            if service.status == .enabled { return "already registered" }
-            try service.register()
-            return "registered"
-        } catch {
-            return "failed: \(error)"
+    static func register(
+        scheduleNextWake: @escaping WakeSchedulerLifecycle.AsyncSchedule = {
+            try await WakeHelperClient().scheduleNextWake()
+        },
+        observe: @escaping (WakeRegistrationState) -> Void = { _ in }
+    ) async -> RegistrationResult {
+        let state = await WakeRegistrationCoordinator.run(
+            daemonStatus: { status(wakeService.status) },
+            registerDaemon: { try wakeService.register() },
+            agentStatus: { status(service.status) },
+            registerAgent: { try service.register() },
+            schedule: scheduleNextWake,
+            observe: observe,
+            sleep: { try await Task.sleep(nanoseconds: 1_000_000_000) }
+        )
+        switch state {
+        case .ready(let wake):
+            return RegistrationResult(serviceResult: "wake helper enabled; agent enabled",
+                                      wake: wake)
+        case .degraded(let detail):
+            return RegistrationResult(serviceResult: "background setup failed: \(detail)",
+                                      wake: .failed(detail: detail))
+        default:
+            return RegistrationResult(serviceResult: "background setup incomplete",
+                                      wake: .failed(detail: "background setup incomplete"))
         }
     }
 
     static func unregister() {
         try? service.unregister()
+        try? wakeService.unregister()
     }
 
     static var statusDescription: String {
-        switch service.status {
+        "agent: \(description(service.status)); wake helper: \(description(wakeService.status))"
+    }
+
+    private static func description(_ status: SMAppService.Status) -> String {
+        switch status {
         case .enabled: return "enabled"
         case .requiresApproval: return "requires approval in System Settings > Login Items"
         case .notFound: return "not found"
         case .notRegistered: return "not registered"
         @unknown default: return "unknown"
+        }
+    }
+
+    private static func status(_ status: SMAppService.Status) -> BackgroundServiceStatus {
+        switch status {
+        case .enabled: return .enabled
+        case .requiresApproval: return .requiresApproval
+        case .notFound: return .notFound
+        case .notRegistered: return .notRegistered
+        @unknown default: return .unknown
         }
     }
 }

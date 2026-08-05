@@ -20,11 +20,17 @@ let package = Package(
         // LaunchAgent invokes THIS binary with --sync, never a helper: TCC is
         // per-responsible-process and children do not inherit the grant.
         .executable(name: "BoiApp", targets: ["BoiApp"]),
+        .executable(name: "BoiWakeHelper", targets: ["BoiWakeHelper"]),
     ],
     targets: [
         .target(name: "BoiKit"),
         .executableTarget(name: "BoiCLI", dependencies: ["BoiKit"]),
         .executableTarget(name: "BoiApp", dependencies: ["BoiKit"]),
+        .executableTarget(
+            name: "BoiWakeHelper",
+            dependencies: ["BoiKit"],
+            exclude: ["app.boi.mac.wake-helper.plist"]
+        ),
         .testTarget(name: "BoiKitTests", dependencies: ["BoiKit"]),
     ]
 )
