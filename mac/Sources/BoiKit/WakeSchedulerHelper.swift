@@ -13,17 +13,120 @@ public enum WakeHelperContract {
 /// Defense in depth at the privileged process boundary. Even an internal programming
 /// error cannot turn the helper's `Process` call into a general pmset or shell surface.
 public enum WakeHelperCommandPolicy {
-    public static func allows(executable: String, arguments: [String]) -> Bool {
+    public static func allows(executable: String, arguments: [String],
+                              now: Date = Date(), calendar: Calendar = .current) -> Bool {
         guard executable == WakeScheduler.pmsetPath else { return false }
         if arguments == ["-g", "sched"] { return true }
         guard arguments.count == 3,
               arguments[0] == "schedule",
               arguments[1] == "wake" else { return false }
         let formatter = DateFormatter()
+        formatter.calendar = calendar
+        formatter.timeZone = calendar.timeZone
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "MM/dd/yy HH:mm:ss"
         formatter.isLenient = false
-        return formatter.date(from: arguments[2]) != nil
+        guard let requested = formatter.date(from: arguments[2]),
+              let next = WakeScheduler.nextWake(after: now, calendar: calendar) else {
+            return false
+        }
+        return abs(requested.timeIntervalSince(next)) < 0.5
+    }
+}
+
+/// One queue is shared by every exported service object, so the idempotency read and the
+/// conditional schedule write are one transaction across all simultaneous XPC clients.
+public final class WakeHelperTransactionQueue: @unchecked Sendable {
+    private let queue: DispatchQueue
+
+    public init(label: String = "app.boi.mac.wake-helper.transaction") {
+        self.queue = DispatchQueue(label: label)
+    }
+
+    public func perform(_ operation: @escaping () -> Void) {
+        queue.async(execute: operation)
+    }
+}
+
+public enum BackgroundServiceStatus: Equatable, Sendable {
+    case enabled
+    case requiresApproval
+    case notRegistered
+    case notFound
+    case unknown
+}
+
+public enum WakeRegistrationState: Equatable, Sendable {
+    case registeringDaemon
+    case requiresApproval(service: String)
+    case registeringAgent
+    case schedulingWake
+    case ready(WakeSchedulerLifecycle.ScheduleDisposition)
+    case degraded(String)
+}
+
+/// Daemon approval is the first gate. The agent is not touched until the daemon becomes
+/// enabled, and scheduling starts only after the agent is re-read and verified enabled.
+public enum WakeRegistrationCoordinator {
+    public typealias Status = () -> BackgroundServiceStatus
+    public typealias Register = () throws -> Void
+    public typealias Observe = (WakeRegistrationState) -> Void
+    public typealias Sleep = () async throws -> Void
+
+    public static func run(
+        daemonStatus: @escaping Status,
+        registerDaemon: Register,
+        agentStatus: @escaping Status,
+        registerAgent: Register,
+        schedule: WakeSchedulerLifecycle.AsyncSchedule,
+        observe: @escaping Observe,
+        sleep: @escaping Sleep
+    ) async -> WakeRegistrationState {
+        do {
+            observe(.registeringDaemon)
+            if daemonStatus() == .notRegistered { try registerDaemon() }
+            while daemonStatus() == .requiresApproval {
+                observe(.requiresApproval(service: "wake helper"))
+                try await sleep()
+            }
+            guard daemonStatus() == .enabled else {
+                let state = WakeRegistrationState.degraded("wake helper daemon is not enabled")
+                observe(state)
+                return state
+            }
+
+            observe(.registeringAgent)
+            if agentStatus() == .notRegistered { try registerAgent() }
+            while agentStatus() == .requiresApproval {
+                observe(.requiresApproval(service: "background sync"))
+                try await sleep()
+            }
+            guard agentStatus() == .enabled else {
+                let state = WakeRegistrationState.degraded("background sync agent is not enabled")
+                observe(state)
+                return state
+            }
+
+            observe(.schedulingWake)
+            let disposition = await WakeSchedulerLifecycle.scheduleInitialWakeAsync(
+                schedule: schedule)
+            let state: WakeRegistrationState
+            if case .failed(let detail) = disposition {
+                state = .degraded(detail)
+            } else {
+                state = .ready(disposition)
+            }
+            observe(state)
+            return state
+        } catch is CancellationError {
+            let state = WakeRegistrationState.degraded("background refresh setup cancelled")
+            observe(state)
+            return state
+        } catch {
+            let state = WakeRegistrationState.degraded(String(describing: error))
+            observe(state)
+            return state
+        }
     }
 }
 
@@ -63,146 +166,229 @@ public enum WakeHelperResponse: Equatable, Sendable {
     }
 }
 
-/// Synchronous adapter for the existing lifecycle seam. The date passed by the lifecycle
-/// is intentionally ignored: the XPC request has no arguments and the root helper plans
-/// the next fixed local slot using its own clock.
-public struct WakeHelperClient {
-    public typealias Reschedule = (@escaping (WakeHelperResponse) -> Void) -> Void
+/// Handle retained by the async client for the full request lifetime.
+public protocol WakeHelperRequestHandle: AnyObject {
+    func invalidate()
+}
 
-    private let reschedule: Reschedule
+/// An async, cancellable adapter that owns its XPC connection until exactly one terminal
+/// result. Timeout and task cancellation invalidate the connection; late replies are ignored.
+public final class WakeHelperClient: @unchecked Sendable {
+    public typealias StartRequest = (@escaping (WakeHelperResponse) -> Void) throws
+        -> WakeHelperRequestHandle
+
+    private let startRequest: StartRequest
     private let timeout: TimeInterval
 
     public init(timeout: TimeInterval = 10) {
         self.timeout = timeout
-        self.reschedule = Self.productionReschedule
+        self.startRequest = Self.productionStartRequest
     }
 
-    public init(timeout: TimeInterval = 10, reschedule: @escaping Reschedule) {
+    public init(timeout: TimeInterval = 10, startRequest: @escaping StartRequest) {
         self.timeout = timeout
-        self.reschedule = reschedule
+        self.startRequest = startRequest
     }
 
-    public func scheduleNextWake(after _: Date) throws -> WakeScheduler.Outcome {
-        let semaphore = DispatchSemaphore(value: 0)
-        let lock = NSLock()
-        var response: WakeHelperResponse?
-        var completed = false
-        reschedule { value in
-            lock.lock()
-            guard !completed else {
-                lock.unlock()
-                return
+    public func scheduleNextWake() async throws -> WakeScheduler.Outcome {
+        let state = WakeHelperAsyncRequestState()
+        let response: WakeHelperResponse = try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                state.install(continuation: continuation)
+                guard !Task.isCancelled else {
+                    state.finish(.failure(CancellationError()))
+                    return
+                }
+                do {
+                    let handle = try startRequest { response in
+                        state.finish(.success(response))
+                    }
+                    state.install(handle: handle)
+                } catch {
+                    state.finish(.failure(error))
+                }
+                state.installTimeout(seconds: timeout)
             }
-            completed = true
-            response = value
-            lock.unlock()
-            semaphore.signal()
+        } onCancel: {
+            state.finish(.failure(CancellationError()))
         }
-        guard semaphore.wait(timeout: .now() + timeout) == .success else {
-            lock.lock()
-            completed = true
-            lock.unlock()
-            throw WakeScheduler.Error.authorizedHelperUnavailable
-        }
-        lock.lock()
-        let result = response
-        lock.unlock()
-        switch result {
+
+        switch response {
         case .scheduled(let date): return .scheduled(date)
         case .alreadyScheduled(let date): return .alreadyScheduled(date)
         case .degraded(let detail):
             throw WakeScheduler.Error.helperRejected(detail: detail)
-        case nil:
-            throw WakeScheduler.Error.helperRejected(detail: "wake helper returned no response")
         }
     }
 
-    private static func productionReschedule(reply: @escaping (WakeHelperResponse) -> Void) {
-        let oneShot = WakeHelperReplyOnce(reply)
+    private static func productionStartRequest(
+        reply: @escaping (WakeHelperResponse) -> Void
+    ) throws -> WakeHelperRequestHandle {
+        let peerRequirement = try WakeHelperSigningRequirement.peerRequirement(
+            expectedSelfIdentifier: WakeHelperContract.authorizedAppIdentifier,
+            peerIdentifier: WakeHelperContract.helperIdentifier)
         let connection = NSXPCConnection(machServiceName: WakeHelperContract.serviceName,
                                          options: .privileged)
+        let handle = WakeHelperXPCRequest(connection: connection)
         connection.remoteObjectInterface = NSXPCInterface(with: WakeHelperXPCProtocol.self)
+        connection.setCodeSigningRequirement(peerRequirement)
         connection.interruptionHandler = {
-            oneShot.call(.degraded("authorized wake helper connection was interrupted"))
+            reply(.degraded("authorized wake helper connection was interrupted"))
         }
         connection.invalidationHandler = {}
-        connection.resume()
+        connection.activate()
         let proxy = connection.remoteObjectProxyWithErrorHandler { error in
-            oneShot.call(.degraded(
-                "authorized wake helper unavailable: \(error.localizedDescription)"))
-            connection.invalidate()
+            reply(.degraded("authorized wake helper unavailable: \(error.localizedDescription)"))
         }
         guard let helper = proxy as? WakeHelperXPCProtocol else {
-            oneShot.call(.degraded("authorized wake helper protocol unavailable"))
-            connection.invalidate()
-            return
+            reply(.degraded("authorized wake helper protocol unavailable"))
+            return handle
         }
         helper.reschedule { code, date, detail in
-            oneShot.call(WakeHelperResponse.decode(code: code, date: date, detail: detail))
-            connection.invalidate()
+            reply(WakeHelperResponse.decode(code: code, date: date, detail: detail))
         }
+        return handle
     }
 }
 
-private final class WakeHelperReplyOnce {
-    private let lock = NSLock()
-    private var completed = false
-    private let reply: (WakeHelperResponse) -> Void
+private final class WakeHelperXPCRequest: WakeHelperRequestHandle {
+    private let connection: NSXPCConnection
+    init(connection: NSXPCConnection) { self.connection = connection }
+    func invalidate() { connection.invalidate() }
+}
 
-    init(_ reply: @escaping (WakeHelperResponse) -> Void) {
-        self.reply = reply
+private final class WakeHelperAsyncRequestState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<WakeHelperResponse, Swift.Error>?
+    private var handle: WakeHelperRequestHandle?
+    private var timeoutTask: Task<Void, Never>?
+    private var result: Result<WakeHelperResponse, Swift.Error>?
+    private var finished = false
+
+    func install(continuation: CheckedContinuation<WakeHelperResponse, Swift.Error>) {
+        lock.lock()
+        if let result {
+            lock.unlock()
+            continuation.resume(with: result)
+            return
+        }
+        self.continuation = continuation
+        lock.unlock()
     }
 
-    func call(_ response: WakeHelperResponse) {
+    func install(handle: WakeHelperRequestHandle) {
         lock.lock()
-        guard !completed else {
+        if finished {
+            lock.unlock()
+            handle.invalidate()
+            return
+        }
+        self.handle = handle
+        lock.unlock()
+    }
+
+    func installTimeout(seconds: TimeInterval) {
+        let nanoseconds = UInt64(max(0, seconds) * 1_000_000_000)
+        let task = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: nanoseconds)
+            guard !Task.isCancelled else { return }
+            self?.finish(.failure(WakeScheduler.Error.authorizedHelperUnavailable))
+        }
+        lock.lock()
+        if finished {
+            lock.unlock()
+            task.cancel()
+            return
+        }
+        timeoutTask = task
+        lock.unlock()
+    }
+
+    func finish(_ result: Result<WakeHelperResponse, Swift.Error>) {
+        lock.lock()
+        guard !finished else {
             lock.unlock()
             return
         }
-        completed = true
+        finished = true
+        self.result = result
+        let continuation = self.continuation
+        self.continuation = nil
+        let handle = self.handle
+        self.handle = nil
+        let timeoutTask = self.timeoutTask
+        self.timeoutTask = nil
         lock.unlock()
-        reply(response)
+        timeoutTask?.cancel()
+        handle?.invalidate()
+        continuation?.resume(with: result)
     }
 }
 
-/// Verifies the connecting process, not data supplied by that process. Production fails
-/// closed when this helper or its caller is ad-hoc signed because ad-hoc code has no Team
-/// ID that can establish the same-team boundary. Tests inject both seams.
-public struct WakeHelperCallerAuthorization {
-    public typealias TeamIdentifier = () -> String?
-    public typealias Validate = (_ pid: pid_t, _ requirement: String) -> Bool
-
-    private let teamIdentifier: TeamIdentifier
-    private let validate: Validate
-
-    public init() {
-        self.teamIdentifier = Self.productionTeamIdentifier
-        self.validate = Self.productionValidate
+public struct WakeHelperSigningRequirement {
+    public struct Identity: Equatable, Sendable {
+        public let identifier: String
+        public let teamIdentifier: String
+        public init(identifier: String, teamIdentifier: String) {
+            self.identifier = identifier
+            self.teamIdentifier = teamIdentifier
+        }
     }
 
-    public init(teamIdentifier: @escaping TeamIdentifier,
-                validate: @escaping Validate) {
-        self.teamIdentifier = teamIdentifier
-        self.validate = validate
+    public enum Error: Swift.Error, LocalizedError, Equatable {
+        case unverifiableSelf
+        case wrongSelfIdentifier
+        case invalidSelfSignature
+        public var errorDescription: String? {
+            switch self {
+            case .unverifiableSelf: return "current process has no verifiable Developer ID identity"
+            case .wrongSelfIdentifier: return "current process has the wrong signing identifier"
+            case .invalidSelfSignature: return "current process signature or anchor is invalid"
+            }
+        }
     }
 
-    public func allows(pid: pid_t) -> Bool {
-        guard pid > 0,
-              let teamID = teamIdentifier(),
-              !teamID.isEmpty else { return false }
-        let escapedTeam = Self.requirementLiteral(teamID)
-        let escapedIdentifier = Self.requirementLiteral(WakeHelperContract.authorizedAppIdentifier)
-        let requirement = "anchor apple generic and identifier \"\(escapedIdentifier)\" "
-            + "and certificate leaf[subject.OU] = \"\(escapedTeam)\""
-        return validate(pid, requirement)
+    public typealias ReadIdentity = () -> Identity?
+    public typealias ValidateSelf = (_ requirement: String) -> Bool
+
+    public static func peerRequirement(expectedSelfIdentifier: String,
+                                       peerIdentifier: String) throws -> String {
+        try peerRequirement(expectedSelfIdentifier: expectedSelfIdentifier,
+                            peerIdentifier: peerIdentifier,
+                            readIdentity: productionIdentity,
+                            validateSelf: productionValidateSelf)
     }
 
-    private static func requirementLiteral(_ value: String) -> String {
+    public static func peerRequirement(
+        expectedSelfIdentifier: String,
+        peerIdentifier: String,
+        readIdentity: ReadIdentity,
+        validateSelf: ValidateSelf
+    ) throws -> String {
+        guard let identity = readIdentity(), !identity.teamIdentifier.isEmpty else {
+            throw Error.unverifiableSelf
+        }
+        guard identity.identifier == expectedSelfIdentifier else {
+            throw Error.wrongSelfIdentifier
+        }
+        let selfRequirement = requirement(identifier: expectedSelfIdentifier,
+                                          teamIdentifier: identity.teamIdentifier)
+        guard validateSelf(selfRequirement) else { throw Error.invalidSelfSignature }
+        return requirement(identifier: peerIdentifier,
+                           teamIdentifier: identity.teamIdentifier)
+    }
+
+    private static func requirement(identifier: String, teamIdentifier: String) -> String {
+        "anchor apple generic and identifier \"\(literal(identifier))\" "
+            + "and certificate leaf[subject.OU] = \"\(literal(teamIdentifier))\""
+    }
+
+    private static func literal(_ value: String) -> String {
         value.replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
     }
 
-    private static func productionTeamIdentifier() -> String? {
+    private static func productionIdentity() -> Identity? {
         var ownCode: SecCode?
         guard SecCodeCopySelf([], &ownCode) == errSecSuccess,
               let ownCode else { return nil }
@@ -214,18 +400,21 @@ public struct WakeHelperCallerAuthorization {
                                             SecCSFlags(rawValue: kSecCSSigningInformation),
                                             &information) == errSecSuccess,
               let dictionary = information as? [CFString: Any] else { return nil }
-        return dictionary[kSecCodeInfoTeamIdentifier] as? String
+        guard let identifier = dictionary[kSecCodeInfoIdentifier] as? String,
+              let teamIdentifier = dictionary[kSecCodeInfoTeamIdentifier] as? String else {
+            return nil
+        }
+        return Identity(identifier: identifier, teamIdentifier: teamIdentifier)
     }
 
-    private static func productionValidate(pid: pid_t, requirementText: String) -> Bool {
-        let attributes = [kSecGuestAttributePid: NSNumber(value: pid)] as CFDictionary
-        var guest: SecCode?
-        guard SecCodeCopyGuestWithAttributes(nil, attributes, [], &guest) == errSecSuccess,
-              let guest else { return false }
+    private static func productionValidateSelf(requirementText: String) -> Bool {
+        var ownCode: SecCode?
+        guard SecCodeCopySelf([], &ownCode) == errSecSuccess,
+              let ownCode else { return false }
         var requirement: SecRequirement?
         guard SecRequirementCreateWithString(requirementText as CFString, [], &requirement)
                 == errSecSuccess,
               let requirement else { return false }
-        return SecCodeCheckValidity(guest, [], requirement) == errSecSuccess
+        return SecCodeCheckValidity(ownCode, [], requirement) == errSecSuccess
     }
 }

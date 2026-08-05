@@ -127,6 +127,55 @@ final class WakeSchedulerLifecycleTests: XCTestCase {
         XCTAssertEqual(spy.logs.last?.fields["reason"], "initial_registration")
     }
 
+    func testDaemonApprovalAutomaticallyContinuesToVerifiedAgentAndAsyncWake() async {
+        var daemon: BackgroundServiceStatus = .notRegistered
+        var agent: BackgroundServiceStatus = .notRegistered
+        var events: [String] = []
+        let wake = Date(timeIntervalSince1970: 1_900_000_000)
+
+        let result = await WakeRegistrationCoordinator.run(
+            daemonStatus: { daemon },
+            registerDaemon: {
+                events.append("register-daemon")
+                daemon = .requiresApproval
+            },
+            agentStatus: { agent },
+            registerAgent: {
+                events.append("register-agent")
+                agent = .enabled
+            },
+            schedule: {
+                events.append("schedule")
+                return .scheduled(wake)
+            },
+            observe: { state in
+                if case .requiresApproval = state { events.append("requires-approval") }
+            },
+            sleep: {
+                events.append("observe-approval")
+                daemon = .enabled
+            }
+        )
+
+        XCTAssertEqual(result, .ready(.scheduled(wake)))
+        XCTAssertEqual(events, ["register-daemon", "requires-approval", "observe-approval",
+                                "register-agent", "schedule"])
+    }
+
+    func testAgentIsNeverReportedRegisteredUntilStatusRechecksEnabled() async {
+        var agent: BackgroundServiceStatus = .notRegistered
+        var scheduled = false
+        let result = await WakeRegistrationCoordinator.run(
+            daemonStatus: { .enabled }, registerDaemon: {},
+            agentStatus: { agent },
+            registerAgent: { agent = .notRegistered },
+            schedule: { scheduled = true; return .scheduled(Date()) },
+            observe: { _ in }, sleep: {}
+        )
+        XCTAssertEqual(result, .degraded("background sync agent is not enabled"))
+        XCTAssertFalse(scheduled)
+    }
+
     func testBoiAppSourceWiresOnlyProductionBoundariesToTheLifecycle() throws {
         let appRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -145,15 +194,17 @@ final class WakeSchedulerLifecycleTests: XCTestCase {
         XCTAssertTrue(entry.contains("WakeSchedulerLifecycle.runEligibleSync"))
         XCTAssertFalse(entry.contains("WakeScheduler().scheduleNextWake"),
                        "ordinary app must never use the root-only command scheduler")
-        XCTAssertEqual(entry.components(separatedBy: "WakeHelperClient().scheduleNextWake").count - 1,
+        XCTAssertEqual(entry.components(separatedBy: "WakeHelperClient().scheduleNextWake()").count - 1,
                        2, "initial and subsequent wakes must use the authenticated helper")
-        XCTAssertTrue(entry.contains("WakeSchedulerLifecycle.scheduleInitialWake"))
+        XCTAssertTrue(entry.contains("WakeSchedulerLifecycle.runEligibleSyncAsync"))
         XCTAssertTrue(entry.contains(".daemon(plistName: WakeHelperContract.plistName)"))
-        XCTAssertTrue(onboarding.contains("ScheduledSync.register()"),
+        XCTAssertTrue(onboarding.contains("ScheduledSync.register(observe:"),
                       "successful onboarding must register the agent and first wake")
         XCTAssertTrue(onboarding.contains("backgroundFreshnessDegradation = result.degradation"),
                       "agent enabled and RTC wake authorized are distinct states")
         XCTAssertTrue(view.contains("wake-freshness-degraded"),
                       "wake degradation must remain visible while the app stays usable")
+        XCTAssertTrue(view.contains("wake-helper-open-settings"))
+        XCTAssertTrue(onboarding.contains("SMAppService.openSystemSettingsLoginItems()"))
     }
 }

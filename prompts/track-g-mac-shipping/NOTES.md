@@ -131,11 +131,11 @@ ad-hoc test bundle cannot prove the authorization boundary.
 - The privileged process command policy accepts only `/usr/bin/pmset -g sched` and
   `/usr/bin/pmset schedule wake <internally formatted date>`. Mutations to shell,
   repeat, sleep, wake-or-power-on, cancel-all, invalid dates, and extra arguments fail.
-- Production caller authorization derives the helper's Team ID from its own signature,
-  then validates the connecting PID against the exact designated requirement for
-  identifier `app.boi.mac` and that Team ID. Missing Team ID (including ad-hoc signing),
-  invalid PID, wrong identifier, wrong team, or unverifiable code fails closed. Tests
-  inject the Team-ID and code-validation seams; production callers cannot inject them.
+- Superseded by the independent-review fix below: production derives the Team ID from
+  validated self-signatures and installs exact same-team peer requirements directly on
+  the listener and connection before activation. No PID lookup remains. Missing Team ID
+  (including ad-hoc signing), wrong identifier/team/anchor, or unverifiable code fails
+  closed; tests inject only the self-identity and validation seams.
 - Both initial registration and subsequent headless sync scheduling use the typed helper
   response through the existing `WakeSchedulerLifecycle.Schedule` seam. Missing,
   rejected, interrupted, unapproved, or timed-out helper access stays visible as degraded
@@ -183,3 +183,52 @@ ad-hoc test bundle cannot prove the authorization boundary.
 - Bundle dry run, source and embedded LaunchDaemon `plutil -lint`, nested-helper strict
   verification, outer-app deep strict verification, `git diff --check`, and Track G
   ownership all passed. No daemon registration or physical power operation was run.
+
+## Independent helper review fixes
+
+- The sync LaunchAgent now uses `BundleProgram=Contents/MacOS/Boi` and the fixed argv
+  `Boi --sync`. Its generator ignores the legacy absolute `--binary` value, rejects
+  `Program`, absolute `.app` paths, changed bundle programs, and changed argv. Builds in
+  `/tmp/boi-g-relocation-a` and `/tmp/boi-g-relocation-b` produced byte-identical agent
+  plists containing neither staging path; the shipped build no longer adds `/tmp` log
+  paths either.
+- PID-based guest lookup was removed. The helper validates its own exact helper
+  identifier, Developer ID anchor, and nonempty Team ID, then calls macOS 13
+  `NSXPCListener.setConnectionCodeSigningRequirement` with the exact same-team app
+  requirement before listener activation. The app performs the symmetric self check and
+  calls `NSXPCConnection.setCodeSigningRequirement` for the exact helper before activating
+  its connection. Ad-hoc, wrong-id, wrong-team, invalid-anchor, and unverifiable code all
+  fail closed; injected identity/validation seams exercise these paths without weakening
+  production.
+- Background setup is daemon-first. It registers/rechecks the daemon, publishes
+  `requiresApproval`, exposes **Open System Settings** using
+  `SMAppService.openSystemSettingsLoginItems()`, and keeps observing without another
+  click. Only an enabled daemon permits agent registration; only a re-read enabled agent
+  permits the asynchronous initial wake request. No intermediate state says registered.
+- The helper command policy now parses the proposed local date and requires it to equal
+  `WakeScheduler.nextWake` from the transaction's captured clock/calendar. A syntactically
+  valid `09:13:47`, a later valid product slot, sleep/repeat/cancel variants, extra argv,
+  and shell executables all fail mutation tests.
+- One shared serial transaction queue encloses the complete scheduler call, including
+  `pmset -g sched` and its conditional `schedule wake`, across every XPC connection.
+  Concurrent tests record a maximum of one active transaction.
+- The app client is async and cancellation-aware, owns the XPC connection until a terminal
+  result, invalidates it on success/failure/cancellation/timeout, and ignores late replies.
+  GUI setup runs in a Task rather than blocking for ten seconds. The helper's `pmset`
+  process has a five-second deadline, TERM grace period, and bounded KILL fallback.
+- Review verification did not call either `SMAppService.register()`, launch the helper,
+  execute `pmset`, or exercise live System Settings approval. Ad-hoc bundles remain layout
+  evidence only because their Team ID is absent and the production requirement rejects
+  them.
+
+### Independent-review verification
+
+- Focused `WakeScheduler|LaunchAgentTests|AppBundleWakeHelperTests`: 53 passed, 0 failed.
+- Full Swift suite: 315 executed, 314 passed. The sole failure remains the unrelated
+  `DigestAmendment001Tests.testTheFourFieldsMatchWhatPythonComputesFromTheSameCorpus`
+  fixture bootstrap: this worktree lacks the project `.venv`, and Xcode Python 3.9 cannot
+  import `datetime.UTC`.
+- Two-path relocation build and byte comparison, source and embedded `plutil -lint`,
+  nested-helper strict signing verification, outer deep strict signing verification,
+  `git diff --check`, and Track G ownership passed. No service registration, helper
+  execution, live approval, or physical power command occurred.

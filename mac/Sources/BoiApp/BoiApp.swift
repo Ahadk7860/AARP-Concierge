@@ -19,20 +19,20 @@ import SwiftUI
 /// point: TCC is per-responsible-process, so the scheduled run has to be this bundle.
 @main
 enum Entry {
-    static func main() {
+    static func main() async {
         // Both paths log to disk. A GUI app launched from the Finder and a job launched
         // by `launchd` both have a stdout nobody will ever read, and "did the relaunch
         // happen inside two seconds" is not a question a screenshot can answer.
         StructuredLog.setFileSink(URL(fileURLWithPath: SyncRun.Paths.installed().stateDirectory)
             .appendingPathComponent("boi.log"))
         if CommandLine.arguments.contains("--sync") {
-            exit(HeadlessSync.run())
+            exit(await HeadlessSync.run())
         }
         // Registering the agent needs the bundle but not the window, so it is reachable
         // headlessly — otherwise the only way to verify `launchctl list` shows it is to
         // click a button, which is not evidence anybody can reproduce.
         if CommandLine.arguments.contains("--register-agent") {
-            let result = ScheduledSync.register()
+            let result = await ScheduledSync.register()
             StructuredLog.emit("agent.register",
                                level: result.degradation == nil ? .info : .warn,
                                fields: [
@@ -62,11 +62,11 @@ enum Entry {
 
 enum HeadlessSync {
     static func run(
-        scheduleNextWake: @escaping WakeSchedulerLifecycle.Schedule = { date in
-            try WakeHelperClient().scheduleNextWake(after: date)
+        scheduleNextWake: @escaping WakeSchedulerLifecycle.AsyncSchedule = {
+            try await WakeHelperClient().scheduleNextWake()
         }
-    ) -> Int32 {
-        let result = WakeSchedulerLifecycle.runEligibleSync(
+    ) async -> Int32 {
+        let result = await WakeSchedulerLifecycle.runEligibleSyncAsync(
             sync: attempt,
             schedule: scheduleNextWake
         )
@@ -163,6 +163,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 /// The LaunchAgent still runs the main app for TCC-protected Messages reads. The separate
 /// LaunchDaemon has no TCC role: it exposes one authenticated, argument-free request and
 /// performs only the root-required RTC wake operation.
+@MainActor
 enum ScheduledSync {
 
     struct RegistrationResult {
@@ -198,58 +199,31 @@ enum ScheduledSync {
 
     @discardableResult
     static func register(
-        scheduleNextWake: @escaping WakeSchedulerLifecycle.Schedule = { date in
-            try WakeHelperClient().scheduleNextWake(after: date)
+        scheduleNextWake: @escaping WakeSchedulerLifecycle.AsyncSchedule = {
+            try await WakeHelperClient().scheduleNextWake()
+        },
+        observe: @escaping (WakeRegistrationState) -> Void = { _ in }
+    ) async -> RegistrationResult {
+        let state = await WakeRegistrationCoordinator.run(
+            daemonStatus: { status(wakeService.status) },
+            registerDaemon: { try wakeService.register() },
+            agentStatus: { status(service.status) },
+            registerAgent: { try service.register() },
+            schedule: scheduleNextWake,
+            observe: observe,
+            sleep: { try await Task.sleep(nanoseconds: 1_000_000_000) }
+        )
+        switch state {
+        case .ready(let wake):
+            return RegistrationResult(serviceResult: "wake helper enabled; agent enabled",
+                                      wake: wake)
+        case .degraded(let detail):
+            return RegistrationResult(serviceResult: "background setup failed: \(detail)",
+                                      wake: .failed(detail: detail))
+        default:
+            return RegistrationResult(serviceResult: "background setup incomplete",
+                                      wake: .failed(detail: "background setup incomplete"))
         }
-    ) -> RegistrationResult {
-        let registration: String
-        do {
-            if service.status == .enabled {
-                registration = "already registered"
-            } else {
-                try service.register()
-                registration = "registered"
-            }
-        } catch {
-            return RegistrationResult(serviceResult: "agent failed: \(error)", wake: nil)
-        }
-
-        let helperRegistration: String
-        do {
-            if wakeService.status == .enabled {
-                helperRegistration = "wake helper enabled"
-            } else {
-                try wakeService.register()
-                switch wakeService.status {
-                case .enabled:
-                    helperRegistration = "wake helper registered"
-                case .requiresApproval:
-                    helperRegistration = "wake helper requires admin approval"
-                case .notFound:
-                    helperRegistration = "wake helper failed: embedded daemon not found"
-                case .notRegistered:
-                    helperRegistration = "wake helper failed: daemon not registered"
-                @unknown default:
-                    helperRegistration = "wake helper failed: unknown registration status"
-                }
-            }
-        } catch {
-            return RegistrationResult(
-                serviceResult: "\(registration); wake helper failed: \(error)",
-                wake: .failed(detail: "authorized wake helper registration failed")
-            )
-        }
-
-        guard wakeService.status == .enabled else {
-            return RegistrationResult(
-                serviceResult: "\(registration); \(helperRegistration)",
-                wake: .failed(detail: "authorized wake helper requires admin approval")
-            )
-        }
-
-        let wake = WakeSchedulerLifecycle.scheduleInitialWake(schedule: scheduleNextWake)
-        return RegistrationResult(serviceResult: "\(registration); \(helperRegistration)",
-                                  wake: wake)
     }
 
     static func unregister() {
@@ -268,6 +242,16 @@ enum ScheduledSync {
         case .notFound: return "not found"
         case .notRegistered: return "not registered"
         @unknown default: return "unknown"
+        }
+    }
+
+    private static func status(_ status: SMAppService.Status) -> BackgroundServiceStatus {
+        switch status {
+        case .enabled: return .enabled
+        case .requiresApproval: return .requiresApproval
+        case .notFound: return .notFound
+        case .notRegistered: return .notRegistered
+        @unknown default: return .unknown
         }
     }
 }

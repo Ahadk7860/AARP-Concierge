@@ -1,5 +1,6 @@
 import BoiKit
 import Foundation
+import ServiceManagement
 import SwiftUI
 
 /// The onboarding state machine.
@@ -50,9 +51,11 @@ final class PermissionModel: ObservableObject {
     /// Visible even when the LaunchAgent itself is enabled: launchd registration and
     /// permission to install a hardware wake are two different capabilities.
     @Published private(set) var backgroundFreshnessDegradation: String?
+    @Published private(set) var backgroundRefreshRequiresApproval = false
 
     private var timer: Timer?
     private var relaunchWatchdog: Timer?
+    private var backgroundRefreshTask: Task<Void, Never>?
     /// Whether the user has actually left this app since we started waiting.
     private var leftWhileWaiting = false
     private var watcher = GrantWatcher()
@@ -117,15 +120,45 @@ final class PermissionModel: ObservableObject {
     /// Registers background work and separately records whether an RTC wake was really
     /// installed. Failure never blocks foreground scans or the report handoff.
     func enableBackgroundRefresh() {
-        let result = ScheduledSync.register()
-        backgroundFreshnessDegradation = result.degradation
-        StructuredLog.emit("agent.register",
-                           level: result.degradation == nil ? .info : .warn,
-                           fields: [
-            "result": result.summary,
-            "status": ScheduledSync.statusDescription,
-            "freshness": result.degradation == nil ? "scheduled" : "degraded",
-        ])
+        backgroundRefreshTask?.cancel()
+        backgroundRefreshTask = Task { [weak self] in
+            guard let self else { return }
+            let result = await ScheduledSync.register(observe: { state in
+                guard !Task.isCancelled else { return }
+                self.observeBackgroundRegistration(state)
+            })
+            guard !Task.isCancelled else { return }
+            backgroundFreshnessDegradation = result.degradation
+            backgroundRefreshRequiresApproval = false
+            StructuredLog.emit("agent.register",
+                               level: result.degradation == nil ? .info : .warn,
+                               fields: [
+                "result": result.summary,
+                "status": ScheduledSync.statusDescription,
+                "freshness": result.degradation == nil ? "scheduled" : "degraded",
+            ])
+        }
+    }
+
+    func openBackgroundApprovalSettings() {
+        SMAppService.openSystemSettingsLoginItems()
+    }
+
+    private func observeBackgroundRegistration(_ state: WakeRegistrationState) {
+        switch state {
+        case .requiresApproval(let service):
+            backgroundRefreshRequiresApproval = true
+            backgroundFreshnessDegradation = "Approve \(service) in System Settings. "
+                + "Boi will notice the approval and continue automatically."
+        case .ready:
+            backgroundRefreshRequiresApproval = false
+            backgroundFreshnessDegradation = nil
+        case .degraded(let detail):
+            backgroundRefreshRequiresApproval = false
+            backgroundFreshnessDegradation = detail
+        case .registeringDaemon, .registeringAgent, .schedulingWake:
+            break
+        }
     }
 
     /// **Detects the already-granted case and skips the screen entirely**, which is the

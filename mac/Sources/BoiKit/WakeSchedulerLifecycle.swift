@@ -43,6 +43,7 @@ public enum WakeSchedulerLifecycle {
     }
 
     public typealias Schedule = (Date) throws -> WakeScheduler.Outcome
+    public typealias AsyncSchedule = () async throws -> WakeScheduler.Outcome
     public typealias Log = (String, StructuredLog.Level, [String: String]) -> Void
 
     /// Runs one eligible `--sync` attempt and then queues exactly one next wake.
@@ -77,6 +78,30 @@ public enum WakeSchedulerLifecycle {
                      log: log)
     }
 
+    /// Async production path. No caller date crosses the helper boundary.
+    public static func runEligibleSyncAsync(
+        sync: () -> SyncDisposition,
+        schedule: AsyncSchedule,
+        log: Log? = nil
+    ) async -> HeadlessResult {
+        let syncResult = sync()
+        let wakeResult = await scheduleNextAsync(reason: .headlessSync,
+                                                 schedule: schedule,
+                                                 freshnessAdvanced: syncResult.freshnessAdvanced,
+                                                 log: log)
+        return HeadlessResult(sync: syncResult, wake: wakeResult)
+    }
+
+    public static func scheduleInitialWakeAsync(
+        schedule: AsyncSchedule,
+        log: Log? = nil
+    ) async -> ScheduleDisposition {
+        await scheduleNextAsync(reason: .initialRegistration,
+                                schedule: schedule,
+                                freshnessAdvanced: false,
+                                log: log)
+    }
+
     private static func scheduleNext(
         reason: ScheduleReason,
         at date: Date,
@@ -89,6 +114,43 @@ public enum WakeSchedulerLifecycle {
         }
         do {
             switch try schedule(date) {
+            case .scheduled(let wake):
+                emit("wake.lifecycle_scheduled", .info, [
+                    "reason": reason.rawValue,
+                    "result": "scheduled",
+                    "wake_at": StructuredLog.timestamp(wake),
+                ])
+                return .scheduled(wake)
+            case .alreadyScheduled(let wake):
+                emit("wake.lifecycle_scheduled", .info, [
+                    "reason": reason.rawValue,
+                    "result": "already_scheduled",
+                    "wake_at": StructuredLog.timestamp(wake),
+                ])
+                return .alreadyScheduled(wake)
+            }
+        } catch {
+            let detail = String(describing: error)
+            emit("wake.lifecycle_degraded", .error, [
+                "reason": reason.rawValue,
+                "detail": detail,
+                "freshness_advanced": String(freshnessAdvanced),
+            ])
+            return .failed(detail: detail)
+        }
+    }
+
+    private static func scheduleNextAsync(
+        reason: ScheduleReason,
+        schedule: AsyncSchedule,
+        freshnessAdvanced: Bool,
+        log: Log?
+    ) async -> ScheduleDisposition {
+        let emit = log ?? { event, level, fields in
+            StructuredLog.emit(event, level: level, fields: fields)
+        }
+        do {
+            switch try await schedule() {
             case .scheduled(let wake):
                 emit("wake.lifecycle_scheduled", .info, [
                     "reason": reason.rawValue,

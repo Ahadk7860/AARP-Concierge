@@ -281,6 +281,12 @@ private struct HandoffScreen: View {
                             .font(.caption).foregroundStyle(.secondary)
                             .accessibilityIdentifier("wake-freshness-degraded")
                     }
+                    if model.backgroundRefreshRequiresApproval {
+                        Button("Open System Settings") {
+                            model.openBackgroundApprovalSettings()
+                        }
+                        .accessibilityIdentifier("wake-helper-open-settings")
+                    }
                 }
                 .padding(.top, 4)
             }

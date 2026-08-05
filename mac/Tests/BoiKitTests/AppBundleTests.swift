@@ -129,16 +129,26 @@ final class LaunchAgentTests: XCTestCase {
     /// The plist invokes the **main app binary** with `--sync`. TCC is
     /// per-responsible-process and children do not inherit, so a helper would need its
     /// own grant that no screen asks for — and the sync would silently never run.
-    func testThePlistInvokesTheAppBinaryAndNotAHelper() {
+    func testThePlistInvokesTheRelocatableBundledAppBinaryAndNotAHelper() {
         let xml = LaunchAgentPlist.xml(binaryPath: binary)
-        XCTAssertTrue(xml.contains("<string>\(binary)</string>"))
+        XCTAssertTrue(xml.contains("<key>BundleProgram</key>"))
+        XCTAssertTrue(xml.contains("<string>Contents/MacOS/Boi</string>"))
         XCTAssertTrue(xml.contains("<string>--sync</string>"))
-        XCTAssertTrue(xml.contains("Contents/MacOS/"))
+        XCTAssertFalse(xml.contains(binary))
 
-        let helper = "/Users/x/Applications/Boi.app/Contents/Helpers/boi-sync"
-        XCTAssertFalse(LaunchAgentPlist.problems(inXML:
-            LaunchAgentPlist.xml(binaryPath: helper)).isEmpty,
+        let helper = xml.replacingOccurrences(of: "Contents/MacOS/Boi",
+                                              with: "Contents/Helpers/boi-sync")
+        XCTAssertFalse(LaunchAgentPlist.problems(inXML: helper).isEmpty,
             "a helper path must be rejected — it cannot hold the grant")
+    }
+
+    func testGeneratorIsByteIdenticalAcrossStagingAndInstallLocations() {
+        let staged = LaunchAgentPlist.xml(binaryPath: "/tmp/build/Boi.app/Contents/MacOS/Boi")
+        let installed = LaunchAgentPlist.xml(
+            binaryPath: "/Applications/Boi.app/Contents/MacOS/Boi")
+        XCTAssertEqual(staged, installed)
+        XCTAssertFalse(staged.contains("/tmp/"))
+        XCTAssertFalse(staged.contains("/Applications/"))
     }
 
     /// Agent, always. Root processes cannot hold TCC at all on macOS 13+, so the
@@ -217,8 +227,8 @@ final class LaunchAgentTests: XCTestCase {
             + "/" + LaunchAgentPlist.fileName
         let xml = try String(contentsOfFile: plist, encoding: .utf8)
         XCTAssertEqual(LaunchAgentPlist.problems(inXML: xml), [])
-        XCTAssertTrue(xml.contains(bundle + "/Contents/MacOS/Boi"),
-                      "the plist must name this bundle's own binary")
+        XCTAssertTrue(xml.contains("<string>Contents/MacOS/Boi</string>"))
+        XCTAssertFalse(xml.contains(bundle), "plist must survive moving the app bundle")
     }
 }
 

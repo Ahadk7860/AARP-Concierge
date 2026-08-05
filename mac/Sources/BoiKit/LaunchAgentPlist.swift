@@ -20,6 +20,7 @@ public enum LaunchAgentPlist {
     /// here.
     public static let directoryInsideBundle = "Contents/Library/LaunchAgents"
     public static var fileName: String { AppInfo.launchAgentLabel + ".plist" }
+    public static let bundleProgram = "Contents/MacOS/Boi"
 
     /// The four `launchd` calendar triggers mirror the four RTC alarms exactly. The RTC
     /// alarm makes the closed Mac wake at the trigger; the calendar event then launches
@@ -33,6 +34,7 @@ public enum LaunchAgentPlist {
                            intervalSeconds: Int = SyncRun.defaultIntervalSeconds,
                            logDirectory: String? = nil) -> String {
         _ = intervalSeconds
+        _ = binaryPath // Source-compatible CLI input; SMAppService requires relocation.
         let logs = logDirectory.map {
             """
             \n    <key>StandardOutPath</key>
@@ -64,9 +66,11 @@ public enum LaunchAgentPlist {
                      per-responsible-process and children do not inherit the grant, so a
                      helper would need its own Full Disk Access that nothing ever asks
                      for and the sync would silently never run. -->
+                <key>BundleProgram</key>
+                <string>\(bundleProgram)</string>
                 <key>ProgramArguments</key>
                 <array>
-                    <string>\(binaryPath)</string>
+                    <string>Boi</string>
                     <string>--sync</string>
                 </array>
                 <!-- These triggers coincide with WakeScheduler's RTC alarms. The alarm
@@ -119,9 +123,24 @@ public enum LaunchAgentPlist {
         } else {
             problems.append("has no valid StartCalendarInterval array")
         }
-        if !xml.contains("Contents/MacOS/") {
-            problems.append("does not point at a binary inside an app bundle's "
-                            + "Contents/MacOS — a bare helper cannot hold the grant")
+        guard let data = xml.data(using: .utf8),
+              let plist = try? PropertyListSerialization.propertyList(
+                from: data, options: [], format: nil),
+              let root = plist as? [String: Any] else {
+            problems.append("is not a valid property list")
+            return problems
+        }
+        if root["BundleProgram"] as? String != bundleProgram {
+            problems.append("BundleProgram must be the relocatable \(bundleProgram)")
+        }
+        if root["Program"] != nil {
+            problems.append("must not contain an absolute Program path")
+        }
+        if root["ProgramArguments"] as? [String] != ["Boi", "--sync"] {
+            problems.append("ProgramArguments must contain only Boi and --sync")
+        }
+        if xml.contains("/Boi.app/") {
+            problems.append("contains an absolute staging or installation path")
         }
         return problems
     }

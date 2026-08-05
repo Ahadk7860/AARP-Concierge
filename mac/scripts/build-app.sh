@@ -91,7 +91,6 @@ PLIST
 # grant. A helper binary would not, and its failure mode is silence.
 swift run --package-path mac boi-cli agent-plist \
   --binary "$APP/Contents/MacOS/Boi" \
-  --log-directory /tmp/boi-a \
   > "$APP/Contents/Library/LaunchAgents/$AGENT_LABEL.plist"
 
 # Nested code must be signed before the outer app. A real Developer ID identity supplies
