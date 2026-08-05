@@ -102,7 +102,7 @@ struct UnderstandingBuilder {
 
         return RelationshipUnderstanding(
             contactID: contactID,
-            register: register(for: userBodies),
+            register: Self.register(for: userBodies),
             relationshipKind: relationshipKind(total: total, typicalGapDays: typicalGap,
                                                userShare: userShare, topics: topics(in: ordered)),
             openThread: openThread(for: lastShape),
@@ -112,7 +112,7 @@ struct UnderstandingBuilder {
         )
     }
 
-    private func register(for userBodies: [String]) -> UnderstandingRegister {
+    static func register(for userBodies: [String]) -> UnderstandingRegister {
         guard !userBodies.isEmpty else { return .terse }
         let averageLength = userBodies.map(\.count).reduce(0, +) / userBodies.count
         let warmSignals = userBodies.reduce(0) { count, text in
