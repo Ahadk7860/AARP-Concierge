@@ -28,3 +28,27 @@
 
 - `WakeScheduler` is not called from `SyncRun`, the LaunchAgent, or `BoiApp` in prompt 01.
 - No release, signing, notarization, or frozen contract/schema file was changed.
+
+## Prompt 02 — app lifecycle wiring
+
+### Evidence
+
+- `swift test --filter 'WakeScheduler|LaunchAgentTests'`: 29 tests passed, 0 failed.
+- `bash mac/scripts/build-app.sh --out /tmp/boi-a/app`: built and ad-hoc signed the
+  local test bundle. Its parsed LaunchAgent plist contains only `--sync` and the four
+  `StartCalendarInterval` entries at 08:00, 12:00, 17:00, and 21:00; it contains no
+  `StartInterval` fallback.
+- `swift test`: 289 tests executed; 288 passed. The sole failure is the same unrelated
+  worktree environment issue recorded above: no `.venv` means the test falls back to
+  Xcode Python 3.9, which cannot import `datetime.UTC`. Every wake lifecycle and
+  LaunchAgent test passed in the full run.
+- No app executable was launched and no physical `pmset` command was run. Lifecycle
+  tests inject the scheduler; the bundle build only compiles and embeds the plist.
+
+### Remaining physical gate
+
+- Battery drain and real phone-originated Messages iCloud-pull evidence remain
+  unmeasured. Prompt 02 wires the production boundary but does not claim either result.
+- A production `pmset schedule wake` permission failure remains visible as
+  `wake.command_failed` plus `wake.lifecycle_degraded`; it does not overwrite a
+  successful sync result or prevent foreground onboarding from reaching its handoff.

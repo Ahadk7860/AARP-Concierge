@@ -449,6 +449,14 @@ final class PermissionModel: ObservableObject {
             // better. Ending on two things that are wrong is the wrong reward for having
             // just granted full disk access.
             handoff = resolveHandoff()
+            // This is the first eligible onboarding point: terms are accepted, Full Disk
+            // Access is effective in this process, and a scan completed. Registration
+            // schedules the first RTC wake; failure is logged and rendered as degraded
+            // background freshness, but never blocks the report or handoff.
+            StructuredLog.emit("agent.register", fields: [
+                "result": ScheduledSync.register(),
+                "source": "onboarding_complete",
+            ])
             enter(handoff.link == nil ? .ready : .handoff)
         } catch {
             failureDetail = "\(error)"

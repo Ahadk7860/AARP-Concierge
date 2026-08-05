@@ -265,7 +265,7 @@ private struct HandoffScreen: View {
                 }
 
                 HStack {
-                    Button("Turn on the daily check") {
+                    Button("Enable background refresh") {
                         StructuredLog.emit("agent.register",
                                            fields: ["result": ScheduledSync.register()])
                     }

@@ -26,8 +26,7 @@ enum Entry {
         StructuredLog.setFileSink(URL(fileURLWithPath: SyncRun.Paths.installed().stateDirectory)
             .appendingPathComponent("boi.log"))
         if CommandLine.arguments.contains("--sync") {
-            HeadlessSync.run()
-            exit(0)
+            exit(HeadlessSync.run())
         }
         // Registering the agent needs the bundle but not the window, so it is reachable
         // headlessly — otherwise the only way to verify `launchctl list` shows it is to
@@ -59,12 +58,25 @@ enum Entry {
 }
 
 enum HeadlessSync {
-    static func run() {
+    static func run(
+        scheduleNextWake: @escaping WakeSchedulerLifecycle.Schedule = { date in
+            try WakeScheduler().scheduleNextWake(after: date)
+        }
+    ) -> Int32 {
+        let result = WakeSchedulerLifecycle.runEligibleSync(
+            sync: attempt,
+            schedule: scheduleNextWake
+        )
+        return result.exitCode
+    }
+
+    private static func attempt() -> WakeSchedulerLifecycle.SyncDisposition {
         guard let salt = ContactResolver.developmentSalt() else {
+            let detail = "no \(ContactResolver.developmentSaltVariable)"
             StructuredLog.emit("sync.failed", level: .error, fields: [
-                "detail": "no \(ContactResolver.developmentSaltVariable)",
+                "detail": detail,
             ])
-            exit(1)
+            return .failed(detail: detail)
         }
         let paths = SyncRun.Paths.installed()
         let force = CommandLine.arguments.contains("--force")
@@ -83,6 +95,7 @@ enum HeadlessSync {
                     "elapsed_s": (outcome.elapsed * 1000).rounded() / 1000,
                     "app_version": AppInfo.version,
                 ])
+                return .completed
             } else {
                 // The idempotent guard. launchd fires on wake as well as on schedule, so
                 // this is the common case on a laptop, not an error.
@@ -92,10 +105,12 @@ enum HeadlessSync {
                     "mirror_message_count": outcome.mirrorMessageCount,
                     "minimum_hours_between_runs": SyncRun.defaultMinimumHoursBetweenRuns,
                 ])
+                return .skipped(reason: outcome.skippedReason ?? "unknown")
             }
         } catch {
-            StructuredLog.emit("sync.failed", level: .error, fields: ["detail": "\(error)"])
-            exit(1)
+            let detail = String(describing: error)
+            StructuredLog.emit("sync.failed", level: .error, fields: ["detail": detail])
+            return .failed(detail: detail)
         }
     }
 }
@@ -152,13 +167,31 @@ enum ScheduledSync {
     static var service: SMAppService { .agent(plistName: LaunchAgentPlist.fileName) }
 
     @discardableResult
-    static func register() -> String {
+    static func register(
+        scheduleNextWake: @escaping WakeSchedulerLifecycle.Schedule = { date in
+            try WakeScheduler().scheduleNextWake(after: date)
+        }
+    ) -> String {
+        let registration: String
         do {
-            if service.status == .enabled { return "already registered" }
-            try service.register()
-            return "registered"
+            if service.status == .enabled {
+                registration = "already registered"
+            } else {
+                try service.register()
+                registration = "registered"
+            }
         } catch {
             return "failed: \(error)"
+        }
+
+        let wake = WakeSchedulerLifecycle.scheduleInitialWake(schedule: scheduleNextWake)
+        switch wake {
+        case .scheduled(let date):
+            return "\(registration); wake scheduled \(StructuredLog.timestamp(date))"
+        case .alreadyScheduled(let date):
+            return "\(registration); wake already scheduled \(StructuredLog.timestamp(date))"
+        case .failed(let detail):
+            return "\(registration); wake scheduling degraded: \(detail)"
         }
     }
 

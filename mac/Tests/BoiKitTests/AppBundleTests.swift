@@ -151,26 +151,50 @@ final class LaunchAgentTests: XCTestCase {
             .contains { $0.contains("root") })
     }
 
-    /// `StartInterval`, not `StartCalendarInterval`. A calendar trigger assumes the
-    /// laptop is open at a particular moment; it is not.
-    func testACalendarIntervalIsRejected() {
-        let bad = LaunchAgentPlist.xml(binaryPath: binary)
-            .replacingOccurrences(of: "<key>StartInterval</key>",
-                                  of: "<key>StartCalendarInterval</key>")
-        let problems = LaunchAgentPlist.problems(inXML: bad)
-        XCTAssertTrue(problems.contains { $0.contains("StartCalendarInterval") })
-        XCTAssertTrue(problems.contains { $0.contains("no StartInterval") })
-
-        // And the check reads the KEY, not the word: the shipped plist explains in a
-        // comment why it does not use a calendar trigger, and that must stay legal.
-        XCTAssertTrue(LaunchAgentPlist.xml(binaryPath: binary)
-            .contains("StartCalendarInterval"), "the comment explaining the choice is gone")
-        XCTAssertEqual(LaunchAgentPlist.problems(inXML:
-            LaunchAgentPlist.xml(binaryPath: binary)), [])
+    /// Phase 1's half-hour polling is obsolete. The four RTC alarms wake the Mac at the
+    /// same wall-clock times represented here, so launchd now has four matching calendar
+    /// triggers and no periodic fallback.
+    func testTheCalendarIntervalsMatchTheFourWakePlannerTimes() {
+        let xml = LaunchAgentPlist.xml(binaryPath: binary)
+        XCTAssertTrue(xml.contains("<key>StartCalendarInterval</key>"))
+        XCTAssertFalse(xml.contains("<key>StartInterval</key>"))
+        for hour in [8, 12, 17, 21] {
+            XCTAssertTrue(xml.contains("<integer>\(hour)</integer>"),
+                          "missing local \(hour):00 trigger")
+        }
+        XCTAssertEqual(xml.components(separatedBy: "<key>Minute</key>").count - 1, 4)
     }
 
-    func testTheIntervalIsHalfAnHourAndTheAgentLivesInsideTheBundle() {
-        XCTAssertEqual(SyncRun.defaultIntervalSeconds, 1800)
+    func testTheObsoletePeriodicIntervalIsRejected() {
+        let bad = LaunchAgentPlist.xml(binaryPath: binary)
+            .replacingOccurrences(of: "<key>RunAtLoad</key>",
+                                  with: "<key>StartInterval</key><integer>1800</integer>"
+                                      + "<key>RunAtLoad</key>")
+        let problems = LaunchAgentPlist.problems(inXML: bad)
+        XCTAssertTrue(problems.contains { $0.contains("obsolete periodic StartInterval") })
+    }
+
+    func testTheLegacyIntervalArgumentCannotRestorePolling() {
+        let xml = LaunchAgentPlist.xml(binaryPath: binary, intervalSeconds: 60)
+        XCTAssertFalse(xml.contains("<key>StartInterval</key>"))
+        XCTAssertEqual(LaunchAgentPlist.problems(inXML: xml), [])
+    }
+
+    func testAMissingOrChangedWakeTimeIsRejected() {
+        let xml = LaunchAgentPlist.xml(binaryPath: binary)
+        let missing = xml.replacingOccurrences(
+            of: "<key>StartCalendarInterval</key>",
+            with: "<key>ObsoleteCalendarInterval</key>")
+        XCTAssertTrue(LaunchAgentPlist.problems(inXML: missing)
+            .contains { $0.contains("no valid StartCalendarInterval") })
+
+        let changed = xml.replacingOccurrences(of: "<integer>21</integer>",
+                                               with: "<integer>22</integer>")
+        XCTAssertTrue(LaunchAgentPlist.problems(inXML: changed)
+            .contains { $0.contains("expected exactly") })
+    }
+
+    func testTheAgentLivesInsideTheBundle() {
         XCTAssertEqual(LaunchAgentPlist.directoryInsideBundle, "Contents/Library/LaunchAgents")
         XCTAssertEqual(LaunchAgentPlist.fileName, "app.boi.mac.sync.plist")
     }
@@ -179,8 +203,10 @@ final class LaunchAgentTests: XCTestCase {
     /// one. Fails rather than skips when the bundle is absent: a green run that checked
     /// nothing is worse than a red one.
     func testTheBuiltBundlesPlistPassesTheSameRules() throws {
-        let candidates = [NSHomeDirectory() + "/Applications/Boi.app",
-                          "/tmp/boi-a/app/Boi.app"]
+        // Prefer the bundle this worktree's build command produces. A separately
+        // installed older Boi.app must not make a new bundle test inspect stale bytes.
+        let candidates = ["/tmp/boi-a/app/Boi.app",
+                          NSHomeDirectory() + "/Applications/Boi.app"]
         guard let bundle = candidates.first(where: {
             FileManager.default.fileExists(atPath: $0)
         }) else {
