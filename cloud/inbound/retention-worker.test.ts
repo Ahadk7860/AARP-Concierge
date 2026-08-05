@@ -1,6 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { TurnRetentionError, TurnRetentionWorker, scheduleTurnRetention } from "./retention-worker.js";
+import { IntervalRetentionSchedule, TurnRetentionError, TurnRetentionWorker, scheduleTurnRetention } from "./retention-worker.js";
+
+afterEach(() => { vi.useRealTimers(); });
 
 describe("TurnRetentionWorker", () => {
   it("purges the exact boundary idempotently", async () => {
@@ -19,7 +21,7 @@ describe("TurnRetentionWorker", () => {
         return before - expiries.length;
       },
     };
-    const worker = new TurnRetentionWorker({ repository, now: () => boundary });
+    const worker = new TurnRetentionWorker({ repository, now: () => boundary, observe: () => {} });
     await expect(worker.run()).resolves.toBe(2);
     await expect(worker.run()).resolves.toBe(0);
     expect(expiries).toEqual([new Date("2026-11-03T12:00:00.001Z")]);
@@ -32,7 +34,7 @@ describe("TurnRetentionWorker", () => {
     const logs: unknown[] = [];
     const worker = new TurnRetentionWorker({
       repository: { purgeExpiredTurns: async () => { calls += 1; await gate; throw new Error("database detail"); } },
-      log: (event) => { logs.push(event); },
+      observe: (event) => { logs.push(event); },
     });
     const first = worker.run();
     const second = worker.run();
@@ -47,12 +49,31 @@ describe("TurnRetentionWorker", () => {
   it("ships an injected scheduling seam", async () => {
     let installed: (() => Promise<void>) | null = null;
     let stopped = false;
-    const worker = new TurnRetentionWorker({ repository: { purgeExpiredTurns: async () => 0 } });
+    const worker = new TurnRetentionWorker({ repository: { purgeExpiredTurns: async () => 0 }, observe: () => {} });
     const stop = scheduleTurnRetention(worker, {
       install(job) { installed = job; return () => { stopped = true; }; },
     });
     await (installed as unknown as () => Promise<void>)();
     stop();
     expect(stopped).toBe(true);
+  });
+
+  it("reports every repeated database failure and the interval observer sees each rejection", async () => {
+    vi.useFakeTimers();
+    const events: unknown[] = [];
+    const errors: unknown[] = [];
+    let calls = 0;
+    const worker = new TurnRetentionWorker({
+      repository: { purgeExpiredTurns: async () => { calls += 1; throw new Error("db private detail"); } },
+      observe: (event) => { events.push(event); },
+    });
+    const stop = scheduleTurnRetention(worker, new IntervalRetentionSchedule((error) => { errors.push(error); }, 100));
+    await vi.advanceTimersByTimeAsync(100);
+    await vi.advanceTimersByTimeAsync(100);
+    stop();
+    expect(calls).toBe(2);
+    expect(events).toEqual([{ msg: "turns.retention.failed" }, { msg: "turns.retention.failed" }]);
+    expect(errors).toEqual([new TurnRetentionError(), new TurnRetentionError()]);
+    expect(JSON.stringify([events, errors])).not.toContain("db private detail");
   });
 });

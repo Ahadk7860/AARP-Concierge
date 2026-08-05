@@ -93,3 +93,27 @@ claim the live adapter until its stream API has been verified.
 - H must inject the platform key provider and install/start the retention schedule in the
   deployed worker. J must supply the closed chat port. K must prove those real process
   boundaries and outbound delivery idempotency end to end.
+
+## Durable-outbox review fixes
+
+- Migrations 013–014 add a ciphertext-only, user-partitioned inbound outbox and correct the
+  retention constraint to exactly 2160 elapsed hours. The earlier `interval '90 days'`
+  changes elapsed duration across DST under a non-UTC database session; the live test
+  caught this rather than assuming Railway's timezone.
+- A per-user row lock serializes the initial claim. Inbound turn, canonical encrypted
+  outbound (or durable `no_reply`), and durable delivery key/state commit in one
+  transaction. Concurrent losers read the winner's ciphertext.
+- Redelivery reads/decrypts durable state before invoking deterministic or J providers.
+  Pending replies always deliver the stored canonical text with the stored idempotency
+  key; changed provider output and null-to-text changes cannot escape. Delivery is marked
+  sent only after the idempotent port succeeds, so failure before delivery and a crash
+  after transport acceptance are both retryable without producing two accepted sends.
+- Purge deletes associated outbox metadata before expired turns, transactionally, so no
+  durable state points at a removed canonical reply. Account deletion cascades through
+  handles, turns, and outbox from the user-first delete.
+- Retention observation is mandatory. Every worker success/failure is emitted; the daily
+  interval requires an error observer and forwards every rejection instead of swallowing
+  it. Concurrent calls coalesce one run/one event, while repeated failures emit repeatedly.
+- Focused suite: 50 inbound/stream tests plus 6 live PostgreSQL outbox/retention/cascade
+  tests pass, including changed-output retries, concurrent claims, null-reply retry, both
+  crash boundaries, DST-crossing expiry, and repeated retention failures.

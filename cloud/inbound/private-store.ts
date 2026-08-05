@@ -1,16 +1,25 @@
 import type { EncryptedContactHandle, EncryptedTurn, Phase2PrivateRepository } from "../db/src/repository.js";
 import type { UserScope } from "../db/src/scope.js";
+import type { EncryptedOutboxState } from "../db/src/encrypted.js";
 import { HandleVault, type EncryptedHandle } from "./handle-vault.js";
 import { TurnVault, type EncryptedTurnPayload, type TurnDirection } from "./turn-vault.js";
 
 const RETENTION_MS = 90 * 24 * 60 * 60 * 1_000;
 
 type ExchangeRepository = Phase2PrivateRepository & {
-  appendEncryptedExchangeOnce(
+  encryptedOutcomeFor(scope: UserScope, eventKey: string): Promise<EncryptedOutboxState | null>;
+  claimEncryptedOutcome(
     scope: UserScope,
-    inbound: EncryptedTurn,
-    outbound: EncryptedTurn | null,
-  ): Promise<boolean>;
+    input: { event_key: string; delivery_key: string; inbound: EncryptedTurn; outbound: EncryptedTurn | null },
+  ): Promise<{ claimed: boolean; state: EncryptedOutboxState }>;
+  markEncryptedOutcomeDelivered(scope: UserScope, eventKey: string, deliveryKey: string): Promise<void>;
+};
+
+export type CanonicalPrivateOutcome = {
+  event_key: string;
+  delivery_key: string;
+  delivery_status: EncryptedOutboxState["delivery_status"];
+  outbound_text: string | null;
 };
 
 export class PrivateKeyCapabilityUnavailableError extends Error {
@@ -39,16 +48,33 @@ export class EncryptedPrivateStore {
     return this.handleVault.open({ user_id: scope.user_id, contact_id: contactId }, envelope);
   }
 
-  async persistExchangeOnce(input: {
+  async canonicalOutcomeFor(scope: UserScope, eventKey: string): Promise<CanonicalPrivateOutcome | null> {
+    const state = await this.repository.encryptedOutcomeFor(scope, eventKey);
+    return state === null ? null : this.openOutcome(scope, state);
+  }
+
+  async claimCanonicalOutcome(input: {
     scope: UserScope;
+    event_key: string;
+    delivery_key: string;
     inbound: { turn_id: string; text: string; occurred_at: Date };
     outbound: { turn_id: string; text: string; occurred_at: Date } | null;
-  }): Promise<boolean> {
+  }): Promise<{ claimed: boolean; outcome: CanonicalPrivateOutcome }> {
     const inbound = await this.encryptedTurn(input.scope, "inbound", input.inbound);
     const outbound = input.outbound === null
       ? null
       : await this.encryptedTurn(input.scope, "outbound", input.outbound);
-    return this.repository.appendEncryptedExchangeOnce(input.scope, inbound, outbound);
+    const result = await this.repository.claimEncryptedOutcome(input.scope, {
+      event_key: input.event_key,
+      delivery_key: input.delivery_key,
+      inbound,
+      outbound,
+    });
+    return { claimed: result.claimed, outcome: await this.openOutcome(input.scope, result.state) };
+  }
+
+  async markOutcomeDelivered(scope: UserScope, eventKey: string, deliveryKey: string): Promise<void> {
+    await this.repository.markEncryptedOutcomeDelivered(scope, eventKey, deliveryKey);
   }
 
   private async encryptedTurn(
@@ -65,6 +91,21 @@ export class EncryptedPrivateStore {
       key_envelope: encodeEnvelope(encrypted),
       occurred_at: turn.occurred_at,
       expires_at: new Date(turn.occurred_at.getTime() + RETENTION_MS),
+    };
+  }
+
+  private async openOutcome(scope: UserScope, state: EncryptedOutboxState): Promise<CanonicalPrivateOutcome> {
+    const outbound_text = state.delivery_status !== "pending" || state.outbound === null
+      ? null
+      : await this.turnVault.open(
+        { user_id: scope.user_id, turn_id: state.outbound.turn_id, direction: "outbound" },
+        decodeTurnEnvelope(state.outbound.key_envelope, state.outbound.ciphertext),
+      );
+    return {
+      event_key: state.event_key,
+      delivery_key: state.delivery_key,
+      delivery_status: state.delivery_status,
+      outbound_text,
     };
   }
 }
@@ -107,4 +148,9 @@ function decodeEnvelope(keyEnvelope: Buffer, ciphertext: Buffer): EncryptedHandl
   } catch {
     throw new Error("private_envelope_invalid");
   }
+}
+
+function decodeTurnEnvelope(keyEnvelope: Buffer, ciphertext: Buffer): EncryptedTurnPayload {
+  const handleEnvelope = decodeEnvelope(keyEnvelope, ciphertext);
+  return handleEnvelope;
 }

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { EncryptedContactHandle, EncryptedTurn, Phase2PrivateRepository } from "../db/src/repository.js";
+import type { EncryptedOutboxState } from "../db/src/encrypted.js";
 import { unsafeScopeFromUserId } from "../db/src/scope.js";
 import type { ChatReply, InboundMessage } from "../shared/src/contracts.js";
 import type { HandleVaultKeyProvider } from "./handle-vault.js";
@@ -16,20 +17,37 @@ const keys: HandleVaultKeyProvider = {
 
 class RouteRepository implements Phase2PrivateRepository {
   turns = new Map<string, EncryptedTurn>();
+  outcomes = new Map<string, EncryptedOutboxState>();
   async putEncryptedContactHandle(_scope: typeof scope, _handle: EncryptedContactHandle): Promise<void> {}
   async encryptedContactHandleFor(): Promise<EncryptedContactHandle | null> { return null; }
   async appendEncryptedTurn(_scope: typeof scope, turn: EncryptedTurn): Promise<void> { this.turns.set(turn.turn_id, turn); }
-  async appendEncryptedExchangeOnce(
-    _scope: typeof scope,
-    inbound: EncryptedTurn,
-    outbound: EncryptedTurn | null,
-  ): Promise<boolean> {
-    if (this.turns.has(inbound.turn_id)) return false;
-    this.turns.set(inbound.turn_id, inbound);
-    if (outbound !== null) this.turns.set(outbound.turn_id, outbound);
-    return true;
-  }
   async purgeExpiredTurns(): Promise<number> { return 0; }
+  async encryptedOutcomeFor(_scope: typeof scope, eventKey: string): Promise<EncryptedOutboxState | null> {
+    return this.outcomes.get(eventKey) ?? null;
+  }
+  async claimEncryptedOutcome(
+    _scope: typeof scope,
+    input: { event_key: string; delivery_key: string; inbound: EncryptedTurn; outbound: EncryptedTurn | null },
+  ): Promise<{ claimed: boolean; state: EncryptedOutboxState }> {
+    const existing = this.outcomes.get(input.event_key);
+    if (existing !== undefined) return { claimed: false, state: existing };
+    this.turns.set(input.inbound.turn_id, input.inbound);
+    if (input.outbound !== null) this.turns.set(input.outbound.turn_id, input.outbound);
+    const state: EncryptedOutboxState = {
+      event_key: input.event_key,
+      delivery_key: input.delivery_key,
+      delivery_status: input.outbound === null ? "no_reply" : "pending",
+      inbound_turn_id: input.inbound.turn_id,
+      outbound: input.outbound,
+    };
+    this.outcomes.set(input.event_key, state);
+    return { claimed: true, state };
+  }
+  async markEncryptedOutcomeDelivered(_scope: typeof scope, eventKey: string, deliveryKey: string): Promise<void> {
+    const state = this.outcomes.get(eventKey);
+    if (state === undefined || state.delivery_key !== deliveryKey || state.outbound === null) throw new Error("bad state");
+    state.delivery_status = "sent";
+  }
 }
 
 function inbound(overrides: Partial<InboundMessage> = {}): InboundMessage {
@@ -151,16 +169,24 @@ describe("InboundRouter", () => {
   it("retries a failed delivery with the same idempotency key after the turns were committed", async () => {
     const repository = new RouteRepository();
     const keysSeen: string[] = [];
+    const textsSeen: string[] = [];
     let deliveryAttempts = 0;
+    let decisions = 0;
     const router = new InboundRouter({
       decoder: { decode: (streamEvent) => streamEvent.payload as InboundMessage },
       users: { resolve: async () => scope },
-      deterministic: { route: async () => ({ kind: "handled", intent: "report", reply_text: "ready" }) },
+      deterministic: {
+        route: async () => {
+          decisions += 1;
+          return { kind: "handled", intent: "report", reply_text: decisions === 1 ? "canonical" : "changed" };
+        },
+      },
       chat: { waitingOnMe: async () => { throw new Error("must not chat"); } },
       delivery: {
-        deliver: async ({ idempotency_key }) => {
+        deliver: async ({ idempotency_key, text }) => {
           deliveryAttempts += 1;
           keysSeen.push(idempotency_key);
+          textsSeen.push(text);
           if (deliveryAttempts === 1) throw new Error("transport detail");
         },
       },
@@ -170,6 +196,83 @@ describe("InboundRouter", () => {
     await expect(router.route(event(inbound()))).resolves.toMatchObject({ kind: "duplicate" });
     expect(keysSeen).toHaveLength(2);
     expect(new Set(keysSeen).size).toBe(1);
+    expect(textsSeen).toEqual(["canonical", "canonical"]);
+    expect(decisions).toBe(1);
+    expect(repository.turns.size).toBe(2);
+  });
+
+  it("recovers a crash after delivery through the same durable key", async () => {
+    const repository = new RouteRepository();
+    const originalMark = repository.markEncryptedOutcomeDelivered.bind(repository);
+    let marks = 0;
+    repository.markEncryptedOutcomeDelivered = async (...args) => {
+      marks += 1;
+      if (marks === 1) throw new Error("crash after transport accepted");
+      await originalMark(...args);
+    };
+    const attempts: string[] = [];
+    const accepted = new Set<string>();
+    const router = new InboundRouter({
+      decoder: { decode: (streamEvent) => streamEvent.payload as InboundMessage },
+      users: { resolve: async () => scope },
+      deterministic: { route: async () => ({ kind: "handled", intent: "report", reply_text: "canonical" }) },
+      chat: { waitingOnMe: async () => { throw new Error("must not chat"); } },
+      delivery: {
+        deliver: async ({ idempotency_key }) => { attempts.push(idempotency_key); accepted.add(idempotency_key); },
+      },
+      privateStore: new EncryptedPrivateStore(repository, new TurnVault({ keyProvider: keys }), null),
+    });
+    await expect(router.route(event(inbound()))).rejects.toThrow("crash after transport accepted");
+    await expect(router.route(event(inbound()))).resolves.toMatchObject({ kind: "duplicate" });
+    expect(attempts).toHaveLength(2);
+    expect(accepted.size).toBe(1);
+    expect(repository.outcomes.values().next().value?.delivery_status).toBe("sent");
+  });
+
+  it("keeps a canonical null reply null on retry without recomputing", async () => {
+    const repository = new RouteRepository();
+    let decisions = 0;
+    let deliveries = 0;
+    const router = new InboundRouter({
+      decoder: { decode: (streamEvent) => streamEvent.payload as InboundMessage },
+      users: { resolve: async () => scope },
+      deterministic: {
+        route: async () => {
+          decisions += 1;
+          return { kind: "handled", intent: "silent", reply_text: decisions === 1 ? null : "must never send" };
+        },
+      },
+      chat: { waitingOnMe: async () => { throw new Error("must not chat"); } },
+      delivery: { deliver: async () => { deliveries += 1; } },
+      privateStore: new EncryptedPrivateStore(repository, new TurnVault({ keyProvider: keys }), null),
+    });
+    await expect(router.route(event(inbound()))).resolves.toMatchObject({ kind: "deterministic", reply_text: null });
+    await expect(router.route(event(inbound()))).resolves.toMatchObject({ kind: "duplicate" });
+    expect({ decisions, deliveries, turns: repository.turns.size }).toEqual({ decisions: 1, deliveries: 0, turns: 1 });
+  });
+
+  it("concurrent changed decisions deliver only the encrypted canonical winner", async () => {
+    const repository = new RouteRepository();
+    let decisions = 0;
+    const delivered = new Map<string, string>();
+    const router = new InboundRouter({
+      decoder: { decode: (streamEvent) => streamEvent.payload as InboundMessage },
+      users: { resolve: async () => scope },
+      deterministic: {
+        route: async () => {
+          const decision = ++decisions;
+          await Promise.resolve();
+          return { kind: "handled", intent: "race", reply_text: decision === 1 ? "winner" : "loser" };
+        },
+      },
+      chat: { waitingOnMe: async () => { throw new Error("must not chat"); } },
+      delivery: { deliver: async ({ idempotency_key, text }) => { if (!delivered.has(idempotency_key)) delivered.set(idempotency_key, text); } },
+      privateStore: new EncryptedPrivateStore(repository, new TurnVault({ keyProvider: keys }), null),
+    });
+    const outcomes = await Promise.all([router.route(event(inbound())), router.route(event(inbound()))]);
+    expect(outcomes.map((outcome) => outcome.kind).sort()).toEqual(["deterministic", "duplicate"]);
+    expect(delivered.size).toBe(1);
+    expect([...delivered.values()]).toEqual(["winner"]);
     expect(repository.turns.size).toBe(2);
   });
 

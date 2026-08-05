@@ -11,12 +11,19 @@ export interface RetentionSchedule {
 
 /** Concrete daily schedule; runtime composition owns its lifecycle via the returned stop. */
 export class IntervalRetentionSchedule implements RetentionSchedule {
-  constructor(private readonly intervalMs = 24 * 60 * 60 * 1_000) {
+  constructor(
+    private readonly onError: (error: TurnRetentionError) => void,
+    private readonly intervalMs = 24 * 60 * 60 * 1_000,
+  ) {
     if (!Number.isSafeInteger(intervalMs) || intervalMs < 1) throw new Error("retention_interval_invalid");
   }
 
   install(job: () => Promise<void>): () => void {
-    const timer = setInterval(() => { void job().catch(() => { /* worker already reports failure */ }); }, this.intervalMs);
+    const timer = setInterval(() => {
+      void job().catch((error: unknown) => {
+        this.onError(error instanceof TurnRetentionError ? error : new TurnRetentionError());
+      });
+    }, this.intervalMs);
     timer.unref();
     return () => clearInterval(timer);
   }
@@ -33,7 +40,7 @@ export class TurnRetentionWorker {
   constructor(private readonly options: {
     repository: Pick<Phase2PrivateRepository, "purgeExpiredTurns">;
     now?: () => Date;
-    log?: (event: RetentionLogEvent) => void;
+    observe: (event: RetentionLogEvent) => void;
   }) {}
 
   run(): Promise<number> {
@@ -51,10 +58,10 @@ export class TurnRetentionWorker {
       const now = this.options.now?.() ?? new Date();
       if (!Number.isFinite(now.getTime())) throw new Error("invalid clock");
       const count = await this.options.repository.purgeExpiredTurns(now);
-      this.options.log?.({ msg: "turns.retention.purged", count });
+      this.options.observe({ msg: "turns.retention.purged", count });
       return count;
     } catch {
-      this.options.log?.({ msg: "turns.retention.failed" });
+      this.options.observe({ msg: "turns.retention.failed" });
       throw new TurnRetentionError();
     }
   }

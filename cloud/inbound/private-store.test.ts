@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { EncryptedContactHandle, EncryptedTurn, Phase2PrivateRepository } from "../db/src/repository.js";
+import type { EncryptedOutboxState } from "../db/src/encrypted.js";
 import { unsafeScopeFromUserId } from "../db/src/scope.js";
 import { HandleVault, type HandleVaultKeyProvider } from "./handle-vault.js";
 import { EncryptedPrivateStore, PrivateKeyCapabilityUnavailableError } from "./private-store.js";
@@ -16,6 +17,7 @@ const keys: HandleVaultKeyProvider = {
 class MemoryPrivateRepository implements Phase2PrivateRepository {
   handles = new Map<string, EncryptedContactHandle>();
   turns = new Map<string, EncryptedTurn>();
+  outcomes = new Map<string, EncryptedOutboxState>();
 
   async putEncryptedContactHandle(_scope: typeof scope, handle: EncryptedContactHandle): Promise<void> {
     this.handles.set(handle.contact_id, handle);
@@ -24,20 +26,36 @@ class MemoryPrivateRepository implements Phase2PrivateRepository {
     return this.handles.get(contactId) ?? null;
   }
   async appendEncryptedTurn(_scope: typeof scope, turn: EncryptedTurn): Promise<void> { this.turns.set(turn.turn_id, turn); }
-  async appendEncryptedExchangeOnce(
-    _scope: typeof scope,
-    inbound: EncryptedTurn,
-    outbound: EncryptedTurn | null,
-  ): Promise<boolean> {
-    if (this.turns.has(inbound.turn_id)) return false;
-    this.turns.set(inbound.turn_id, inbound);
-    if (outbound !== null) this.turns.set(outbound.turn_id, outbound);
-    return true;
-  }
   async purgeExpiredTurns(now: Date): Promise<number> {
     let count = 0;
     for (const [id, turn] of this.turns) if (turn.expires_at <= now) { this.turns.delete(id); count += 1; }
     return count;
+  }
+  async encryptedOutcomeFor(_scope: typeof scope, eventKey: string): Promise<EncryptedOutboxState | null> {
+    return this.outcomes.get(eventKey) ?? null;
+  }
+  async claimEncryptedOutcome(
+    _scope: typeof scope,
+    input: { event_key: string; delivery_key: string; inbound: EncryptedTurn; outbound: EncryptedTurn | null },
+  ): Promise<{ claimed: boolean; state: EncryptedOutboxState }> {
+    const existing = this.outcomes.get(input.event_key);
+    if (existing !== undefined) return { claimed: false, state: existing };
+    this.turns.set(input.inbound.turn_id, input.inbound);
+    if (input.outbound !== null) this.turns.set(input.outbound.turn_id, input.outbound);
+    const state: EncryptedOutboxState = {
+      event_key: input.event_key,
+      delivery_key: input.delivery_key,
+      delivery_status: input.outbound === null ? "no_reply" : "pending",
+      inbound_turn_id: input.inbound.turn_id,
+      outbound: input.outbound,
+    };
+    this.outcomes.set(input.event_key, state);
+    return { claimed: true, state };
+  }
+  async markEncryptedOutcomeDelivered(_scope: typeof scope, eventKey: string, deliveryKey: string): Promise<void> {
+    const state = this.outcomes.get(eventKey);
+    if (state === undefined || state.delivery_key !== deliveryKey || state.outbound === null) throw new Error("bad state");
+    state.delivery_status = "sent";
   }
 }
 
@@ -73,11 +91,13 @@ describe("EncryptedPrivateStore", () => {
     const occurred = new Date("2026-08-05T12:00:00.000Z");
     const input = {
       scope,
+      event_key: "a".repeat(32),
+      delivery_key: "b".repeat(32),
       inbound: { turn_id: "turn_in_1", text: "private inbound", occurred_at: occurred },
       outbound: { turn_id: "turn_out_1", text: "private outbound", occurred_at: occurred },
     };
-    await expect(store.persistExchangeOnce(input)).resolves.toBe(true);
-    await expect(store.persistExchangeOnce(input)).resolves.toBe(false);
+    await expect(store.claimCanonicalOutcome(input)).resolves.toMatchObject({ claimed: true });
+    await expect(store.claimCanonicalOutcome(input)).resolves.toMatchObject({ claimed: false });
     expect(repository.turns.size).toBe(2);
     for (const turn of repository.turns.values()) {
       expect(turn.expires_at.toISOString()).toBe("2026-11-03T12:00:00.000Z");

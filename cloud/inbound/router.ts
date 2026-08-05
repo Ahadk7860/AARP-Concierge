@@ -69,7 +69,14 @@ export class InboundRouter {
 
     const occurredAt = strictDate(message.received_at);
     const key = idempotencyKey(message.provider, message.provider_message_id);
+    const deliveryKey = idempotencyKey("delivery", key);
     const inboundTurnId = `turn_in_${key}`;
+    const existing = await this.options.privateStore.canonicalOutcomeFor(scope, key);
+    if (existing !== null) {
+      await this.deliverCanonical(scope, existing);
+      return { kind: "duplicate", idempotency_key: existing.delivery_key };
+    }
+
     const deterministic = await this.options.deterministic.route(message, scope);
     const decided = deterministic.kind === "handled"
       ? { kind: "deterministic" as const, intent: deterministic.intent, reply_text: deterministic.reply_text }
@@ -81,18 +88,34 @@ export class InboundRouter {
       occurred_at: this.now(),
     };
 
-    const inserted = await this.options.privateStore.persistExchangeOnce({
+    const claimed = await this.options.privateStore.claimCanonicalOutcome({
       scope,
+      event_key: key,
+      delivery_key: deliveryKey,
       inbound: { turn_id: inboundTurnId, text: message.text, occurred_at: occurredAt },
       outbound,
     });
-    if (replyText !== null) {
-      await this.options.delivery.deliver({ scope, text: replyText, idempotency_key: key });
-    }
-    if (!inserted) return { kind: "duplicate", idempotency_key: key };
+    // Always deliver the value read back from durable state. In a concurrent claim this
+    // can differ from our computation; only the winner's encrypted canonical text ships.
+    await this.deliverCanonical(scope, claimed.outcome);
+    if (!claimed.claimed) return { kind: "duplicate", idempotency_key: claimed.outcome.delivery_key };
     return decided.kind === "deterministic"
-      ? { ...decided, idempotency_key: key }
-      : { ...decided, idempotency_key: key };
+      ? { ...decided, idempotency_key: claimed.outcome.delivery_key }
+      : { ...decided, idempotency_key: claimed.outcome.delivery_key };
+  }
+
+  private async deliverCanonical(
+    scope: UserScope,
+    outcome: { event_key: string; delivery_key: string; delivery_status: "pending" | "sent" | "no_reply"; outbound_text: string | null },
+  ): Promise<void> {
+    if (outcome.delivery_status !== "pending") return;
+    if (outcome.outbound_text === null) throw new Error("encrypted_outbox_corrupt");
+    await this.options.delivery.deliver({
+      scope,
+      text: outcome.outbound_text,
+      idempotency_key: outcome.delivery_key,
+    });
+    await this.options.privateStore.markOutcomeDelivered(scope, outcome.event_key, outcome.delivery_key);
   }
 
   private now(): Date {
