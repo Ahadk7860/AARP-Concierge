@@ -23,7 +23,7 @@ describe("licensed chat reply gate", () => {
     expect(composeWaitingOnMeReply(evidence())).toEqual({
       schema_version: "chat_reply.v1",
       kind: "answer",
-      text: "Maya had this open at the last sync: asked whether you are coming, unanswered. As of Aug 1, 2026 at 9:10 AM UTC.",
+      text: "Maya had an open question at the last sync. As of Aug 1, 2026 at 9:10 AM UTC.",
       synced_through: "2026-08-01T09:10:00Z",
       licenses: [{
         contact_id: "h_8f21a4c0",
@@ -35,7 +35,7 @@ describe("licensed chat reply gate", () => {
 
   it("declines an injected other-contact name even when the claimed contact_id is licensed", () => {
     const injectName = (): RenderedWaitingOnMeAnswer => ({
-      text: "Nora had this open at the last sync: asked whether you are coming, unanswered.",
+      text: "Nora had an open question at the last sync.",
       claims: [{
         contact_id: "h_8f21a4c0",
         display: "Nora",
@@ -66,7 +66,7 @@ describe("licensed chat reply gate", () => {
       const rendered = deterministicWaitingOnMeRenderer(rows);
       return {
         ...rendered,
-        text: "Maya has this open now: asked whether you are coming, unanswered.",
+        text: "Maya has an open question now.",
       };
     };
 
@@ -118,6 +118,20 @@ describe("licensed chat reply gate", () => {
       expect("schema_version" in reply ? reply.schema_version : null).toBe("chat_reply.v1");
       expect(reply.synced_through).toBe(syncedThrough);
     }
+  });
+
+  it("honors five licensed evidence rows within the frozen reply size and license limits", () => {
+    const fiveRows = Array.from({ length: 5 }, (_, index) => ({
+      contact_id: `h_0000000${index + 1}`,
+      display: `Person ${index + 1}`,
+      open_thread: `derived open question ${index + 1}`,
+    }));
+    const reply = composeWaitingOnMeReply({ ...evidence(), rows: fiveRows });
+
+    expect(reply.kind).toBe("answer");
+    expect(reply.licenses).toHaveLength(5);
+    expect(reply.text.length).toBeLessThanOrEqual(1000);
+    expect(reply.text).toContain("Person 5 had an open question at the last sync.");
   });
 
   it("fails closed when renderer output is malformed, duplicated, cross-contact, or throws", () => {

@@ -3,13 +3,13 @@ import type { ChatQuery } from "../../shared/src/contracts.js";
 export type ChatToolDescription = {
   name: "waiting_on_me";
   description: string;
-  limit: { minimum: 1; maximum: 3 };
+  limit: { minimum: 1; maximum: 5 };
 };
 
 const WAITING_ON_ME_TOOL = Object.freeze<ChatToolDescription>({
   name: "waiting_on_me",
-  description: "List up to three relationships where the other person asked a question and an open thread remained at the last sync.",
-  limit: Object.freeze({ minimum: 1, maximum: 3 }),
+  description: "List up to five relationships where the other person asked a question and an open thread remained at the last sync.",
+  limit: Object.freeze({ minimum: 1, maximum: 5 }),
 });
 
 /** The entire vocabulary visible to a selector provider in Phase 2. */
@@ -59,7 +59,7 @@ export function parseSelectorOutput(value: unknown): ClosedChatSelection {
     && typeof value.limit === "number"
     && Number.isInteger(value.limit)
     && value.limit >= 1
-    && value.limit <= 3
+    && value.limit <= 5
   ) {
     return {
       kind: "query",
@@ -129,7 +129,15 @@ export class OfflineSemanticSelectorProvider implements ChatSelectorProvider {
     ].some((pattern) => pattern.test(question));
 
     if (!waitingIntent) return { kind: "decline" };
-    const limit = /\b(?:one|next)\b/.test(question) ? 1 : /\btwo\b/.test(question) ? 2 : 3;
+    const limit = /\bfive\b/.test(question)
+      ? 5
+      : /\bfour\b/.test(question)
+        ? 4
+        : /\b(?:one|next)\b/.test(question)
+          ? 1
+          : /\btwo\b/.test(question)
+            ? 2
+            : 3;
     return { kind: "query", name: "waiting_on_me", limit };
   }
 }

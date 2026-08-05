@@ -6,7 +6,7 @@
 import type { ChatQuery, DigestV2 } from "../../shared/src/contracts.js";
 
 export const MIN_WAITING_ON_ME_RESULTS = 1;
-export const MAX_WAITING_ON_ME_RESULTS = 3;
+export const MAX_WAITING_ON_ME_RESULTS = 5;
 
 /** A single claim the reply layer is allowed to make about one relationship. */
 export type WaitingOnMeEvidenceRow = {

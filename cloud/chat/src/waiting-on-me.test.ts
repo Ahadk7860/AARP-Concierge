@@ -51,17 +51,18 @@ describe("waiting_on_me closed query", () => {
     });
   });
 
-  it("ranks oldest outstanding conversations deterministically and clamps the public limit to 1..3", () => {
+  it("ranks deterministically and honors the frozen limit range from 1 through 5", () => {
     const digest = digestFixture();
     digest.relationships.push(
       relationship({ contact_id: "h_00000002", display: "Nora", days_since_last_contact: 8 }),
       relationship({ contact_id: "h_00000001", display: "Ari", days_since_last_contact: 8 }),
       relationship({ contact_id: "h_00000003", display: "Zoe", days_since_last_contact: 4 }),
+      relationship({ contact_id: "h_00000004", display: "Sam", days_since_last_contact: 3 }),
     );
 
-    expect(executeWaitingOnMe(digest, { schema_version: "chat_query.v1", name: "waiting_on_me", limit: 9 }).rows.map((row) => row.contact_id))
-      .toEqual(["h_00000001", "h_00000002", "h_00000003"]);
-    expect(executeWaitingOnMe(digest, { schema_version: "chat_query.v1", name: "waiting_on_me", limit: 0 }).rows)
+    expect(executeWaitingOnMe(digest, { schema_version: "chat_query.v1", name: "waiting_on_me", limit: 5 }).rows.map((row) => row.contact_id))
+      .toEqual(["h_00000001", "h_00000002", "h_00000003", "h_00000004", "h_8f21a4c0"]);
+    expect(executeWaitingOnMe(digest, { schema_version: "chat_query.v1", name: "waiting_on_me", limit: 1 }).rows)
       .toHaveLength(1);
   });
 

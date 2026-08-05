@@ -64,7 +64,7 @@ function parseEvidence(input: unknown): WaitingOnMeResult | null {
   if (input.name !== "waiting_on_me" || !validSyncHorizon(input.synced_through) || !Array.isArray(input.rows)) {
     return null;
   }
-  if (input.rows.length > 3) return null;
+  if (input.rows.length > 5) return null;
 
   const rows: WaitingOnMeEvidenceRow[] = [];
   const seen = new Set<string>();
@@ -116,7 +116,10 @@ export function freshnessDisclosure(syncedThrough: string): string {
  */
 export function renderLicensedClaims(claims: readonly RenderedClaim[]): string {
   return claims
-    .map((claim) => `${claim.display} had this open at the last sync: ${claim.relationship_claim}.`)
+    // Keep the visible claim compact enough that five maximum-length display names
+    // remain below chat_reply.v1's 1,000-character text ceiling. The detailed derived
+    // reason stays in the matching license row.
+    .map((claim) => `${claim.display} had an open question at the last sync.`)
     .join(" ");
 }
 
