@@ -69,7 +69,7 @@ describe("HandleVault", () => {
 describe("tap-to-send delivery", () => {
   const text = "hi & are you free at 7? ☕";
 
-  it("always returns copyable text and encodes both the recipient and body", () => {
+  it("always returns copyable text, preserves a safe email recipient, and encodes the body", () => {
     const delivery: DraftDelivery = {
       schema_version: "draft_delivery.v1",
       contact_id: "h_8f21a4c0",
@@ -80,7 +80,7 @@ describe("tap-to-send delivery", () => {
     expect(composeTapToSend(delivery)).toEqual({
       text,
       recipient_state: "resolved",
-      sms_link: "sms:person%2Bboi%40example.test&body=hi%20%26%20are%20you%20free%20at%207%3F%20%E2%98%95",
+      sms_link: "sms:person+boi@example.test&body=hi%20%26%20are%20you%20free%20at%207%3F%20%E2%98%95",
     });
   });
 
@@ -100,6 +100,12 @@ describe("tap-to-send delivery", () => {
     "+1 646 555 0123",
     "+16465550123?body=stolen",
     "person@example.test&body=stolen",
+    "person/name@example.test",
+    "person\\name@example.test",
+    "person<name@example.test",
+    "person>name@example.test",
+    "person\"name@example.test",
+    "person'name@example.test",
     "person\n@example.test",
     "not-an-address",
     "+0123456789",
@@ -115,13 +121,13 @@ describe("tap-to-send delivery", () => {
     expect(JSON.stringify(result)).not.toContain(handle);
   });
 
-  it("accepts a bounded E.164 recipient", () => {
+  it("emits the pinned E.164 sms URL byte-for-byte with only its body encoded", () => {
     const result = composeTapToSend({
       schema_version: "draft_delivery.v1",
       contact_id: "h_8f21a4c0",
       text,
       recipient: { kind: "resolved", handle: "+16465550123" },
     });
-    expect(result.sms_link).toBe("sms:%2B16465550123&body=hi%20%26%20are%20you%20free%20at%207%3F%20%E2%98%95");
+    expect(result.sms_link).toBe("sms:+16465550123&body=hi%20%26%20are%20you%20free%20at%207%3F%20%E2%98%95");
   });
 });

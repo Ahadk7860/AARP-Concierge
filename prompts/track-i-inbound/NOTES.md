@@ -47,3 +47,12 @@ claim the live adapter until its stream API has been verified.
 - Tap-to-send accepts only bounded E.164 or conservative email-compatible recipients.
   Whitespace, controls, URI delimiters, malformed values, and oversized values retain the
   draft as copyable text with no link.
+
+## SMS URL contract follow-up
+
+- The recipient is validated before interpolation, then preserved raw so E.164 links match
+  the pinned `sms:+15551234567&body=<encoded>` contract byte-for-byte. Only the body is
+  percent-encoded.
+- Email punctuation rejects the same URL-changing delimiters as Swift
+  `ThreadHandoff.isUsable`: `&?#/\\<>"'`, whitespace, and controls. Focused tests include
+  every delimiter and the exact E.164 URL bytes.
