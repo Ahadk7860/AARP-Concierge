@@ -73,10 +73,12 @@ struct ContextualVoiceExemplarBuilder {
     private func shape(of preceding: MirrorDatabase.StoredMessage) -> UnderstandingLastExchangeShape {
         let text = preceding.text?.lowercased() ?? ""
         if !preceding.isFromMe && text.contains("?") { return .questionFromThem }
-        if !preceding.isFromMe && ["plan", "coming", "tonight", "weekend"].contains(where: text.contains) {
+        let words = Set(text.split(whereSeparator: { !$0.isLetter }).map(String.init))
+        if !preceding.isFromMe
+            && !words.isDisjoint(with: ["plan", "coming", "tonight", "weekend"]) {
             return .planUnresolved
         }
         if preceding.isFromMe { return .statementFromYou }
-        return .none
+        return .statementFromThem
     }
 }

@@ -18,6 +18,7 @@ enum UnderstandingRelationshipKind: String, Sendable, Equatable {
 
 enum UnderstandingLastExchangeShape: String, Sendable, Equatable {
     case questionFromThem = "question_from_them"
+    case statementFromThem = "statement_from_them"
     case statementFromYou = "statement_from_you"
     case planUnresolved = "plan_unresolved"
     case none
@@ -64,6 +65,19 @@ struct UnderstandingBuilder {
 
     func build(messages: [MirrorDatabase.StoredMessage],
                identities: [ContactResolver.Identity]) -> [RelationshipUnderstanding] {
+        let perContact = Self.group(messages: messages, identities: identities)
+
+        return identities.sorted { $0.contact_id < $1.contact_id }.compactMap { identity in
+            guard let conversation = perContact[identity.contact_id], !conversation.isEmpty else {
+                return nil
+            }
+            return understand(contactID: identity.contact_id, messages: conversation)
+        }
+    }
+
+    static func group(messages: [MirrorDatabase.StoredMessage],
+                      identities: [ContactResolver.Identity])
+        -> [String: [MirrorDatabase.StoredMessage]] {
         var byHandle: [String: ContactResolver.Identity] = [:]
         for identity in identities {
             for handle in identity.handles {
@@ -78,12 +92,7 @@ struct UnderstandingBuilder {
             perContact[identity.contact_id, default: []].append(message)
         }
 
-        return identities.sorted { $0.contact_id < $1.contact_id }.compactMap { identity in
-            guard let conversation = perContact[identity.contact_id], !conversation.isEmpty else {
-                return nil
-            }
-            return understand(contactID: identity.contact_id, messages: conversation)
-        }
+        return perContact
     }
 
     private func understand(contactID: String,
@@ -139,14 +148,14 @@ struct UnderstandingBuilder {
         if !last.isFromMe && text.contains("?") { return .questionFromThem }
         if !last.isFromMe && containsPlanMarker(text) { return .planUnresolved }
         if last.isFromMe { return .statementFromYou }
-        return .none
+        return .statementFromThem
     }
 
     private func openThread(for shape: UnderstandingLastExchangeShape) -> String? {
         switch shape {
         case .questionFromThem: return "unanswered question from them"
         case .planUnresolved: return "plan appears unresolved"
-        case .statementFromYou, .none: return nil
+        case .statementFromThem, .statementFromYou, .none: return nil
         }
     }
 
@@ -180,6 +189,7 @@ struct UnderstandingBuilder {
     }
 
     private func containsPlanMarker(_ text: String) -> Bool {
-        ["plan", "coming", "tonight", "weekend"].contains { text.contains($0) }
+        let words = Set(text.split(whereSeparator: { !$0.isLetter }).map(String.init))
+        return !words.isDisjoint(with: ["plan", "coming", "tonight", "weekend"])
     }
 }

@@ -31,19 +31,24 @@ public struct DigestBuilder {
         /// mirror, and the caller hands it over. A contact with no entry gets `.empty`,
         /// which is a valid and common answer.
         public var signalsByContact: [String: FactExtractor.ThreadSignals]
+        /// Used only by the v2 contextual exemplars. Register classification sees raw
+        /// user text first; the only prose placed on the wire is then redacted here.
+        public var understandingRedactor: Redactor
 
         public init(userID: String? = nil,
                     deviceID: String? = nil,
                     generatedAt: Date = Date(),
                     minimumMessages: Int = 1,
                     system: HealthCheck.SystemState = HealthCheck.SystemState(),
-                    signalsByContact: [String: FactExtractor.ThreadSignals] = [:]) {
+                    signalsByContact: [String: FactExtractor.ThreadSignals] = [:],
+                    understandingRedactor: Redactor = Redactor()) {
             self.userID = userID
             self.deviceID = deviceID
             self.generatedAt = generatedAt
             self.minimumMessages = minimumMessages
             self.system = system
             self.signalsByContact = signalsByContact
+            self.understandingRedactor = understandingRedactor
         }
     }
 
@@ -155,6 +160,114 @@ public struct DigestBuilder {
                       whole_life: wholeLife)
     }
 
+    /// Builds the Phase 2 wire document from the same metric result as v1 plus the
+    /// local mirror that holds the two-way turn ordering. The v1 path above remains
+    /// unchanged and continues to emit `digest.v1`.
+    public func buildV2(from result: MetricLibrary.Result,
+                        mirror: MirrorDatabase) throws -> DigestV2 {
+        let legacy = build(from: result)
+        let identities = result.relationships.map(\.identity)
+        var messages: [MirrorDatabase.StoredMessage] = []
+        try mirror.forEachMessage { messages.append($0) }
+
+        let localUnderstanding = UnderstandingBuilder()
+            .build(messages: messages, identities: identities)
+        let understandingByContact = Dictionary(uniqueKeysWithValues:
+            localUnderstanding.map { ($0.contactID, $0) })
+        let grouped = UnderstandingBuilder.group(messages: messages, identities: identities)
+        let contextualBuilder = ContextualVoiceExemplarBuilder(
+            redactor: options.understandingRedactor)
+
+        let relationships = legacy.relationships.map { relationship -> RelationshipV2 in
+            let local = understandingByContact[relationship.contact_id]
+            let contextual = contextualBuilder
+                .build(messages: grouped[relationship.contact_id] ?? [])
+                .exemplars.map(Self.wireExemplar)
+            let understanding = RelationshipUnderstandingV2(
+                register: local.map { Self.wireRegister($0.register) } ?? .mixed,
+                relationship_kind: local.map { Self.wireRelationshipKind($0.relationshipKind) }
+                    ?? .other,
+                open_thread: local?.openThread,
+                last_exchange_shape: local.map { Self.wireLastShape($0.lastExchangeShape) }
+                    ?? .none,
+                topics: local?.topics ?? [],
+                cadence_norm: local?.cadenceNorm,
+                voice_exemplars: contextual
+            )
+            return RelationshipV2(
+                contact_id: relationship.contact_id,
+                display: relationship.display,
+                is_group: relationship.is_group,
+                message_count: relationship.message_count,
+                sent_count: relationship.sent_count,
+                received_count: relationship.received_count,
+                days_since_last_contact: relationship.days_since_last_contact,
+                momentum_90d: relationship.momentum_90d,
+                initiation_ratio: relationship.initiation_ratio,
+                last_from_me: relationship.last_from_me,
+                max_gap_days: relationship.max_gap_days,
+                unanswered_question: relationship.unanswered_question,
+                facts: relationship.facts,
+                as_of: relationship.as_of,
+                understanding: understanding
+            )
+        }
+
+        let newest = messages.compactMap(\.sentAt).max() ?? options.generatedAt
+        return DigestV2(
+            user_id: legacy.user_id,
+            device_id: legacy.device_id,
+            generated_at: legacy.generated_at,
+            synced_through: StructuredLog.timestamp(newest),
+            corpus: legacy.corpus,
+            relationships: relationships,
+            whole_life: legacy.whole_life
+        )
+    }
+
+    private static func wireRegister(_ value: UnderstandingRegister) -> UnderstandingRegisterV2 {
+        switch value {
+        case .casual: return .casual
+        case .warm: return .warm
+        case .terse: return .terse
+        case .formal: return .formal
+        }
+    }
+
+    private static func wireRelationshipKind(
+        _ value: UnderstandingRelationshipKind
+    ) -> RelationshipKindV2 {
+        switch value {
+        case .closeFriend: return .closeFriend
+        case .logistics: return .logistics
+        case .work: return .work
+        case .family: return .family
+        case .dormantClose: return .dormantClose
+        }
+    }
+
+    private static func wireLastShape(
+        _ value: UnderstandingLastExchangeShape
+    ) -> LastExchangeShapeV2 {
+        switch value {
+        case .questionFromThem: return .questionFromThem
+        case .statementFromThem: return .statementFromThem
+        case .statementFromYou: return .statementFromYou
+        case .planUnresolved: return .planUnresolved
+        case .none: return .none
+        }
+    }
+
+    private static func wireExemplar(
+        _ value: ContextualVoiceExemplar
+    ) -> ContextualVoiceExemplarV2 {
+        ContextualVoiceExemplarV2(
+            text: value.text,
+            answered: VoicePackBuilder.wireAnsweredShape(value.answered),
+            register: wireRegister(value.register)
+        )
+    }
+
     /// `display` is capped at 64 characters by the schema. Truncating beats emitting a
     /// document that fails validation because somebody's contact card has a long name.
     static func truncateDisplay(_ display: String) -> String {
@@ -200,6 +313,32 @@ public struct DigestBuilder {
                 object["relationships"] = relationships.map { relationship in
                     var patched = relationship
                     ExplicitNullJSON.fillNull(&patched, relationshipExplicitNulls)
+                    return patched
+                }
+            }
+        }
+        let url = URL(fileURLWithPath: path)
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                                                withIntermediateDirectories: true)
+        try data.write(to: url, options: .atomic)
+        return data.count
+    }
+
+    @discardableResult
+    public static func write(_ digest: DigestV2, to path: String) throws -> Int {
+        let data = try ExplicitNullJSON.data(encoding: digest) { object in
+            if var corpus = object["corpus"] as? [String: Any] {
+                ExplicitNullJSON.fillNull(&corpus, corpusExplicitNulls)
+                object["corpus"] = corpus
+            }
+            if let relationships = object["relationships"] as? [[String: Any]] {
+                object["relationships"] = relationships.map { relationship in
+                    var patched = relationship
+                    if var understanding = patched["understanding"] as? [String: Any] {
+                        ExplicitNullJSON.fillNull(&understanding,
+                                                  ["open_thread", "cadence_norm"])
+                        patched["understanding"] = understanding
+                    }
                     return patched
                 }
             }
