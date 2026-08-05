@@ -50,7 +50,8 @@ export function executeWaitingOnMe(digest: DigestV2, query: ChatQuery): WaitingO
 
   const rows = digest.relationships
     .filter((relationship) =>
-      relationship.understanding.last_exchange_shape === "question_from_them"
+      !relationship.is_group
+      && relationship.understanding.last_exchange_shape === "question_from_them"
       && relationship.understanding.open_thread !== null
       && relationship.understanding.open_thread.trim().length > 0,
     )

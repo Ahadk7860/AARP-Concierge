@@ -46,7 +46,7 @@ const digest: DigestV2 = {
 };
 
 describe("Phase 2 fifty-question fabrication evaluation", () => {
-  it("contains exactly 50 mixed recorded cases", () => {
+  it("contains exactly 50 mixed semantic cases with no oracle-authored outputs", () => {
     expect(PHASE2_FABRICATION_CASES).toHaveLength(50);
     expect(new Set(PHASE2_FABRICATION_CASES.map((testCase) => testCase.id)).size).toBe(50);
     expect(new Set(PHASE2_FABRICATION_CASES.map((testCase) => testCase.category))).toEqual(new Set([
@@ -59,26 +59,35 @@ describe("Phase 2 fifty-question fabrication evaluation", () => {
     ]));
   });
 
-  it("ships only when the recorded run has zero fabrications", async () => {
+  it("passes the offline zero-fabrication gate but remains ineligible to ship", async () => {
     const report = await runFabricationEval(PHASE2_FABRICATION_CASES, digest);
     expect(report).toEqual({
       evaluated: 50,
       answered_correctly: 15,
       declined_correctly: 35,
       fabricated: 0,
-      shipping_anchor: { fabricated_must_equal: 0, passed: true },
+      offline_gate_passed: true,
+      shipping_eligible: false,
+      passed: false,
+      shipping_anchor: {
+        fabricated_must_equal: 0,
+        passed: false,
+        reason: "real_model_provider_not_evaluated",
+      },
       failures: [],
     });
   });
 
-  it("marks an answered unsupported question as fabrication and fails the shipping anchor", async () => {
+  it("turns the offline gate red when question semantics mutate into a recognized intent", async () => {
     const mutation = [{
       ...PHASE2_FABRICATION_CASES.find((testCase) => testCase.id === "u01")!,
-      recorded_selector_output: { kind: "query", name: "waiting_on_me", limit: 1 },
+      question: "who is waiting on me?",
     }];
     const report = await runFabricationEval(mutation, digest);
     expect(report.fabricated).toBe(1);
-    expect(report.shipping_anchor).toEqual({ fabricated_must_equal: 0, passed: false });
+    expect(report.offline_gate_passed).toBe(false);
+    expect(report.shipping_eligible).toBe(false);
+    expect(report.passed).toBe(false);
     expect(report.failures).toEqual(["u01"]);
   });
 });

@@ -1,8 +1,20 @@
 import type { ChatReply } from "../../shared/src/contracts.js";
 import type { WaitingOnMeEvidenceRow, WaitingOnMeResult } from "./waiting-on-me.js";
 
-/** A valid chat_reply must carry a horizon even when its input omitted one. */
-export const UNKNOWN_SYNC_HORIZON = "1970-01-01T00:00:00.000Z";
+/**
+ * Invalid freshness cannot be represented honestly by frozen `chat_reply.v1`, whose
+ * `synced_through` is a required date-time. Keep failure outside that wire contract.
+ */
+export type ChatReplyFailure = {
+  outcome: "failure";
+  kind: "decline";
+  text: string;
+  synced_through: null;
+  licenses: [];
+  failure: "invalid_synced_through";
+};
+
+export type ChatReplyOutcome = ChatReply | ChatReplyFailure;
 
 export type RenderedClaim = {
   contact_id: string;
@@ -21,7 +33,7 @@ export type WaitingOnMeRenderer = (
 ) => unknown;
 
 const CONTACT_ID = /^h_[0-9a-f]{8,32}$/;
-const RFC3339_DATE_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+const ISO_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z$/;
 
 function exactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
   const actual = Object.keys(value).sort();
@@ -33,12 +45,18 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function validSyncHorizon(value: unknown): value is string {
+export function validSyncHorizon(value: unknown): value is string {
   if (typeof value !== "string" || value.trim() === "") return false;
+  const match = ISO_UTC.exec(value);
+  if (match === null) return false;
   const parsed = new Date(value);
-  // JSON Schema `date-time` accepts UTC timestamps both with and without fractional
-  // seconds. Preserve the producer's representation in the reply contract.
-  return RFC3339_DATE_TIME.test(value) && !Number.isNaN(parsed.getTime());
+  if (Number.isNaN(parsed.getTime())) return false;
+  // Date normalizes impossible calendar values (for example Feb 30). Round-trip in
+  // the producer's original precision catches that without changing the value we emit.
+  const roundTrip = match[1] === undefined
+    ? parsed.toISOString().replace(".000Z", "Z")
+    : parsed.toISOString();
+  return roundTrip === value;
 }
 
 function parseEvidence(input: unknown): WaitingOnMeResult | null {
@@ -176,14 +194,28 @@ function decline(syncedThrough: string, text: string): ChatReply {
   };
 }
 
+export function invalidSyncFailure(): ChatReplyFailure {
+  return {
+    outcome: "failure",
+    kind: "decline",
+    text: "I can't answer because the last-sync timestamp is unavailable or invalid.",
+    synced_through: null,
+    licenses: [],
+    failure: "invalid_synced_through",
+  };
+}
+
 /** Compose a contract-valid answer or fail closed to a deterministic decline. */
 export function composeWaitingOnMeReply(
   input: unknown,
   renderer: WaitingOnMeRenderer = deterministicWaitingOnMeRenderer,
-): ChatReply {
+): ChatReplyOutcome {
+  const suppliedHorizon = isRecord(input) ? input.synced_through : undefined;
+  if (!validSyncHorizon(suppliedHorizon)) return invalidSyncFailure();
+
   const evidence = parseEvidence(input);
   if (evidence === null) {
-    return decline(UNKNOWN_SYNC_HORIZON, "I can't answer because sync freshness or licensed evidence is unavailable.");
+    return decline(suppliedHorizon, "I can't answer because licensed evidence is unavailable or malformed.");
   }
 
   const freshness = freshnessDisclosure(evidence.synced_through);

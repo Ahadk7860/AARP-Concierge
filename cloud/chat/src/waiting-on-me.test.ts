@@ -90,6 +90,19 @@ describe("waiting_on_me closed query", () => {
     expect(Object.keys(after.rows[0] ?? {}).sort()).toEqual(["contact_id", "display", "open_thread"]);
   });
 
+  it("excludes a group even when every other waiting_on_me field qualifies", () => {
+    const digest = digestFixture();
+    digest.relationships[0]!.is_group = true;
+
+    const result = executeWaitingOnMe(digest, {
+      schema_version: "chat_query.v1",
+      name: "waiting_on_me",
+      limit: 3,
+    });
+
+    expect(result.rows).toEqual([]);
+  });
+
   it("refuses a capability outside the frozen first-release vocabulary", () => {
     expect(() => executeWaitingOnMe(digestFixture(), {
       schema_version: "chat_query.v1",

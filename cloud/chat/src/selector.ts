@@ -97,3 +97,39 @@ export class RecordedSelectorProvider implements ChatSelectorProvider {
     return this.outputs.get(input.question) ?? { kind: "decline" };
   }
 }
+
+/**
+ * A deliberately small semantic baseline for offline safety evaluation. It is not a
+ * production model and its green result is not a shipping decision. Recognition is
+ * phrasing-based and only returns the single closed tool or decline.
+ */
+export class OfflineSemanticSelectorProvider implements ChatSelectorProvider {
+  readonly calls: SelectorProviderInput[] = [];
+
+  async select(input: SelectorProviderInput): Promise<unknown> {
+    this.calls.push(input);
+    const question = input.question.toLowerCase().replace(/[^a-z0-9\s']/g, " ").replace(/\s+/g, " ").trim();
+    const unsafeInstruction = /\b(?:ignore|system|dump|schema|tool|limit|reveal|directly)\b/.test(question);
+    if (unsafeInstruction) return { kind: "decline" };
+    const waitingIntent = [
+      /\bwho should i follow up with\b/,
+      /\bwho is waiting on me\b/,
+      /\b(?:ask|asked) me something\b/,
+      /\bquestions? (?:have|did) i (?:left|leave) open\b/,
+      /\bowe (?:a|someone|anyone) repl(?:y|ies)\b/,
+      /\bunanswered questions? for me\b/,
+      /\bball in my court\b/,
+      /\bquestion i missed\b/,
+      /\bconversations? need my response\b/,
+      /\bleaving (?:(?:someone|anyone) )?hanging on a question\b/,
+      /\bopen replies\b/,
+      /\bwaiting for an answer from me\b/,
+      /\bquestion should i answer next\b/,
+      /\bpeople i should answer\b/,
+    ].some((pattern) => pattern.test(question));
+
+    if (!waitingIntent) return { kind: "decline" };
+    const limit = /\b(?:one|next)\b/.test(question) ? 1 : /\btwo\b/.test(question) ? 2 : 3;
+    return { kind: "query", name: "waiting_on_me", limit };
+  }
+}

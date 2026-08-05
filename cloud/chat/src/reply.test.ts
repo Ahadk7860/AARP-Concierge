@@ -3,7 +3,6 @@ import type { WaitingOnMeEvidenceRow, WaitingOnMeResult } from "./waiting-on-me.
 import {
   composeWaitingOnMeReply,
   deterministicWaitingOnMeRenderer,
-  UNKNOWN_SYNC_HORIZON,
   type RenderedWaitingOnMeAnswer,
 } from "./reply.js";
 
@@ -84,11 +83,12 @@ describe("licensed chat reply gate", () => {
 
     const missingHorizon = composeWaitingOnMeReply({ name: "waiting_on_me", rows: evidence().rows });
     expect(missingHorizon).toEqual({
-      schema_version: "chat_reply.v1",
+      outcome: "failure",
       kind: "decline",
-      text: "I can't answer because sync freshness or licensed evidence is unavailable.",
-      synced_through: UNKNOWN_SYNC_HORIZON,
+      text: "I can't answer because the last-sync timestamp is unavailable or invalid.",
+      synced_through: null,
       licenses: [],
+      failure: "invalid_synced_through",
     });
 
     const leakedDigestShape = composeWaitingOnMeReply({
@@ -97,6 +97,27 @@ describe("licensed chat reply gate", () => {
     });
     expect(leakedDigestShape.kind).toBe("decline");
     expect(leakedDigestShape.text).not.toContain("private full digest");
+  });
+
+  it("returns typed null-horizon failures for malformed and impossible UTC timestamps", () => {
+    for (const syncedThrough of [
+      "not-a-date",
+      "2026-02-30T09:10:00Z",
+      "2026-08-01T09:10:00+01:00",
+      "2026-08-01T09:10:00.00Z",
+    ]) {
+      const reply = composeWaitingOnMeReply({ ...evidence(), synced_through: syncedThrough });
+      expect("outcome" in reply ? reply.outcome : null).toBe("failure");
+      expect(reply.synced_through).toBeNull();
+    }
+  });
+
+  it("round-trips valid UTC horizons without adding or removing precision", () => {
+    for (const syncedThrough of ["2026-08-01T09:10:00Z", "2026-08-01T09:10:00.123Z"]) {
+      const reply = composeWaitingOnMeReply({ ...evidence(), synced_through: syncedThrough });
+      expect("schema_version" in reply ? reply.schema_version : null).toBe("chat_reply.v1");
+      expect(reply.synced_through).toBe(syncedThrough);
+    }
   });
 
   it("fails closed when renderer output is malformed, duplicated, cross-contact, or throws", () => {

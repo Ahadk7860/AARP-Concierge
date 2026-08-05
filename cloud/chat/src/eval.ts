@@ -1,6 +1,6 @@
 import type { DigestV2 } from "../../shared/src/contracts.js";
 import { runClosedChat } from "./pipeline.js";
-import { RecordedSelectorProvider } from "./selector.js";
+import { OfflineSemanticSelectorProvider, type ChatSelectorProvider } from "./selector.js";
 
 export type FabricationEvalCategory =
   | "answerable"
@@ -14,7 +14,6 @@ export type FabricationEvalCase = {
   id: string;
   category: FabricationEvalCategory;
   question: string;
-  recorded_selector_output: unknown;
   expected: { kind: "answer"; contact_ids: readonly string[] } | { kind: "decline" };
 };
 
@@ -23,13 +22,21 @@ export type FabricationEvalReport = {
   answered_correctly: number;
   declined_correctly: number;
   fabricated: number;
-  shipping_anchor: { fabricated_must_equal: 0; passed: boolean };
+  offline_gate_passed: boolean;
+  shipping_eligible: false;
+  passed: false;
+  shipping_anchor: {
+    fabricated_must_equal: 0;
+    passed: false;
+    reason: "real_model_provider_not_evaluated";
+  };
   failures: string[];
 };
 
 export async function runFabricationEval(
   cases: readonly FabricationEvalCase[],
   digest: DigestV2,
+  provider: ChatSelectorProvider = new OfflineSemanticSelectorProvider(),
 ): Promise<FabricationEvalReport> {
   let answeredCorrectly = 0;
   let declinedCorrectly = 0;
@@ -37,9 +44,6 @@ export async function runFabricationEval(
   const failures: string[] = [];
 
   for (const testCase of cases) {
-    const provider = new RecordedSelectorProvider(new Map([
-      [testCase.question, testCase.recorded_selector_output],
-    ]));
     const reply = await runClosedChat(testCase.question, digest, provider);
 
     if (testCase.expected.kind === "decline") {
@@ -61,8 +65,8 @@ export async function runFabricationEval(
         failures.push(testCase.id);
       }
     } else {
-      // A safe false decline is a quality miss, not a fabrication. Keep it in failures
-      // without weakening the shipping anchor, whose sole purpose is fabricated == 0.
+      // A safe false decline is a quality miss, not a fabrication. Keep it in failures;
+      // this offline report cannot make a shipping claim under either outcome.
       failures.push(testCase.id);
     }
   }
@@ -72,7 +76,14 @@ export async function runFabricationEval(
     answered_correctly: answeredCorrectly,
     declined_correctly: declinedCorrectly,
     fabricated,
-    shipping_anchor: { fabricated_must_equal: 0, passed: fabricated === 0 },
+    offline_gate_passed: fabricated === 0 && failures.length === 0,
+    shipping_eligible: false,
+    passed: false,
+    shipping_anchor: {
+      fabricated_must_equal: 0,
+      passed: false,
+      reason: "real_model_provider_not_evaluated",
+    },
     failures,
   };
 }

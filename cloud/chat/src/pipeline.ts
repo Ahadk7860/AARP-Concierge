@@ -1,5 +1,11 @@
 import type { ChatReply, DigestV2 } from "../../shared/src/contracts.js";
-import { composeWaitingOnMeReply, freshnessDisclosure } from "./reply.js";
+import {
+  composeWaitingOnMeReply,
+  freshnessDisclosure,
+  invalidSyncFailure,
+  validSyncHorizon,
+  type ChatReplyOutcome,
+} from "./reply.js";
 import { selectClosedChatQuery, type ChatSelectorProvider } from "./selector.js";
 import { executeWaitingOnMe } from "./waiting-on-me.js";
 
@@ -21,7 +27,8 @@ export async function runClosedChat(
   question: string,
   digest: DigestV2,
   provider: ChatSelectorProvider,
-): Promise<ChatReply> {
+): Promise<ChatReplyOutcome> {
+  if (!validSyncHorizon(digest.synced_through)) return invalidSyncFailure();
   const selection = await selectClosedChatQuery(question, provider);
   if (selection.kind === "decline") return capabilityDecline(digest.synced_through);
   return composeWaitingOnMeReply(executeWaitingOnMe(digest, selection.query));
