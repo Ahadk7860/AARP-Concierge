@@ -126,6 +126,83 @@ public struct VoicePackBuilder {
         return packs
     }
 
+    /// Phase 2 counterpart to `build`: reads both directions for answer context while
+    /// preserving the v1 invariant that every exemplar body is user-authored.
+    public func buildV2(mirror: MirrorDatabase,
+                        identities: [ContactResolver.Identity]) throws -> [VoicePackV2] {
+        var messages: [MirrorDatabase.StoredMessage] = []
+        try mirror.forEachMessage { messages.append($0) }
+        let grouped = UnderstandingBuilder.group(messages: messages, identities: identities)
+
+        var packs: [VoicePackV2] = []
+        let conversations = identities.sorted(by: { $0.contact_id < $1.contact_id }).map {
+            ($0.contact_id, grouped[$0.contact_id] ?? [])
+        }
+        for (contactID, conversation) in conversations {
+            let sent = conversation.filter { $0.isFromMe && !$0.isTapback }
+            guard sent.count >= Self.minimumSentMessagesForContactPack else { continue }
+            packs.append(try packV2(conversations: [(contactID, conversation)],
+                                    contactID: contactID, scope: "contact"))
+        }
+        packs.append(try packV2(conversations: conversations,
+                                contactID: nil, scope: "global"))
+        return packs
+    }
+
+    private func packV2(conversations: [(key: String, messages: [MirrorDatabase.StoredMessage])],
+                        contactID: String?, scope: String) throws -> VoicePackV2 {
+        let all = conversations.flatMap(\.messages)
+        let sent = all.filter { $0.isFromMe && !$0.isTapback }
+        // Reuse v1's provenance assertions and redacted register construction. The v1
+        // exemplar strings are discarded; contextual selection below owns v2 prose.
+        let legacy = try pack(from: sent, contactID: contactID, scope: scope)
+        let contextualBuilder = ContextualVoiceExemplarBuilder(redactor: options.redactor)
+        let candidates = conversations.flatMap { conversation in
+            contextualBuilder.candidates(messages: conversation.messages,
+                                         sourceConversation: conversation.key)
+        }
+        let contextual = ContextualVoiceExemplarBuilder.select(
+            candidates, maximum: Self.maximumExemplars)
+        let exemplars = contextual.map { exemplar in
+            ContextualVoiceExemplarV2(
+                text: exemplar.text,
+                answered: Self.wireAnsweredShape(exemplar.answered),
+                register: Self.wireRegister(exemplar.register)
+            )
+        }
+        var pack = VoicePackV2(
+            voice_pack_version: "",
+            contact_id: contactID,
+            scope: scope,
+            n_exemplars: exemplars.count,
+            register: legacy.register,
+            exemplars: exemplars,
+            as_of: StructuredLog.timestamp(options.now)
+        )
+        pack.voice_pack_version = Self.version(for: pack)
+        return pack
+    }
+
+    static func wireAnsweredShape(_ value: UnderstandingLastExchangeShape) -> AnsweredShapeV2 {
+        switch value {
+        case .questionFromThem: return .questionFromThem
+        case .statementFromThem: return .statementFromThem
+        case .planUnresolved: return .planUnresolved
+        // A user's message cannot answer a prior message from that same user. The
+        // frozen AnsweredShapeV2 intentionally excludes this state, so map it to none.
+        case .statementFromYou, .none: return .none
+        }
+    }
+
+    private static func wireRegister(_ value: UnderstandingRegister) -> UnderstandingRegisterV2 {
+        switch value {
+        case .casual: return .casual
+        case .warm: return .warm
+        case .terse: return .terse
+        case .formal: return .formal
+        }
+    }
+
     func pack(from messages: [MirrorDatabase.StoredMessage],
               contactID: String?,
               scope: String) throws -> VoicePack {
@@ -416,6 +493,40 @@ public struct VoicePackBuilder {
         return "vp_" + String(digest.map { String(format: "%02x", $0) }.joined().prefix(8))
     }
 
+    public static func version(for pack: VoicePackV2) -> String {
+        let payload: CanonicalJSON.Value = .object([
+            "contact_id": pack.contact_id.map(CanonicalJSON.Value.string) ?? .null,
+            "scope": .string(pack.scope),
+            "register": payloadRegister(pack.register),
+            "exemplars": .array(pack.exemplars.map { exemplar in
+                .object([
+                    "text": .string(exemplar.text),
+                    "answered": .string(exemplar.answered.rawValue),
+                    "register": .string(exemplar.register.rawValue),
+                ])
+            }),
+        ])
+        let canonical = CanonicalJSON.string(payload)
+        let digest = SHA256.hash(data: Data(canonical.utf8))
+        return "vp_" + String(digest.map { String(format: "%02x", $0) }.joined().prefix(16))
+    }
+
+    private static func payloadRegister(_ value: Register) -> CanonicalJSON.Value {
+        .object([
+            "median_len_chars": .int(value.median_len_chars),
+            "p90_len_chars": value.p90_len_chars.map(CanonicalJSON.Value.int) ?? .null,
+            "emoji_rate": .double(value.emoji_rate),
+            "top_emoji": .array((value.top_emoji ?? []).map(CanonicalJSON.Value.string)),
+            "punctuation": .string(value.punctuation.rawValue),
+            "greeting_rate": value.greeting_rate.map(CanonicalJSON.Value.double) ?? .null,
+            "signoff_rate": value.signoff_rate.map(CanonicalJSON.Value.double) ?? .null,
+            "abbreviations": .array((value.abbreviations ?? []).map(CanonicalJSON.Value.string)),
+            "avg_msgs_per_burst": .double(value.avg_msgs_per_burst),
+            "question_rate": value.question_rate.map(CanonicalJSON.Value.double) ?? .null,
+            "apology_openers": .array((value.apology_openers ?? []).map(CanonicalJSON.Value.string)),
+        ])
+    }
+
     static func payload(for pack: VoicePack) -> CanonicalJSON.Value {
         .object([
             "contact_id": pack.contact_id.map(CanonicalJSON.Value.string) ?? .null,
@@ -451,6 +562,19 @@ public struct VoicePackBuilder {
                                                 withIntermediateDirectories: true)
         // `contact_id` is in the schema's `required` list AND permitted to be null —
         // that is how the global fallback is spelled. An omitted key fails validation.
+        let data = try ExplicitNullJSON.data(encoding: pack) { object in
+            ExplicitNullJSON.fillNull(&object, ["contact_id"])
+        }
+        try data.write(to: url, options: .atomic)
+        return url.path
+    }
+
+    @discardableResult
+    public static func write(_ pack: VoicePackV2, toDirectory directory: String) throws -> String {
+        let url = URL(fileURLWithPath: directory).appendingPathComponent(
+            pack.contact_id.map { "voice_pack_v2_\($0).json" } ?? "global_fallback_v2.json")
+        try FileManager.default.createDirectory(at: URL(fileURLWithPath: directory),
+                                                withIntermediateDirectories: true)
         let data = try ExplicitNullJSON.data(encoding: pack) { object in
             ExplicitNullJSON.fillNull(&object, ["contact_id"])
         }
