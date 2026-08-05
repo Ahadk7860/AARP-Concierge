@@ -170,6 +170,53 @@ Swift side and by the empirical run, not yet by both languages.
 track (§ 8), so the specification half of the pin is an amendment, not something this
 track can land.
 
+## The handoff screen is a transport precondition, not a convenience — prompt 03
+
+Track E's live send hit **`RESOURCE_EXHAUSTED` after the card**: Photon gates a new
+conversation at roughly three messages until the recipient replies. That is the transport
+enforcing precisely the etiquette AMENDMENT-002 was written around — *"a line that
+initiates to somebody who has not written first"* is the thing the whole ordering inversion
+exists to avoid — and it changes what the handoff screen is.
+
+**"Start the conversation" is not a nicety. It is what makes every later message
+deliverable.** Until the user sends, the line is spending a quota that runs out after about
+three messages; after they send, replies inside a user-initiated conversation do not count
+against the new-conversation limit at all (CONTRACTS.md § — AMENDMENT-002, transport
+specifics 3). The button is the moment the product stops being rate-limited.
+
+This is also what makes the unpaired-and-unresolvable state **demonstrably** broken rather
+than merely unsupported. With no thread opened, the transport will not carry a brief at
+all — so *"Boi will still text you"* was not just a claim this Mac could not verify, it was
+false in a way the platform actively enforces. Prompt 03 replaces it with a remedy.
+
+## Two facts, four states — prompt 03
+
+`lineUnresolved` collapsed two situations with different owners, different causes and
+opposite remedies:
+
+| paired | line known | what is actually true | state |
+|---|---|---|---|
+| yes | yes | thread exists, this window can open it | `.paired` |
+| yes | no | **thread exists on their phone**; only this Mac lacks the number | `.pairedLineUnknown` |
+| no | yes | one tap creates the thread, token prefilled | `.unpaired` |
+| no | no | **no thread, so the transport carries nothing** | `.unreachable` |
+
+The split was *available* — both facts come from the token store — which is what separates
+it from prompt 02's Later case. That one is genuinely hidden by the platform and had to be
+answered pre-emptively in copy. This one was a distinction the code declined to make.
+
+**`pairedLineUnknown` keeps the reassurance**, because there it is true, and that is the
+point of splitting rather than deleting: the fix in `16a6760` removed a false sentence at
+the cost of also denying it to the user it was true for. Prompt 03 gives it back to them.
+
+**The criterion is asserted as absence.** `testNoStateClaimsContactItCannotSupport`
+iterates every state whose `contactIsAssured` is false and checks the copy for the *absence*
+of a contact claim — not for the presence of a better sentence, which a rewrite could
+satisfy while leaving the promise in. A converse test stops the fix flattening the truthful
+states into silence. The mutation that proves it works is the exact bug: give `.unreachable`
+the `.pairedLineUnknown` copy — one state borrowing another's truthful sentence, which is
+what the original single state effectively did.
+
 ## The false claim, and why deleting beat softening — fixed in `16a6760`
 
 `ThreadHandoff.lineUnresolved` rendered *"Boi will still text you — this window just cannot
@@ -194,6 +241,25 @@ constraint that put `GrantStage` in `BoiKit` in prompt `01`, applied inconsisten
 file over. Moved to `ThreadHandoff.copy` and now asserted. The lesson generalises past this
 bug: **user-facing copy that no test can read is copy that can be false for as long as
 nobody reads it aloud.**
+
+## The partial pin has NOT closed — `main` has not moved
+
+Prompt 03's brief said to merge `main` first, because Track E's work landing there would
+extend the cross-language deep-link test to the unpaired path automatically. **It has not
+landed.** At the time of writing:
+
+- `origin/main` and local `main` are both **`ef1b036`** — unchanged since prompt 01.
+- Track E's 08, 09 and 10 are on the **`track-e`** branch (`964ce34`), unmerged.
+- `git merge origin/main` from this branch reports *"Already up to date."*
+- `pairingDeepLink` exists **only on `track-e`** (`cloud/api/src/welcome.ts:125`, and its
+  own comment independently states the `&body=` reasoning). It is absent from `main`, so it
+  is absent from this branch.
+
+So `testTheSwiftAndTypeScriptDeepLinksAgree` still compares the **paired path only**, and
+the `&body=` separator remains pinned by the Swift side, `CONTRACTS.md`, and the device
+observation — **not yet by two languages agreeing.** The test needs no edit when Track E
+merges; it enumerates what TypeScript exports. But nobody should record the seam as
+cross-verified until that merge actually happens.
 
 ## Prompt 02 — prompt file location
 
