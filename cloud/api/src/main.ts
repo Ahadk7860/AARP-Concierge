@@ -296,6 +296,7 @@ export const defaultRuntimeFactories: RuntimeFactories = {
 
 const CARD_PATH = /^\/cards\/usr_[0-9A-Za-z]{8,32}\/card_[0-9a-f]{16}\.png$/;
 const CARD_SIGNATURE = /^[0-9a-f]{64}$/;
+const PUBLIC_CARD_CACHE_CONTROL = "private, max-age=300";
 
 function validSignedCardUrl(rawUrl: string): URL | null {
   let parsed: URL;
@@ -368,14 +369,14 @@ export function registerCardProxy(
       if (body === null) return reply.code(413).send({ error: "card_too_large" });
       return reply.code(200)
         .header("content-type", "image/png")
-        .header("cache-control", upstream.headers.get("cache-control") ?? "private, max-age=300")
+        .header("cache-control", PUBLIC_CARD_CACHE_CONTROL)
         .header("content-location", `${card.publicBase}${parsed.pathname}${parsed.search}`)
         .send(body);
     },
   });
 }
 
-async function cardIsReady(
+export async function checkPrivateCardReadiness(
   card: NonNullable<RuntimeConfig["card"]>,
   request: RuntimeFactories["fetch"],
 ): Promise<boolean> {
@@ -386,8 +387,8 @@ async function cardIsReady(
     headers: { accept: "application/json" },
   });
   if (response.status !== 200) return false;
-  const text = await response.text();
-  return text.length <= 256 && (JSON.parse(text) as { status?: unknown }).status === "ready";
+  const body = await boundedResponseBody(response, 256);
+  return body !== null && (JSON.parse(body.toString("utf8")) as { status?: unknown }).status === "ready";
 }
 
 export function createPrivateCardStore(
@@ -404,9 +405,9 @@ export function createPrivateCardStore(
         headers: { "x-boi-card-write": card.writeSecret, accept: "application/json" },
       });
       if (response.status !== 200) throw new Error("private card deletion failed");
-      const text = await response.text();
-      if (text.length > 256) throw new Error("private card deletion response too large");
-      const payload = JSON.parse(text) as { remaining?: unknown };
+      const body = await boundedResponseBody(response, 256);
+      if (body === null) throw new Error("private card deletion response too large");
+      const payload = JSON.parse(body.toString("utf8")) as { remaining?: unknown };
       if (!Number.isSafeInteger(payload.remaining) || Number(payload.remaining) < 0) {
         throw new Error("private card deletion returned invalid residue");
       }
@@ -530,7 +531,7 @@ export async function startRuntime(
       isClosing: () => closing,
       log: factories.log,
       dependencies: config.card === null ? {} : {
-        card: () => cardIsReady(config.card!, factories.fetch),
+        card: () => checkPrivateCardReadiness(config.card!, factories.fetch),
       },
     });
     if (!(await status.ready()).ready) throw new Error("runtime_dependencies_unready");

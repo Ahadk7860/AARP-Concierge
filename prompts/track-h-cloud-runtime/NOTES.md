@@ -85,3 +85,13 @@
   expectations receiving no intelligence output.
 - Emitted-JavaScript runtime-layout smoke passed from `/private/tmp`. Docker itself is
   not installed on this host, so the Dockerfile could not be built locally.
+
+### Final private-boundary hardening
+
+- The public proxy never trusts or forwards the card service's cache policy; every PNG
+  response is API-owned `Cache-Control: private, max-age=300`.
+- Private readiness and deletion responses use the same bounded streaming reader as PNG
+  proxying, with a 256-byte cap applied before JSON parsing. Chunked oversized-response
+  tests prove both paths fail closed without calling `Response.text()`.
+- Focused verification passed: typecheck, ESLint, `git diff --check`, and 54 deployment
+  tests across API runtime/proxy/card deploy and advisory-locked migrations.

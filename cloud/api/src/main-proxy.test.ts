@@ -6,6 +6,7 @@ import {
 } from "../../db/src/index.js";
 import { buildServer } from "./server.js";
 import {
+  checkPrivateCardReadiness,
   createPrivateCardStore,
   registerCardProxy,
   type RuntimeConfig,
@@ -35,7 +36,7 @@ describe("private card public proxy", () => {
         status: 200,
         headers: {
           "content-type": "image/png",
-          "cache-control": "private, max-age=60",
+          "cache-control": "public, max-age=31536000, immutable",
           "set-cookie": "must-not-pass=1",
         },
       });
@@ -46,6 +47,7 @@ describe("private card public proxy", () => {
     expect(response.statusCode).toBe(200);
     expect(response.rawPayload).toEqual(Buffer.from("png"));
     expect(response.headers["set-cookie"]).toBeUndefined();
+    expect(response.headers["cache-control"]).toBe("private, max-age=300");
     expect(response.headers["content-location"]).toBe(`https://boi-api.example.com${signedPath}`);
     expect(seen).toHaveLength(1);
     expect(seen[0]).toMatchObject({
@@ -115,7 +117,37 @@ describe("private card deletion adapter", () => {
     ["nonzero residue", async () => new Response('{"remaining":1}', { status: 200 })],
     ["unreachable service", async () => { throw new Error("unreachable"); }],
     ["malformed response", async () => new Response('{"remaining":"zero"}', { status: 200 })],
+    ["oversized chunked response", async () => new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{"remaining":'));
+        controller.enqueue(new Uint8Array(300));
+        controller.close();
+      },
+    }), { status: 200 })],
   ])("fails closed for %s", async (_name, request) => {
     await expect(run(request)).rejects.toThrow();
+  });
+});
+
+describe("private card readiness response bounds", () => {
+  it("accepts the bounded ready response", async () => {
+    await expect(checkPrivateCardReadiness(
+      card,
+      async () => new Response('{"status":"ready"}', { status: 200 }),
+    )).resolves.toBe(true);
+  });
+
+  it("rejects an oversized chunked response before parsing it", async () => {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{"status":"ready","padding":"'));
+        controller.enqueue(new Uint8Array(300));
+        controller.close();
+      },
+    });
+    await expect(checkPrivateCardReadiness(
+      card,
+      async () => new Response(body, { status: 200 }),
+    )).resolves.toBe(false);
   });
 });
