@@ -1197,6 +1197,66 @@ sent is a memory leak with a nice name. The runner now records what it hands the
 which is the same evidence for either implementation and keeps every assertion in
 `e2e.test.ts` working across the substitution.
 
+## Before exposing the card service — what the probe found
+
+The card is a named breakdown of one person's relationships, so this is the one place in
+the product where a mistake publishes somebody else's data to anyone who guesses a URL.
+Answered with a live probe against every route rather than by reading:
+
+```
+200  GET A's card, A's signature
+401  GET A's card, NO signature
+401  GET B's card, A's signature          <- the cross-user case
+401  GET B's card, A's sig, A's card_id
+404  GET nonexistent card, valid sig
+401  GET directory listing
+```
+
+**Reads are sound.** The signature covers `user_id/card_id/exp` as one string, so A's
+signature does not verify on B's path and moving A's `card_id` onto B's path fails too.
+There is no enumeration route.
+
+**Writes were not.** `POST /cards/:user_id` was unauthenticated, and the tunnel's ingress
+matches **hostname and path only** — a Go regex with no method matching — so a write route
+sharing the `/cards/` prefix is forwarded by the edge whatever verb it carries. Fixed
+twice over: the route moved to `/internal/cards/:user_id`, which the existing rule
+excludes, **and** it checks a shared secret, because an edge rule alone means a mistyped
+regex or a deleted DNS record silently reopens an unauthenticated write and nothing in the
+app notices.
+
+`writeAuthorised` **fails closed when unset**. No development default — that is exactly
+the mistake below.
+
+### Two secrets that were not secrets
+
+**`BOI_CARD_SIGNING_SECRET` was the literal string `openssl rand -hex 32`** — the command,
+not its output, 20 characters, guessable by anyone who has read a setup instruction. Every
+card URL in the system was signed with it. Found by printing the secret's first bytes
+during an unrelated debug, not by reading the file, and it would have gone under a public
+hostname.
+
+**`signingSecret()` still falls back to `dev-card-secret-change-me` when unset**, which is
+the same failure with a friendlier name — and unset is the normal state, because:
+
+### `.env` is not loaded by anything, and the runner decides
+
+Proven both ways: a `vitest` test prints `BOI_CARD_SIGNING_SECRET: (unset)`, while a
+`vite-node` script in the same repo prints the real value. **Vite loads `.env`; vitest does
+not.**
+
+That is not a test-harness curiosity. `npm run card` and `npm run scheduler` are
+`vite-node`, so they pick up `.env`; anything started another way silently uses the
+built-in default. **A signature scheme whose key depends on which launcher started the
+process is not a signature scheme** — and it bit exactly that way here: the e2e suite
+(vitest, default key) minted URLs that its own child renderer (vite-node, real key)
+rejected with 401, which reads as a signature bug rather than as two processes disagreeing
+about a file.
+
+The suite now pins both secrets in `beforeAll` before spawning the child, and
+`runEndToEnd` does the same. **The deployment rule is the same fact from the other side:
+the process environment is the source of truth, never the file** — `set -a; source .env;
+set +a`, or a process manager that does it.
+
 ## Runtime resources
 
 `CONTRACTS.md` § 9 has no row for Track E. Reusing Track D's `3041` and Track A's

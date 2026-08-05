@@ -16,6 +16,8 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 
 import { StubChannel } from "../../shared/src/index.js";
@@ -72,6 +74,12 @@ async function waitForServer(base: string, attempts = 100): Promise<void> {
 beforeAll(async () => {
   await acquireSuiteLock();
   await migrate();
+  // Pinned BEFORE the child is spawned, and this is the bug it prevents: the child runs
+  // under `vite-node`, which loads `.env`; this suite runs under `vitest`, which does not.
+  // Left to themselves they sign and verify with different keys, and every fetch is a 401
+  // that reads as a signature bug rather than as two processes disagreeing about a file.
+  process.env["BOI_CARD_SIGNING_SECRET"] ??= randomBytes(32).toString("hex");
+  process.env["BOI_CARD_WRITE_SECRET"] ??= randomBytes(24).toString("hex");
   childRenderer = spawn(
     process.execPath,
     [path.join(REPO_ROOT, "node_modules", "vite-node", "vite-node.mjs"),
@@ -338,5 +346,67 @@ describe("the whole pipe, end to end", () => {
         if (block.type === "text") expect(block.text).not.toContain("card.png");
       }
     }
+  }, TIMEOUT);
+});
+
+describe("the write route is not on the public prefix, and is authenticated anyway", () => {
+  // The card is a named breakdown of one person's relationships, and the public hostname
+  // is fronted by a tunnel whose ingress matches HOSTNAME AND PATH ONLY — a Go regex,
+  // `^/cards/`, with no method matching. A write route sharing that prefix is forwarded by
+  // the edge whatever verb it carries.
+  //
+  // So: it lives at `/internal/cards/:user_id`, which the existing rule excludes, AND it
+  // checks a shared secret. Relying on the edge rule alone means a mistyped regex or a
+  // deleted DNS record silently reopens an unauthenticated write into any user's card
+  // directory, and nothing in the app would notice.
+
+  const digest = () => JSON.parse(readFileSync(
+    path.join(REPO_ROOT, "contracts", "fixtures", "digest", "healthy.json"), "utf8"));
+
+  it("refuses a write with no secret, a wrong secret, and the old public path", async () => {
+    const body = JSON.stringify(digest());
+    const json = { "content-type": "application/json" };
+
+    // No secret at all.
+    const none = await fetch(`${CHILD_CARD_BASE}/internal/cards/usr_writeprobe01`, {
+      method: "POST", headers: json, body,
+    });
+    expect(none.status).toBe(401);
+
+    // A wrong one, same length as the real secret so this fails on the comparison rather
+    // than on the length check.
+    const real = process.env["BOI_CARD_WRITE_SECRET"] as string;
+    const wrong = await fetch(`${CHILD_CARD_BASE}/internal/cards/usr_writeprobe01`, {
+      method: "POST",
+      headers: { ...json, "x-boi-card-write": "z".repeat(real.length) },
+      body,
+    });
+    expect(wrong.status).toBe(401);
+
+    // And the old path is gone from the server entirely, so the tunnel's `^/cards/` rule
+    // has nothing to forward even if it were pointed at a POST.
+    const oldPath = await fetch(`${CHILD_CARD_BASE}/cards/usr_writeprobe01`, {
+      method: "POST", headers: json, body,
+    });
+    expect(oldPath.status).toBe(404);
+
+    // Nothing was written by any of the three.
+    expect(countCardsFor("usr_writeprobe01")).toBe(0);
+  }, TIMEOUT);
+
+  it("accepts the write with the secret, so the 401s above are not a broken route", async () => {
+    const response = await fetch(`${CHILD_CARD_BASE}/internal/cards/usr_writeprobe02`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-boi-card-write": process.env["BOI_CARD_WRITE_SECRET"] as string,
+      },
+      body: JSON.stringify(digest()),
+    });
+    expect([200, 201]).toContain(response.status);
+    // The fixture digest is below the renderer's bar, so this is a refusal — which is
+    // rendered and deliberately NOT stored.
+    const card = (await response.json()) as { kind: string };
+    expect(["standard", "refusal"]).toContain(card.kind);
   }, TIMEOUT);
 });

@@ -12,6 +12,7 @@
 // first attempt is the outcome to be most suspicious of.
 
 import { execFile } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -213,6 +214,33 @@ export async function runEndToEnd(options: E2EOptions = {}): Promise<E2EResult> 
   const api = buildServer({ channel });
   await api.listen({ port: 0, host: "127.0.0.1" });
   const apiPort = (api.server.address() as { port: number }).port;
+
+  // THE WRITE SECRET, for this run only.
+  //
+  // Nothing in this repo loads `.env` — `pool.ts` and every other consumer read
+  // `process.env` and fall back to a default, so a value sitting in `.env` is
+  // documentation until an operator exports it. A run that quietly used the empty string
+  // would be testing the 401 path and reporting it as a card failure.
+  // THE SIGNING SECRET, pinned for this process and everything it spawns.
+  //
+  // `vite-node` loads `.env` into `process.env`; `vitest` does NOT. So a card minted by a
+  // vitest parent and verified by a `vite-node` child renderer are signed with two
+  // different keys and every fetch is a 401 that looks like a signature bug. Pinning it
+  // here makes the run internally consistent whichever runner started it — and the
+  // deployment rule is the same fact from the other side: **the process environment is
+  // the source of truth, never the file.**
+  if (!process.env["BOI_CARD_SIGNING_SECRET"]) {
+    process.env["BOI_CARD_SIGNING_SECRET"] = randomBytes(32).toString("hex");
+  }
+
+  if (!process.env["BOI_CARD_WRITE_SECRET"]) {
+    process.env["BOI_CARD_WRITE_SECRET"] = randomBytes(24).toString("hex");
+    log({
+      msg: "e2e.write_secret_generated",
+      consequence: "this run authenticates its own card writes. In production the secret "
+        + "must be in the process environment, not merely in .env",
+    });
+  }
 
   let cardBase: string | null = null;
   let cardServer: ReturnType<typeof buildCardServer> | null = null;
