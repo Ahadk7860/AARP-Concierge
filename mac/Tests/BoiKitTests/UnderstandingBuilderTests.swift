@@ -71,6 +71,61 @@ final class UnderstandingBuilderTests: XCTestCase {
         XCTAssertEqual(result[0].lastExchangeShape, .statementFromYou)
     }
 
+    func testTrailingQuestionSurvivesLaterInboundChatterUntilAUserTurnClosesIt() {
+        let open = UnderstandingBuilder().build(messages: [
+            message("1", "are you free?", fromMe: false, day: 1),
+            message("2", "hello again", fromMe: false, day: 2)
+        ], identities: [identity])
+        XCTAssertEqual(open[0].lastExchangeShape, .questionFromThem)
+        XCTAssertEqual(open[0].openThread, "unanswered question from them")
+
+        let closed = UnderstandingBuilder().build(messages: [
+            message("1", "are you free?", fromMe: false, day: 1),
+            message("2", "hello again", fromMe: false, day: 2),
+            message("3", "yes", fromMe: true, day: 3)
+        ], identities: [identity])
+        XCTAssertEqual(closed[0].lastExchangeShape, .statementFromYou)
+        XCTAssertNil(closed[0].openThread)
+    }
+
+    func testRepeatedQuestionsProduceOnlyABoundedDerivedDescription() {
+        let output = UnderstandingBuilder().build(messages: [
+            message("1", "first secret question?", fromMe: false, day: 1),
+            message("2", "second unrelated secret question?", fromMe: false, day: 2),
+            message("3", "checking in", fromMe: false, day: 3)
+        ], identities: [identity])
+
+        XCTAssertEqual(output[0].lastExchangeShape, .questionFromThem)
+        XCTAssertEqual(output[0].openThread, "asked more than once, unanswered")
+        XCTAssertFalse(rendered(output[0]).contains("secret"))
+    }
+
+    func testTrailingPlanSurvivesAPlainInboundBubble() {
+        let output = UnderstandingBuilder().build(messages: [
+            message("1", "plans for tonight", fromMe: false, day: 1),
+            message("2", "hello", fromMe: false, day: 2)
+        ], identities: [identity])
+        XCTAssertEqual(output[0].lastExchangeShape, .planUnresolved)
+        XCTAssertEqual(output[0].openThread, "plan appears unresolved")
+    }
+
+    func testTopicMatchingUsesWholeNormalisedWordsRatherThanSubstrings() {
+        let mutation = UnderstandingBuilder().build(messages: [
+            message("1", "current homework moment", fromMe: false, day: 1)
+        ], identities: [identity])
+        XCTAssertEqual(mutation[0].topics, ["school"])
+        XCTAssertFalse(mutation[0].topics.contains("apartment"), "current must not match rent")
+        XCTAssertFalse(mutation[0].topics.contains("work"), "homework must not match work")
+        XCTAssertFalse(mutation[0].topics.contains("family"), "moment must not match mom")
+
+        let variants = UnderstandingBuilder().build(messages: [
+            message("1", "renting bouldering with parents this weekend while working",
+                    fromMe: false, day: 1)
+        ], identities: [identity])
+        XCTAssertEqual(variants[0].topics,
+                       ["apartment", "climbing", "family", "plans", "work"])
+    }
+
     private func rendered(_ value: RelationshipUnderstanding) -> String {
         [value.contactID, value.register.rawValue, value.relationshipKind.rawValue,
          value.openThread ?? "", value.lastExchangeShape.rawValue,

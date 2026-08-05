@@ -48,12 +48,15 @@ struct UnderstandingBuilder {
     static let maximumTopicCharacters = 40
 
     private static let topicMarkers: [(token: String, markers: [String])] = [
-        ("apartment", ["apartment", "lease", "rent"]),
-        ("climbing", ["climb", "climbing", "boulder"]),
-        ("family", ["mom", "dad", "family"]),
-        ("plans", ["plan", "coming", "tonight", "weekend"]),
-        ("school", ["class", "school", "exam"]),
-        ("work", ["work", "meeting", "office"])
+        ("apartment", ["apartment", "apartments", "lease", "leases", "rent", "rented",
+                       "renting"]),
+        ("climbing", ["climb", "climbed", "climbing", "climbs", "boulder", "bouldering"]),
+        ("family", ["dad", "father", "family", "mom", "mother", "parents"]),
+        ("plans", ["coming", "plan", "planned", "planning", "plans", "tonight", "weekend",
+                   "weekends"]),
+        ("school", ["class", "classes", "exam", "exams", "homework", "school", "schools"]),
+        ("work", ["meeting", "meetings", "office", "offices", "work", "worked", "working",
+                  "works"])
     ]
 
     func build(mirror: MirrorDatabase,
@@ -103,8 +106,7 @@ struct UnderstandingBuilder {
             return lhs == rhs ? $0.guid < $1.guid : lhs < rhs
         }
         let userBodies = ordered.filter(\.isFromMe).compactMap(\.text)
-        let last = ordered.last
-        let lastShape = exchangeShape(last)
+        let outstanding = outstandingThread(in: ordered)
         let typicalGap = typicalGapDays(from: ordered)
         let total = ordered.count
         let userShare = Double(userBodies.count) / Double(max(total, 1))
@@ -114,8 +116,8 @@ struct UnderstandingBuilder {
             register: Self.register(for: userBodies),
             relationshipKind: relationshipKind(total: total, typicalGapDays: typicalGap,
                                                userShare: userShare, topics: topics(in: ordered)),
-            openThread: openThread(for: lastShape),
-            lastExchangeShape: lastShape,
+            openThread: outstanding.description,
+            lastExchangeShape: outstanding.shape,
             topics: topics(in: ordered),
             cadenceNorm: cadenceDescription(typicalGapDays: typicalGap)
         )
@@ -142,27 +144,67 @@ struct UnderstandingBuilder {
         return .closeFriend
     }
 
-    private func exchangeShape(_ last: MirrorDatabase.StoredMessage?) -> UnderstandingLastExchangeShape {
-        guard let last else { return .none }
-        let text = last.text?.lowercased() ?? ""
-        if !last.isFromMe && text.contains("?") { return .questionFromThem }
-        if !last.isFromMe && containsPlanMarker(text) { return .planUnresolved }
-        if last.isFromMe { return .statementFromYou }
+    private func outstandingThread(
+        in ordered: [MirrorDatabase.StoredMessage]
+    ) -> (shape: UnderstandingLastExchangeShape, description: String?) {
+        guard let last = ordered.last else { return (.none, nil) }
+        guard !last.isFromMe else { return (.statementFromYou, nil) }
+
+        // Any user-authored turn resolves everything before it. Only the trailing
+        // inbound burst can still be outstanding, even if its final bubble is merely
+        // "hello" after an earlier question.
+        let trailingInbound = ordered.reversed().prefix { !$0.isFromMe }.reversed()
+        let shapes = trailingInbound.map(Self.semanticShape)
+        let questions = shapes.filter { $0 == .questionFromThem }.count
+        let plans = shapes.filter { $0 == .planUnresolved }.count
+        if questions > 1 { return (.questionFromThem, "asked more than once, unanswered") }
+        if questions == 1 { return (.questionFromThem, "unanswered question from them") }
+        if plans > 1 { return (.planUnresolved, "raised the plan more than once, unresolved") }
+        if plans == 1 { return (.planUnresolved, "plan appears unresolved") }
+        return (.statementFromThem, nil)
+    }
+
+    static func semanticShape(
+        _ message: MirrorDatabase.StoredMessage
+    ) -> UnderstandingLastExchangeShape {
+        if message.isFromMe { return .statementFromYou }
+        let text = message.text?.lowercased() ?? ""
+        if looksLikeQuestion(text) { return .questionFromThem }
+        if containsPlanMarker(text) { return .planUnresolved }
         return .statementFromThem
     }
 
-    private func openThread(for shape: UnderstandingLastExchangeShape) -> String? {
-        switch shape {
-        case .questionFromThem: return "unanswered question from them"
-        case .planUnresolved: return "plan appears unresolved"
-        case .statementFromThem, .statementFromYou, .none: return nil
-        }
+    static func aggregateInboundShape(
+        _ shapes: [UnderstandingLastExchangeShape]
+    ) -> UnderstandingLastExchangeShape {
+        if shapes.contains(.questionFromThem) { return .questionFromThem }
+        if shapes.contains(.planUnresolved) { return .planUnresolved }
+        return shapes.isEmpty ? .none : .statementFromThem
+    }
+
+    private static func looksLikeQuestion(_ text: String) -> Bool {
+        if text.contains("?") { return true }
+        let words = lexicalWords(in: text)
+        guard let first = words.first else { return false }
+        return ["are", "can", "could", "did", "do", "does", "how", "is", "should",
+                "what", "when", "where", "which", "who", "why", "will", "would"]
+            .contains(first)
+    }
+
+    static func lexicalWords(in text: String) -> [String] {
+        text.lowercased().split(whereSeparator: { !$0.isLetter }).map(String.init)
+    }
+
+    private static func containsPlanMarker(_ text: String) -> Bool {
+        let words = Set(lexicalWords(in: text))
+        return !words.isDisjoint(with: ["coming", "plan", "planned", "planning", "plans",
+                                       "tonight", "weekend", "weekends"])
     }
 
     private func topics(in messages: [MirrorDatabase.StoredMessage]) -> [String] {
-        let corpus = messages.compactMap(\.text).joined(separator: " ").lowercased()
+        let words = Set(messages.compactMap(\.text).flatMap(Self.lexicalWords))
         let recognised = Self.topicMarkers.compactMap { candidate in
-            candidate.markers.contains { corpus.contains($0) } ? candidate.token : nil
+            candidate.markers.contains { words.contains($0) } ? candidate.token : nil
         }
         let bounded = recognised.filter { token in
             token.split(separator: " ").count <= Self.maximumTopicWords
@@ -186,10 +228,5 @@ struct UnderstandingBuilder {
         case 7...29: return "usually active within a month"
         default: return "long-running quiet period"
         }
-    }
-
-    private func containsPlanMarker(_ text: String) -> Bool {
-        let words = Set(text.split(whereSeparator: { !$0.isLetter }).map(String.init))
-        return !words.isDisjoint(with: ["plan", "coming", "tonight", "weekend"])
     }
 }

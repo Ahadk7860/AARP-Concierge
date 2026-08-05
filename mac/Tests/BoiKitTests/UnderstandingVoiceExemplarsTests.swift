@@ -15,6 +15,16 @@ final class UnderstandingVoiceExemplarsTests: XCTestCase {
         )
     }
 
+    private func messageAt(_ guid: String, _ text: String?, fromMe: Bool,
+                           seconds: Int) -> MirrorDatabase.StoredMessage {
+        MirrorDatabase.StoredMessage(
+            guid: guid, text: text, handle: handle, service: "iMessage",
+            sentAt: Date(timeIntervalSinceReferenceDate: TimeInterval(seconds)),
+            isFromMe: fromMe, associatedMessageType: 0,
+            chatIdentifier: handle, chatStyle: 45, wasDeliveredQuietly: false
+        )
+    }
+
     func testPairsSentTextWithImmediatelyPrecedingAnswerShape() {
         let output = ContextualVoiceExemplarBuilder().build(messages: [
             message("1", "are you coming climbing tonight?", fromMe: false, day: 1),
@@ -83,6 +93,53 @@ final class UnderstandingVoiceExemplarsTests: XCTestCase {
         XCTAssertEqual(output.exemplars.map(\.text), ["call [redacted]"])
         XCTAssertLessThanOrEqual(output.exemplars.count, ContextualVoiceExemplarBuilder.maximumExemplars)
         XCTAssertTrue(output.exemplars.allSatisfy { $0.text.count <= ContextualVoiceExemplarBuilder.maximumExemplarLength })
+    }
+
+    func testEveryBubbleInAReplyBurstRetainsTheInboundQuestionContext() {
+        XCTAssertEqual(ContextualVoiceExemplarBuilder.replyBurstGapSeconds, 300)
+        let output = ContextualVoiceExemplarBuilder().build(messages: [
+            messageAt("1", "are you coming?", fromMe: false, seconds: 0),
+            messageAt("2", "yes", fromMe: true, seconds: 60),
+            messageAt("3", "leaving now", fromMe: true, seconds: 360),
+            messageAt("4", "separate thought", fromMe: true, seconds: 661),
+            messageAt("5", "plain inbound update", fromMe: false, seconds: 700),
+            messageAt("6", "got it", fromMe: true, seconds: 701)
+        ])
+        let byText = Dictionary(uniqueKeysWithValues: output.exemplars.map { ($0.text, $0.answered) })
+
+        XCTAssertEqual(byText["yes"], .questionFromThem)
+        XCTAssertEqual(byText["leaving now"], .questionFromThem,
+                       "the second bubble is inside the same five-minute user turn")
+        XCTAssertEqual(byText["separate thought"], UnderstandingLastExchangeShape.none,
+                       "a gap beyond the bound starts a new user turn")
+        XCTAssertEqual(byText["got it"], .statementFromThem,
+                       "an inbound→user direction transition starts fresh context")
+    }
+
+    func testInboundBurstAggregatesQuestionBeforePlainChatter() {
+        let output = ContextualVoiceExemplarBuilder().build(messages: [
+            messageAt("1", "are you free?", fromMe: false, seconds: 0),
+            messageAt("2", "hello", fromMe: false, seconds: 10),
+            messageAt("3", "yes", fromMe: true, seconds: 20)
+        ])
+        XCTAssertEqual(output.exemplars[0].answered, .questionFromThem)
+    }
+
+    func testSelectionSpansTimeAndDeduplicatesFinalText() throws {
+        var messages: [MirrorDatabase.StoredMessage] = []
+        for index in 1...100 {
+            let text = index.isMultiple(of: 9) ? "repeated safe line" : "unique line \(index)"
+            messages.append(message("\(index)", text, fromMe: true, day: index))
+        }
+        let output = ContextualVoiceExemplarBuilder().build(messages: messages)
+        let uniqueNumbers = output.exemplars.compactMap { exemplar -> Int? in
+            Int(exemplar.text.split(separator: " ").last ?? "")
+        }
+
+        XCTAssertEqual(output.exemplars.count, ContextualVoiceExemplarBuilder.maximumExemplars)
+        XCTAssertEqual(Set(output.exemplars.map(\.text)).count, output.exemplars.count)
+        XCTAssertLessThanOrEqual(try XCTUnwrap(uniqueNumbers.min()), 10)
+        XCTAssertGreaterThanOrEqual(try XCTUnwrap(uniqueNumbers.max()), 90)
     }
 
     private func rendered(_ output: ContextualVoiceExemplarSet) -> String {

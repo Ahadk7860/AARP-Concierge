@@ -135,40 +135,34 @@ public struct VoicePackBuilder {
         let grouped = UnderstandingBuilder.group(messages: messages, identities: identities)
 
         var packs: [VoicePackV2] = []
-        var globalConversations: [[MirrorDatabase.StoredMessage]] = []
-        for identity in identities.sorted(by: { $0.contact_id < $1.contact_id }) {
-            let conversation = grouped[identity.contact_id] ?? []
+        let conversations = identities.sorted(by: { $0.contact_id < $1.contact_id }).map {
+            ($0.contact_id, grouped[$0.contact_id] ?? [])
+        }
+        for (contactID, conversation) in conversations {
             let sent = conversation.filter { $0.isFromMe && !$0.isTapback }
             guard sent.count >= Self.minimumSentMessagesForContactPack else { continue }
-            globalConversations.append(conversation)
-            packs.append(try packV2(conversations: [conversation],
-                                    contactID: identity.contact_id, scope: "contact"))
+            packs.append(try packV2(conversations: [(contactID, conversation)],
+                                    contactID: contactID, scope: "contact"))
         }
-        // Include thin relationships in the global voice without inventing a thin
-        // per-contact pack. The context builder runs separately per conversation so a
-        // turn in one thread can never become the predecessor of a turn in another.
-        let included = Set(globalConversations.flatMap { $0.map(\.guid) })
-        for identity in identities.sorted(by: { $0.contact_id < $1.contact_id }) {
-            let conversation = grouped[identity.contact_id] ?? []
-            if conversation.contains(where: { !included.contains($0.guid) }) {
-                globalConversations.append(conversation)
-            }
-        }
-        packs.append(try packV2(conversations: globalConversations,
+        packs.append(try packV2(conversations: conversations,
                                 contactID: nil, scope: "global"))
         return packs
     }
 
-    private func packV2(conversations: [[MirrorDatabase.StoredMessage]],
+    private func packV2(conversations: [(key: String, messages: [MirrorDatabase.StoredMessage])],
                         contactID: String?, scope: String) throws -> VoicePackV2 {
-        let all = conversations.flatMap { $0 }
+        let all = conversations.flatMap(\.messages)
         let sent = all.filter { $0.isFromMe && !$0.isTapback }
         // Reuse v1's provenance assertions and redacted register construction. The v1
         // exemplar strings are discarded; contextual selection below owns v2 prose.
         let legacy = try pack(from: sent, contactID: contactID, scope: scope)
-        let contextual = Array(conversations.flatMap {
-            ContextualVoiceExemplarBuilder(redactor: options.redactor).build(messages: $0).exemplars
-        }.prefix(Self.maximumExemplars))
+        let contextualBuilder = ContextualVoiceExemplarBuilder(redactor: options.redactor)
+        let candidates = conversations.flatMap { conversation in
+            contextualBuilder.candidates(messages: conversation.messages,
+                                         sourceConversation: conversation.key)
+        }
+        let contextual = ContextualVoiceExemplarBuilder.select(
+            candidates, maximum: Self.maximumExemplars)
         let exemplars = contextual.map { exemplar in
             ContextualVoiceExemplarV2(
                 text: exemplar.text,

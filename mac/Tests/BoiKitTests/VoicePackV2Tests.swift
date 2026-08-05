@@ -83,4 +83,38 @@ final class VoicePackV2Tests: XCTestCase {
             }
         }
     }
+
+    func testGlobalPackIsTimeDiverseDeduplicatedAndNotContactDominated() throws {
+        var source = MetricsFixture.ChatBuilder()
+        for index in 1...80 {
+            for (handle, label, offset) in [
+                ("+15550100001", "alpha", 0.0), ("+15550100002", "beta", 0.1)
+            ] {
+                let text = index.isMultiple(of: 10)
+                    ? "shared duplicate" : "\(label) unique \(index)"
+                source.message(text, in: handle,
+                               daysAgo: Double(161 - index) + offset, fromMe: true)
+            }
+        }
+        let mirror = try MetricsFixture.mirror(
+            of: try source.build(label: "voice-v2-global-diversity"),
+            label: "voice-v2-global-diversity")
+        let resolver = ContactResolver(salt: MetricsFixture.salt)
+        let identities = try MetricLibrary(resolver: resolver,
+                                           options: .init(now: MetricsFixture.now))
+            .compute(mirror: mirror).relationships.map(\.identity)
+        let global = try XCTUnwrap(try VoicePackBuilder(options: .init(now: MetricsFixture.now))
+            .buildV2(mirror: mirror, identities: identities).first { $0.scope == "global" })
+
+        XCTAssertEqual(global.exemplars.count, VoicePackBuilder.maximumExemplars)
+        XCTAssertEqual(Set(global.exemplars.map(\.text)).count, global.exemplars.count)
+        let alpha = global.exemplars.filter { $0.text.hasPrefix("alpha") }
+        let beta = global.exemplars.filter { $0.text.hasPrefix("beta") }
+        XCTAssertFalse(alpha.isEmpty)
+        XCTAssertFalse(beta.isEmpty)
+        XCTAssertLessThanOrEqual(abs(alpha.count - beta.count), 1)
+        let indices = global.exemplars.compactMap { Int($0.text.split(separator: " ").last ?? "") }
+        XCTAssertLessThanOrEqual(try XCTUnwrap(indices.min()), 10)
+        XCTAssertGreaterThanOrEqual(try XCTUnwrap(indices.max()), 70)
+    }
 }
