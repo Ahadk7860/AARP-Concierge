@@ -128,15 +128,15 @@ both build `sms:<handle>&body=<encoded token>`. Nothing checks they agree. `&bod
 `?body=` is one character, it opens Messages with an empty body, the pairing token is
 silently lost, and **both sides pass their own tests**.
 
-That makes four cross-language seams in this project, and the two that held are the two
-where the **algorithm** was pinned rather than the shape:
+That makes four cross-language seams in this project. **Three held; the one that diverged
+is the one whose shape was specified and whose algorithm was left to each reader.**
 
 | Seam | Outcome | Why |
 |---|---|---|
 | `contact_id` | **Held** | `CONTRACTS.md` § 3 pins the algorithm — `HMAC(user_salt, normalized_handle)` — and `DigestTests.swift:938` computes both sides independently and compares, failing if nothing matched at all rather than silently comparing an empty set. |
 | Fact vocabulary | **Held** | One side is *generated* from the other by `scripts/generate_fact_vocabulary.py`, and `FactsTests.testVocabularyMatchesPython` re-reads the Python sets at test time — so the generator cannot go stale unnoticed. |
 | Heartbeat shape | **Diverged** | `Heartbeat` (Mac) and the frozen `POST /v1/heartbeat` schema had no overlapping required fields. Found by Track E only when it tried to post one; caught by a schema, not by a test. |
-| `sms:` link format | **Pinned — paired path both-sides, unpaired path pending** | `&body=` confirmed on a real Mac and written into `CONTRACTS.md` by the user, with `testTheSwiftAndTypeScriptDeepLinksAgree` cited as the enforcement. **Read "pinned" precisely:** the test runs both languages today only for the *paired* link, because `pairingDeepLink` is Track E's prompt `08` and is not on this branch. The `&body=` separator itself is currently pinned by the Swift side, the spec, and the device observation — **not yet by two languages agreeing.** It becomes cross-verified automatically when `08` merges; the test enumerates what TypeScript exports and needs no edit. |
+| `sms:` link format | **Held** | `&body=` observed correct on a real device, specified in `CONTRACTS.md`, and now **enforced by two languages agreeing**: `testTheSwiftAndTypeScriptDeepLinksAgree` compares Swift's `ThreadHandoff.link` against TypeScript's `pairingDeepLink` on every run. Closed by merging `main` at `78427ab` with **no edit to the test** — it enumerates what TypeScript exports, so the second comparison switched itself on. Verified live rather than assumed: mutating Swift's separator to `?body=` now fails *the cross-language assertion*, which was dormant before the merge. |
 
 The lesson the first two teach and the last two prove: **specifying the shape is not enough
 — the algorithm has to be specified, and a test has to build both sides from scratch.** A
@@ -178,11 +178,22 @@ enforcing precisely the etiquette AMENDMENT-002 was written around — *"a line 
 initiates to somebody who has not written first"* is the thing the whole ordering inversion
 exists to avoid — and it changes what the handoff screen is.
 
-**"Start the conversation" is not a nicety. It is what makes every later message
-deliverable.** Until the user sends, the line is spending a quota that runs out after about
-three messages; after they send, replies inside a user-initiated conversation do not count
-against the new-conversation limit at all (CONTRACTS.md § — AMENDMENT-002, transport
-specifics 3). The button is the moment the product stops being rate-limited.
+Stated plainly, because it is the sentence that changes how the screen should be treated:
+
+> **Before the user sends, the line is spending a quota that runs out in about three
+> messages. After they send, replies inside a user-initiated conversation do not count
+> against the new-conversation limit at all.**
+>
+> "Start the conversation" is where the product stops being rate-limited. **That button is
+> load-bearing infrastructure, not a convenience.**
+
+(AMENDMENT-002, transport specifics 3, is where the second half is written down; Track E's
+live send is where the first half stopped being theoretical.)
+
+Anyone tempted to demote that button — bury it, make it secondary to the health findings,
+replace it with "Boi will text you shortly" — is removing the thing that makes the
+transport work, and the failure would show up as briefs quietly not arriving rather than as
+anything on this screen.
 
 This is also what makes the unpaired-and-unresolvable state **demonstrably** broken rather
 than merely unsupported. With no thread opened, the transport will not carry a brief at
@@ -242,24 +253,32 @@ file over. Moved to `ThreadHandoff.copy` and now asserted. The lesson generalise
 bug: **user-facing copy that no test can read is copy that can be false for as long as
 nobody reads it aloud.**
 
-## The partial pin has NOT closed — `main` has not moved
+## The partial pin closed itself — `78427ab`
 
-Prompt 03's brief said to merge `main` first, because Track E's work landing there would
-extend the cross-language deep-link test to the unpaired path automatically. **It has not
-landed.** At the time of writing:
+Track E's 08–10 merged into `main`, bringing `cloud/api/src/welcome.ts` and
+`pairingDeepLink` onto this branch. `testTheSwiftAndTypeScriptDeepLinksAgree` began
+comparing the unpaired path **with no edit to the test**: it enumerates what the TypeScript
+side exports, so the second comparison switched itself on.
 
-- `origin/main` and local `main` are both **`ef1b036`** — unchanged since prompt 01.
-- Track E's 08, 09 and 10 are on the **`track-e`** branch (`964ce34`), unmerged.
-- `git merge origin/main` from this branch reports *"Already up to date."*
-- `pairingDeepLink` exists **only on `track-e`** (`cloud/api/src/welcome.ts:125`, and its
-  own comment independently states the `&body=` reasoning). It is absent from `main`, so it
-  is absent from this branch.
+**Verified rather than assumed.** A test that passes after a merge looks identical to a
+test that passed before it — which is the whole failure mode this track has been chasing.
+So the check was: mutate Swift's separator to `?body=` and confirm the failure now comes
+from the *cross-language* assertion, which was dormant before. It does:
 
-So `testTheSwiftAndTypeScriptDeepLinksAgree` still compares the **paired path only**, and
-the `&body=` separator remains pinned by the Swift side, `CONTRACTS.md`, and the device
-observation — **not yet by two languages agreeing.** The test needs no edit when Track E
-merges; it enumerates what TypeScript exports. But nobody should record the seam as
-cross-verified until that merge actually happens.
+```
+XCTAssertEqual failed: ("sms:+15551234567?body=tok_cross_language")
+                    is not equal to ("sms:+15551234567&body=tok_cross_language")
+  — Swift and TypeScript disagree about the pairing deep link
+```
+
+Before the merge that same mutation was caught only by the Swift-side literal test. Now
+both fire, and the seam is held by two languages rather than by one language plus a
+document plus a device observation.
+
+**The design lesson, which is the transferable part:** a cross-language test that
+*enumerates what the other side exports* closes on its own when the other side lands. One
+that asserts against a fixed list of functions would have needed somebody to remember to
+widen it — and the moment to remember is a merge nobody on this branch performed.
 
 ## Prompt 02 — prompt file location
 
