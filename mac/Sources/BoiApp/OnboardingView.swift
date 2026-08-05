@@ -1,28 +1,28 @@
 import BoiKit
 import SwiftUI
 
-/// The onboarding window. Four screens, and the second one is where the funnel bleeds.
+/// The onboarding window.
+///
+/// **Every stage renders the same way, from the same three strings.** That is the point:
+/// before this, five distinct failures shared one `"Something went wrong"` and the user
+/// standing at the cliff edge could not tell which one they were in. The words live in
+/// `GrantStage` — in `BoiKit`, where the test suite can read them — and this file is the
+/// rendering, not the copy.
 struct OnboardingView: View {
     @ObservedObject var model: PermissionModel
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
-            switch model.step {
-            case .checking:
-                ProgressView("Checking…")
+            switch model.stage {
             case .needsConsent:
                 ConsentScreen(model: model)
-            case .needsFullDiskAccess, .relaunching:
-                FullDiskAccessScreen(model: model)
-            case .ready(let summary):
-                HealthScreen(model: model, summary: summary)
-            case .noDatabase:
-                Message(title: "This Mac has no Messages history yet",
-                        body: "Boi could not find a Messages database. Open Messages and "
-                            + "sign in with your Apple Account, then come back. This is "
-                            + "not a permissions problem.")
-            case .failed(let detail):
-                Message(title: "Something went wrong", body: detail)
+            case .handoff, .ready:
+                // **What worked → what to do next → what could be better.** The handoff is
+                // the terminal screen and the health findings sit underneath it, rather
+                // than the flow ending on a list of two things that are wrong.
+                HandoffScreen(model: model, summary: model.summary)
+            default:
+                StageScreen(model: model, stage: model.stage)
             }
         }
         .padding(28)
@@ -38,7 +38,7 @@ private struct ConsentScreen: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Boi reads your message history on this Mac")
+            Text(GrantStage.needsConsent.title)
                 .font(.title2).bold()
 
             Text("To tell you who you are drifting from, Boi reads the conversations on "
@@ -66,99 +66,44 @@ private struct ConsentScreen: View {
     }
 }
 
-/// The screen the whole prompt is about.
-private struct FullDiskAccessScreen: View {
+/// One screen, driven entirely by the stage.
+///
+/// The three things every stage carries — what is happening, why, and the one thing to do
+/// now — are always on screen. A stage that renders without naming a next step is the
+/// spinner this track exists to delete, and `OnboardingTests` refuses to let one exist.
+private struct StageScreen: View {
     @ObservedObject var model: PermissionModel
+    let stage: GrantStage
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Boi needs Full Disk Access")
-                .font(.title2).bold()
-
-            Text("macOS keeps your messages behind a switch that only you can flip. "
-                 + "Boi cannot flip it, and no app can.")
-
-            // THE LIVE STATUS. It flips the moment the toggle flips, because not knowing
-            // whether it worked is the single biggest reason people abandon this screen.
             HStack(spacing: 10) {
-                Image(systemName: model.accessGranted
-                      ? "checkmark.circle.fill" : "circle.dashed")
-                    .foregroundStyle(model.accessGranted ? .green : .secondary)
+                Image(systemName: icon)
+                    .foregroundStyle(tint)
                     .font(.title2)
                     .accessibilityIdentifier("fda-status")
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(model.accessGranted ? "Full Disk Access granted" : "Not granted yet")
-                        .bold()
-                    Text(model.statusLine).font(.caption).foregroundStyle(.secondary)
-                }
-            }
-            .padding(12)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
-
-            VStack(alignment: .leading, spacing: 8) {
-                Bullet("Click the button below — it opens the exact settings pane.")
-                Bullet("Find **Boi** in the list and switch it on.")
-                // Said out loud rather than left as a surprise. macOS does not apply a
-                // TCC grant to a running process, so the app has to restart. Users who
-                // are not told this read the restart as a crash.
-                Bullet("Boi will restart itself the moment you do. That is expected — "
-                       + "macOS only applies the switch to an app that starts afterwards.")
-            }
-            .padding(.leading, 4)
-
-            if model.step == .relaunching {
-                Label("Restarting Boi…", systemImage: "arrow.clockwise")
-                    .foregroundStyle(.green)
+                Text(stage.title)
+                    .font(.title2).bold()
+                    .accessibilityIdentifier("stage-title")
             }
 
-            Spacer()
-            HStack {
-                Button("Open Full Disk Access settings") { model.openSettings() }
-                    .keyboardShortcut(.defaultAction)
-                Spacer()
-                Text(FullDiskAccess.settingsDeepLink)
-                    .font(.caption2).foregroundStyle(.tertiary).textSelection(.enabled)
-            }
-        }
-    }
-}
+            Text(stage.body)
+                .accessibilityIdentifier("stage-body")
 
-/// Prompt 06's decision, rendered. Three branches, and one of them deliberately produces
-/// nothing.
-private struct HealthScreen: View {
-    @ObservedObject var model: PermissionModel
-    let summary: PermissionModel.HealthSummary
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(spacing: 10) {
-                Image(systemName: icon).foregroundStyle(tint).font(.title2)
-                Text(title).font(.title2).bold()
-            }
-
-            Text(summary.headline)
-
-            // THIN: no report, and it says why. Never hand somebody a bad report and
-            // call it their year in messages.
-            if !summary.producesReport {
-                Text(HealthCheck.thinBody).foregroundStyle(.secondary)
-            }
-
-            // FIXABLE: every reveal ships with a one-tap remedy. Guilt without agency is
-            // repellent; guilt with a button is a product.
-            ForEach(summary.remedies, id: \.id) { remedy in
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(remedy.title).bold()
-                    Text(remedy.body).font(.callout).foregroundStyle(.secondary)
-                    Text(remedy.fallbackInstructions).font(.caption).foregroundStyle(.secondary)
-                    HStack {
-                        if let link = remedy.deepLink, let url = URL(string: link) {
-                            Button("Open settings") { NSWorkspace.shared.open(url) }
-                        }
-                        if remedy.rescanAvailable {
-                            Button("Scan again") { Task { await model.runScan(force: true) } }
-                        }
+            // THE LIVE STATUS. It flips the moment the toggle flips, because not knowing
+            // whether it worked is the single biggest reason people abandon this screen —
+            // and the poll count is what proves the app is alive rather than hung.
+            if showsLiveStatus {
+                HStack(spacing: 10) {
+                    Image(systemName: model.accessGranted
+                          ? "checkmark.circle.fill" : "circle.dashed")
+                        .foregroundStyle(model.accessGranted ? .green : .secondary)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(model.accessGranted ? "Full Disk Access granted" : "Not granted yet")
+                            .bold()
+                        Text(model.statusLine)
+                            .font(.caption).foregroundStyle(.secondary)
+                            .accessibilityIdentifier("poll-count")
                     }
                 }
                 .padding(12)
@@ -166,47 +111,199 @@ private struct HealthScreen: View {
                 .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
             }
 
-            if let path = summary.digestPath {
-                Text("Report written to \(path)")
+            // The one thing to do now. Never absent on a stage that needs the user.
+            if let next = stage.nextStep {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "arrow.right.circle.fill")
+                        .foregroundStyle(stage.isFailure ? .orange : .accentColor)
+                    Text(.init(next)).bold()
+                        .accessibilityIdentifier("stage-next-step")
+                }
+                .padding(.top, 2)
+            }
+
+            // Where the copy they opened actually lives — shown rather than described,
+            // because "move it to Applications" is advice somebody can follow wrongly.
+            if stage == .notInApplications, let path = model.bundlePath {
+                Text("Boi is currently running from \(path)")
+                    .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+            }
+
+            if stage == .failed, let detail = model.failureDetail {
+                Text(detail)
                     .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
             }
 
             Spacer()
             HStack {
-                Button("Turn on the daily check") {
-                    StructuredLog.emit("agent.register",
-                                       fields: ["result": ScheduledSync.register()])
+                if stage.offersSettingsLink {
+                    Button("Open Full Disk Access settings") { model.openSettings() }
+                        .keyboardShortcut(.defaultAction)
                 }
-                Text(ScheduledSync.statusDescription)
-                    .font(.caption).foregroundStyle(.secondary)
+                if stage.offersManualRelaunch {
+                    // The exit that does not depend on us detecting anything.
+                    Button("Quit and reopen Boi") { model.relaunchManually() }
+                }
+                if stage == .failed {
+                    Button("Try again") { Task { await model.runScan(force: true) } }
+                }
                 Spacer()
-                Button("Scan now") { Task { await model.runScan(force: true) } }
+                if stage.offersSettingsLink {
+                    Text(FullDiskAccess.settingsDeepLink)
+                        .font(.caption2).foregroundStyle(.tertiary).textSelection(.enabled)
+                }
             }
         }
     }
 
+    /// The live probe status belongs on the screens where the user is actively waiting for
+    /// it to flip, and nowhere else — on `notInApplications` it would be noise attached to
+    /// a switch that cannot help.
+    private var showsLiveStatus: Bool {
+        switch stage {
+        case .waiting, .waitingStalled, .returnedWithoutGranting, .relaunching,
+             .relaunchStalled, .deniedAfterRelaunch:
+            return true
+        case .checking, .needsConsent, .notInApplications, .noDatabase, .syncing,
+             .handoff, .ready, .failed:
+            return false
+        }
+    }
+
     private var icon: String {
-        switch summary.health {
-        case .healthy: return "checkmark.circle.fill"
-        case .fixable: return "wrench.adjustable.fill"
-        case .thin: return "hourglass"
+        switch stage {
+        case .checking, .syncing: return "hourglass"
+        case .needsConsent: return "hand.raised.fill"
+        case .notInApplications: return "folder.badge.questionmark"
+        case .waiting: return "circle.dashed"
+        case .waitingStalled, .returnedWithoutGranting: return "questionmark.circle.fill"
+        case .handoff, .ready: return "checkmark.circle.fill"
+        case .relaunching: return "arrow.clockwise"
+        case .relaunchStalled: return "exclamationmark.arrow.circlepath"
+        case .deniedAfterRelaunch: return "xmark.circle.fill"
+        case .noDatabase: return "tray"
+        case .failed: return "exclamationmark.triangle.fill"
         }
     }
 
     private var tint: Color {
-        switch summary.health {
-        case .healthy: return .green
-        case .fixable: return .orange
-        case .thin: return .secondary
+        if stage == .handoff || stage == .ready { return .green }
+        return stage.isFailure ? .orange : .secondary
+    }
+}
+
+/// The terminal screen: the way into the conversation.
+///
+/// **The setup is over and everything from here happens in Messages**, so the last thing
+/// on screen is the door into the thread — not an inventory of what is imperfect. The
+/// health findings still ship; they sit below, under their own quieter heading.
+private struct HandoffScreen: View {
+    @ObservedObject var model: PermissionModel
+    let summary: PermissionModel.HealthSummary?
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                HStack(spacing: 10) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green).font(.title2)
+                    Text(model.stage.title).font(.title2).bold()
+                        .accessibilityIdentifier("stage-title")
+                }
+
+                Text(model.stage.body)
+
+                // ONE MECHANISM, TWO COPY VARIANTS. `sms:` opens an existing conversation
+                // or composes a new one, so paired and unpaired differ in what they say
+                // and in whether a pairing token rides along — not in machinery.
+                // The words are `ThreadHandoff.copy` — in BoiKit, where the suite can read
+                // them. This file chooses the layout and nothing else.
+                HandoffAction(copy: ThreadHandoff.copy(for: model.handoff),
+                              link: model.handoff.link)
+
+                // WHAT COULD BE BETTER — below the handoff, and no longer the last word.
+                if let summary, !summary.remedies.isEmpty || !summary.producesReport {
+                    Divider().padding(.vertical, 4)
+                    Text("A couple of things could make this better")
+                        .font(.headline).foregroundStyle(.secondary)
+
+                    // THIN: no report, and it says why. Never hand somebody a bad report
+                    // and call it their year in messages.
+                    if !summary.producesReport {
+                        Text(HealthCheck.thinBody).foregroundStyle(.secondary)
+                    }
+
+                    // FIXABLE: every reveal ships with a one-tap remedy. Guilt without
+                    // agency is repellent; guilt with a button is a product.
+                    ForEach(summary.remedies, id: \.id) { remedy in
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(remedy.title).bold()
+                            Text(remedy.body).font(.callout).foregroundStyle(.secondary)
+                            Text(remedy.fallbackInstructions)
+                                .font(.caption).foregroundStyle(.secondary)
+                            HStack {
+                                if let link = remedy.deepLink, let url = URL(string: link) {
+                                    Button("Open settings") { NSWorkspace.shared.open(url) }
+                                }
+                                if remedy.rescanAvailable {
+                                    Button("Scan again") {
+                                        Task { await model.runScan(force: true) }
+                                    }
+                                }
+                            }
+                        }
+                        .padding(12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(.quaternary.opacity(0.4),
+                                    in: RoundedRectangle(cornerRadius: 8))
+                    }
+                }
+
+                if let path = summary?.digestPath {
+                    Text("Report written to \(path)")
+                        .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                }
+
+                HStack {
+                    Button("Turn on the daily check") {
+                        StructuredLog.emit("agent.register",
+                                           fields: ["result": ScheduledSync.register()])
+                    }
+                    Text(ScheduledSync.statusDescription)
+                        .font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                }
+                .padding(.top, 4)
+            }
         }
     }
+}
 
-    private var title: String {
-        switch summary.health {
-        case .healthy: return "You're all set"
-        case .fixable: return "Boi can see more than this"
-        case .thin: return "Not enough history yet"
+/// The door into the thread — or, when there is no link, the plain statement of why not.
+///
+/// **Never a malformed `sms:` link.** The number is per-user and comes from the registrar;
+/// without it there is nothing honest to open, so the button is simply absent rather than
+/// pointing at a URL addressed to nothing.
+private struct HandoffAction: View {
+    let copy: ThreadHandoff.Copy
+    let link: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(copy.headline).bold()
+            Text(copy.detail).font(.callout).foregroundStyle(.secondary)
+            if let button = copy.button, let link {
+                Button(button) {
+                    if let url = URL(string: link) { NSWorkspace.shared.open(url) }
+                }
+                .keyboardShortcut(.defaultAction)
+                .accessibilityIdentifier("handoff-button")
+            }
         }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
+        .accessibilityIdentifier("handoff-action")
     }
 }
 
@@ -217,23 +314,6 @@ private struct Bullet: View {
         HStack(alignment: .top, spacing: 8) {
             Text("•")
             Text(.init(text))
-        }
-    }
-}
-
-private struct Message: View {
-    let title: String
-    let detail: String
-
-    init(title: String, body: String) {
-        self.title = title
-        self.detail = body
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(title).font(.title2).bold()
-            Text(detail).foregroundStyle(.secondary).textSelection(.enabled)
         }
     }
 }
