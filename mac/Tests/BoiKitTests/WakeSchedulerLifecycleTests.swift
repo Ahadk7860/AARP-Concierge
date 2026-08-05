@@ -162,6 +162,51 @@ final class WakeSchedulerLifecycleTests: XCTestCase {
                                 "register-agent", "schedule"])
     }
 
+    func testRegisterThrowThatEntersApprovalIsObservedWithoutASecondClick() async {
+        struct ApprovalRequired: Error {}
+        var daemon: BackgroundServiceStatus = .notRegistered
+        var agent: BackgroundServiceStatus = .notRegistered
+        var events: [String] = []
+        let wake = Date(timeIntervalSince1970: 1_900_000_100)
+
+        let result = await WakeRegistrationCoordinator.run(
+            daemonStatus: { daemon },
+            registerDaemon: {
+                events.append("register-denied")
+                daemon = .requiresApproval
+                throw ApprovalRequired()
+            },
+            agentStatus: { agent },
+            registerAgent: { events.append("register-agent"); agent = .enabled },
+            schedule: { events.append("schedule"); return .scheduled(wake) },
+            observe: { state in
+                if case .requiresApproval = state { events.append("show-settings") }
+            },
+            sleep: { events.append("approval-observed"); daemon = .enabled }
+        )
+
+        XCTAssertEqual(result, .ready(.scheduled(wake)))
+        XCTAssertEqual(events, ["register-denied", "show-settings", "approval-observed",
+                                "register-agent", "schedule"])
+    }
+
+    func testRegisterThrowWithoutApprovalRemainsTerminal() async {
+        struct BrokenRegistration: Error, CustomStringConvertible {
+            var description: String { "registration genuinely failed" }
+        }
+        var agentTouched = false
+        let result = await WakeRegistrationCoordinator.run(
+            daemonStatus: { .notRegistered },
+            registerDaemon: { throw BrokenRegistration() },
+            agentStatus: { agentTouched = true; return .enabled },
+            registerAgent: { agentTouched = true },
+            schedule: { agentTouched = true; return .scheduled(Date()) },
+            observe: { _ in }, sleep: {}
+        )
+        XCTAssertEqual(result, .degraded("registration genuinely failed"))
+        XCTAssertFalse(agentTouched)
+    }
+
     func testAgentIsNeverReportedRegisteredUntilStatusRechecksEnabled() async {
         var agent: BackgroundServiceStatus = .notRegistered
         var scheduled = false

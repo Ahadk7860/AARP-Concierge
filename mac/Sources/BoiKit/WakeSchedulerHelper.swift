@@ -10,6 +10,52 @@ public enum WakeHelperContract {
     public static let bundleProgram = "Contents/Resources/BoiWakeHelper"
 }
 
+/// The helper reserves its final second for TERM/KILL cleanup and must return before the
+/// client deadline. All values are process-monotonic, never wall-clock dates.
+public enum WakeHelperTiming {
+    public static let helperTransactionTimeout: TimeInterval = 7
+    public static let processCleanupReserve: TimeInterval = 1
+    public static let clientTimeout: TimeInterval = 10
+}
+
+public struct WakeHelperTransactionDeadline: Equatable, Sendable {
+    public let startedAtNanoseconds: UInt64
+    public let commandCutoffNanoseconds: UInt64
+    public let hardDeadlineNanoseconds: UInt64
+
+    public init(startedAtNanoseconds: UInt64) {
+        self.startedAtNanoseconds = startedAtNanoseconds
+        self.hardDeadlineNanoseconds = startedAtNanoseconds
+            + Self.nanoseconds(WakeHelperTiming.helperTransactionTimeout)
+        self.commandCutoffNanoseconds = hardDeadlineNanoseconds
+            - Self.nanoseconds(WakeHelperTiming.processCleanupReserve)
+    }
+
+    public func canStartCommand(atNanoseconds now: UInt64) -> Bool {
+        now < commandCutoffNanoseconds
+    }
+
+    public func commandWaitInterval(atNanoseconds now: UInt64) -> DispatchTimeInterval? {
+        guard canStartCommand(atNanoseconds: now) else { return nil }
+        let remaining = commandCutoffNanoseconds - now
+        return .nanoseconds(Int(min(remaining, UInt64(Int.max))))
+    }
+
+    public func cleanupWaitInterval(atNanoseconds now: UInt64) -> DispatchTimeInterval {
+        guard now < hardDeadlineNanoseconds else { return .nanoseconds(0) }
+        let remaining = hardDeadlineNanoseconds - now
+        return .nanoseconds(Int(min(remaining, UInt64(Int.max))))
+    }
+
+    public static var clientMargin: TimeInterval {
+        WakeHelperTiming.clientTimeout - WakeHelperTiming.helperTransactionTimeout
+    }
+
+    private static func nanoseconds(_ seconds: TimeInterval) -> UInt64 {
+        UInt64(seconds * 1_000_000_000)
+    }
+}
+
 /// Defense in depth at the privileged process boundary. Even an internal programming
 /// error cannot turn the helper's `Process` call into a general pmset or shell surface.
 public enum WakeHelperCommandPolicy {
@@ -84,9 +130,24 @@ public enum WakeRegistrationCoordinator {
     ) async -> WakeRegistrationState {
         do {
             observe(.registeringDaemon)
-            if daemonStatus() == .notRegistered { try registerDaemon() }
+            var surfacedDaemonApproval = false
+            if daemonStatus() == .notRegistered {
+                do {
+                    try registerDaemon()
+                } catch {
+                    // SMAppService may throw when registration has nevertheless entered
+                    // the user-approval state. Status is authoritative; the thrown error
+                    // is terminal only when the re-read status is not requiresApproval.
+                    guard daemonStatus() == .requiresApproval else { throw error }
+                    observe(.requiresApproval(service: "wake helper"))
+                    surfacedDaemonApproval = true
+                }
+            }
             while daemonStatus() == .requiresApproval {
-                observe(.requiresApproval(service: "wake helper"))
+                if !surfacedDaemonApproval {
+                    observe(.requiresApproval(service: "wake helper"))
+                }
+                surfacedDaemonApproval = false
                 try await sleep()
             }
             guard daemonStatus() == .enabled else {
@@ -180,12 +241,13 @@ public final class WakeHelperClient: @unchecked Sendable {
     private let startRequest: StartRequest
     private let timeout: TimeInterval
 
-    public init(timeout: TimeInterval = 10) {
+    public init(timeout: TimeInterval = WakeHelperTiming.clientTimeout) {
         self.timeout = timeout
         self.startRequest = Self.productionStartRequest
     }
 
-    public init(timeout: TimeInterval = 10, startRequest: @escaping StartRequest) {
+    public init(timeout: TimeInterval = WakeHelperTiming.clientTimeout,
+                startRequest: @escaping StartRequest) {
         self.timeout = timeout
         self.startRequest = startRequest
     }

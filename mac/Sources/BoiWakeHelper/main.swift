@@ -5,16 +5,20 @@ import Foundation
 /// Executes only the two commands WakeScheduler can synthesize. There is no shell and
 /// no request-derived executable or argument vector.
 private enum PMSetRunner {
-    static let timeout: TimeInterval = 5
-
     static func run(_ command: WakeScheduler.Command, plannedAfter: Date,
-                    calendar: Calendar) throws -> WakeScheduler.CommandResult {
+                    calendar: Calendar,
+                    deadline: WakeHelperTransactionDeadline) throws
+        -> WakeScheduler.CommandResult {
         guard command.executable == WakeScheduler.pmsetPath,
               WakeHelperCommandPolicy.allows(executable: command.executable,
                                              arguments: command.arguments,
                                              now: plannedAfter,
                                              calendar: calendar) else {
             throw WakeScheduler.Error.helperRejected(detail: "command outside closed wake surface")
+        }
+        guard let commandWait = deadline.commandWaitInterval(
+            atNanoseconds: DispatchTime.now().uptimeNanoseconds) else {
+            throw WakeScheduler.Error.helperRejected(detail: "wake transaction deadline expired")
         }
 
         let process = Process()
@@ -27,11 +31,15 @@ private enum PMSetRunner {
         let terminated = DispatchSemaphore(value: 0)
         process.terminationHandler = { _ in terminated.signal() }
         try process.run()
-        guard terminated.wait(timeout: .now() + timeout) == .success else {
+        guard terminated.wait(timeout: .now() + commandWait) == .success else {
             process.terminate()
-            if terminated.wait(timeout: .now() + 1) != .success && process.isRunning {
+            let remaining = deadline.cleanupWaitInterval(
+                atNanoseconds: DispatchTime.now().uptimeNanoseconds)
+            if terminated.wait(timeout: .now() + half(remaining)) != .success
+                && process.isRunning {
                 kill(process.processIdentifier, SIGKILL)
-                _ = terminated.wait(timeout: .now() + 1)
+                _ = terminated.wait(timeout: .now() + deadline.cleanupWaitInterval(
+                    atNanoseconds: DispatchTime.now().uptimeNanoseconds))
             }
             throw WakeScheduler.Error.helperRejected(detail: "pmset command timed out")
         }
@@ -44,6 +52,17 @@ private enum PMSetRunner {
         )
     }
 
+    private static func half(_ interval: DispatchTimeInterval) -> DispatchTimeInterval {
+        switch interval {
+        case .nanoseconds(let value): return .nanoseconds(max(0, value / 2))
+        case .microseconds(let value): return .microseconds(max(0, value / 2))
+        case .milliseconds(let value): return .milliseconds(max(0, value / 2))
+        case .seconds(let value): return .milliseconds(max(0, value * 500))
+        case .never: return .milliseconds(500)
+        @unknown default: return .nanoseconds(0)
+        }
+    }
+
 }
 
 private final class WakeHelperService: NSObject, WakeHelperXPCProtocol {
@@ -54,13 +73,18 @@ private final class WakeHelperService: NSObject, WakeHelperXPCProtocol {
     }
 
     func reschedule(reply: @escaping (Int, Date?, String?) -> Void) {
+        // Receipt time, not queue-entry time: a request waiting behind another client
+        // cannot begin pmset work after its own deadline (or after the app timed out).
+        let deadline = WakeHelperTransactionDeadline(
+            startedAtNanoseconds: DispatchTime.now().uptimeNanoseconds)
         transactions.perform {
             let response: WakeHelperResponse
             do {
                 let now = Date()
                 let calendar = Calendar.current
                 let scheduler = WakeScheduler(calendar: calendar, runCommand: { command in
-                    try PMSetRunner.run(command, plannedAfter: now, calendar: calendar)
+                    try PMSetRunner.run(command, plannedAfter: now, calendar: calendar,
+                                        deadline: deadline)
                 })
                 switch try scheduler.scheduleNextWake(after: now) {
                 case .scheduled(let date): response = .scheduled(date)

@@ -143,6 +143,24 @@ final class WakeSchedulerHelperTests: XCTestCase {
         }
     }
 
+    func testSlowTwoCommandDeadlineFinishesBeforeClientTimeout() {
+        let second: UInt64 = 1_000_000_000
+        let deadline = WakeHelperTransactionDeadline(startedAtNanoseconds: 0)
+        XCTAssertEqual(deadline.commandCutoffNanoseconds, 6 * second)
+        XCTAssertEqual(deadline.hardDeadlineNanoseconds, 7 * second)
+        XCTAssertEqual(WakeHelperTransactionDeadline.clientMargin, 3)
+
+        XCTAssertTrue(deadline.canStartCommand(atNanoseconds: 0), "list may start")
+        XCTAssertTrue(deadline.canStartCommand(atNanoseconds: 5_900_000_000),
+                      "a slow list still leaves a bounded schedule window")
+        XCTAssertFalse(deadline.canStartCommand(atNanoseconds: 6 * second),
+                       "schedule cannot start once cleanup reserve begins")
+        XCTAssertFalse(deadline.canStartCommand(atNanoseconds: 10 * second),
+                       "queued helper work cannot start after the client timed out")
+        XCTAssertLessThan(deadline.hardDeadlineNanoseconds,
+                          UInt64(WakeHelperTiming.clientTimeout * Double(second)))
+    }
+
     func testCancellationInvalidatesConnectionAndLateReplyCannotWin() async {
         let handle = Handle()
         var reply: ((WakeHelperResponse) -> Void)?
@@ -222,6 +240,10 @@ final class WakeSchedulerHelperTests: XCTestCase {
         let clientSigning = try XCTUnwrap(contract.range(of: "setCodeSigningRequirement"))
         let clientActivation = try XCTUnwrap(contract.range(of: "connection.activate()"))
         XCTAssertLessThan(clientSigning.lowerBound, clientActivation.lowerBound)
+        let receiptDeadline = try XCTUnwrap(helper.range(of: "let deadline = WakeHelperTransactionDeadline"))
+        let transactionQueue = try XCTUnwrap(helper.range(of: "transactions.perform"))
+        XCTAssertLessThan(receiptDeadline.lowerBound, transactionQueue.lowerBound,
+                          "queue delay must consume the request's helper deadline")
     }
 
     func testBroadIPCMutationsAreRejectedByTheSameGuard() {
