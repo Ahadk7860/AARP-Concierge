@@ -130,4 +130,20 @@ describe("tap-to-send delivery", () => {
     });
     expect(result.sms_link).toBe("sms:+16465550123&body=hi%20%26%20are%20you%20free%20at%207%3F%20%E2%98%95");
   });
+
+  it("keeps ill-formed Unicode draft text copyable instead of throwing", () => {
+    const illFormed = "keep this copyable \uD800";
+    const delivery: DraftDelivery = {
+      schema_version: "draft_delivery.v1",
+      contact_id: "h_8f21a4c0",
+      text: illFormed,
+      recipient: { kind: "resolved", handle: "+16465550123" },
+    };
+    expect(() => composeTapToSend(delivery)).not.toThrow();
+    expect(composeTapToSend(delivery)).toEqual({
+      text: illFormed,
+      recipient_state: "unavailable",
+      sms_link: null,
+    });
+  });
 });

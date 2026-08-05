@@ -56,3 +56,40 @@ claim the live adapter until its stream API has been verified.
 - Email punctuation rejects the same URL-changing delimiters as Swift
   `ThreadHandoff.isUsable`: `&?#/\\<>"'`, whitespace, and controls. Focused tests include
   every delimiter and the exact E.164 URL bytes.
+- Ill-formed UTF-16 (including a lone surrogate) cannot make `encodeURIComponent` drop a
+  draft: delivery degrades to unavailable while preserving the original copyable text.
+
+## Prompt 03 evidence
+
+- Merged current `main` into this worktree before implementation to consume migration 012,
+  the frozen private repository interface, and current foundation grants. No rebase.
+- `PostgresPhase2PrivateRepository` implements ciphertext-only handle writes/reads,
+  idempotent turn appends, an atomic inbound-plus-optional-outbound claim, and global
+  expiry purging. Live PostgreSQL tests prove user scoping, duplicate claims, the exact
+  90-day boundary, idempotent purge, and user-first cascade deletion.
+- `TurnVault` uses AES-256-GCM with AAD bound to purpose, algorithm, key version, user,
+  direction, and turn id. Cross-user, direction, and turn swaps fail with plaintext-free
+  errors.
+- `EncryptedPrivateStore` is the only plaintext-to-repository boundary. Handle writes and
+  reads refuse with `private_key_capability_unavailable` unless H's key capability is
+  injected. Both turn directions are encrypted before repository I/O and expire exactly
+  90×24 hours after `occurred_at`.
+- `InboundRouter` exposes injected adapters for the existing deterministic intent path and
+  J's closed `waiting_on_me` chat seam. Deterministic routing wins; only unhandled text
+  reaches chat. Successfully decided inbound/outbound turns are claimed atomically, and a
+  required idempotent delivery port retries with the same key after transport failure.
+  Provider redelivery returns a typed duplicate only after the delivery call succeeds.
+- `TurnRetentionWorker` coalesces concurrent runs, reports only operational success/failure,
+  ships with a concrete daily interval scheduler, and leaves runtime lifecycle ownership
+  at the composition boundary.
+- `npx vitest run cloud/inbound cloud/channel/test/spectrum-stream.test.ts` passed (46 tests).
+- `npx vitest run cloud/db/src/turns.test.ts --reporter=verbose` passed (4 live PostgreSQL tests).
+- `npm run typecheck` passed.
+
+## Remaining live gates
+
+- The Photon inbound SDK stream/resume shape is still unverified; the adapter remains an
+  injected opaque-cursor seam and no live Photon call was guessed.
+- H must inject the platform key provider and install/start the retention schedule in the
+  deployed worker. J must supply the closed chat port. K must prove those real process
+  boundaries and outbound delivery idempotency end to end.

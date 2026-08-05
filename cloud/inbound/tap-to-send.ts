@@ -24,10 +24,18 @@ export function composeTapToSend(delivery: DraftDelivery): ComposedDraftDelivery
   if (delivery.recipient.kind !== "resolved" || !isUsableMessageHandle(delivery.recipient.handle)) {
     return { text, recipient_state: "unavailable", sms_link: null };
   }
+  let body: string;
+  try {
+    // `encodeURIComponent` throws on lone UTF-16 surrogates. The frozen contract still
+    // requires the original text to remain copyable, so malformed text degrades safely.
+    body = encodeURIComponent(text);
+  } catch {
+    return { text, recipient_state: "unavailable", sms_link: null };
+  }
   return {
     text,
     recipient_state: "resolved",
-    sms_link: `sms:${delivery.recipient.handle}&body=${encodeURIComponent(text)}`,
+    sms_link: `sms:${delivery.recipient.handle}&body=${body}`,
   };
 }
 
