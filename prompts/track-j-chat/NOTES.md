@@ -33,12 +33,21 @@
   The projection contains no digest corpus, display name, handle, raw messages, or
   counterpart prose.
 - Recorded-provider tests cover cross-contact voice-pack swaps, unexpected-field
-  injection, cross-contact claim swaps, unlicensed dates/times/places/amounts/names,
-  provider failure, length/register refusal, and the user-voice-only projection canary.
+  injection, cross-contact claim swaps, arbitrary-provider-prose refusal, provider
+  failure, length refusal, strict frozen voice-pack validation, malformed Unicode, and
+  the user-voice-only projection canary.
 - A successful `DraftProposal` contains exactly `contact_id` and `text`. Track J can
   compose frozen `draft_delivery.v1` only after Track I supplies either a resolved
-  recipient or the explicit unavailable case; this path never resolves, links, sends,
-  or invents a handle.
+  recipient or the explicit unavailable case bound to the same `contact_id`; this path
+  never resolves, links, sends, or invents a handle.
+- `DraftProposal` is an in-process, frozen capability tracked by Track J. A caller cannot
+  forge a lookalike `{contact_id,text}` and route it into delivery; join must compose the
+  frozen wire `DraftDelivery` before crossing a process or persistence boundary.
+- Review hardening removed arbitrary provider prose from the production path. The
+  provider may select only one of two closed, deterministic acknowledgement templates
+  and must license it to the exact selected open thread. Track J renders the final text.
+  A valid open-thread claim can therefore never smuggle `yes i already paid and booked
+  the room` (or any other model-written commitment) into `DraftProposal`.
 
 ## Residual gaps
 
@@ -50,9 +59,9 @@
 - Join must exercise Track I recipient resolution plus both resolved-link and
   unavailable-copyable-text delivery. Track J composes the contract but does not own or
   claim the tap-to-send UI outcome.
-- The deterministic surface scanner is defense in depth for common dates, times,
-  amounts, and capitalized name/place forms; it is not a general named-entity model.
-  A real provider must still pass the mutation/eval gate before shipping.
+- The closed templates intentionally do not answer the counterpart's question or make a
+  specific commitment. Expanding beyond acknowledgement/defer requires a real provider,
+  a deterministic fabrication gate, and the live 50-case evaluation before shipping.
 
 ## Contract gaps
 
