@@ -35,10 +35,13 @@ export function cardFor(
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const response = await fetch(
-        `${baseUrl.replace(/\/$/, "")}/cards/${encodeURIComponent(scope.user_id)}`,
+        `${baseUrl.replace(/\/$/, "")}/internal/cards/${encodeURIComponent(scope.user_id)}`,
         {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: {
+            "content-type": "application/json",
+            "x-boi-card-write": process.env["BOI_CARD_WRITE_SECRET"] ?? "",
+          },
           body: JSON.stringify(digest),
           signal: controller.signal,
         },

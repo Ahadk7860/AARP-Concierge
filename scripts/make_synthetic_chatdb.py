@@ -138,10 +138,91 @@ RICH_PEOPLE = [
     ("+15550100015", "Kit",     "iMessage", "fade",                        22,   38,  300),
     ("+15550100016", "Jonah",   "iMessage", "waiting",                     18,    9,  260),
     ("+15550100017", "Remy",    "iMessage", "one_way",                     20,    5,  300),
-    ("+15550100018", "Soraya",  "iMessage", "rising",                      24,    3,  260),
+    ("+15550100018", "Soraya",  "iMessage", "rising",                      24,    2,  260),
     ("+15550100019", "Ellis",   "iMessage", "steady",                      18,    6,  320),
     ("+15550100020", "Wren",    "SMS",      "steady",                      14,   11,  300),
 ]
+
+# ---------------------------------------------------------------- per-person voices
+#
+# **One shared line pool for every person is why this fixture kept lying**, and it did it
+# three separate times before anybody traced the three back to one cause:
+#
+#   1. every thread carried the same two date phrases, so no committing draft was ever
+#      licensable — every draft that named a date named one the thread had outrun;
+#   2. every draft opened `sorry been mia for ages`, because one `apology_openers` list
+#      fed every voice pack;
+#   3. the corpus could not clear the ranking bar at all, which is a different symptom of
+#      the same thing — a fixture built from one voice cannot represent variation.
+#
+# **Variation is most of what this product measures.** A corpus that has none can only
+# produce findings about itself. So each person gets their own inbound and outbound
+# vocabulary, and `THEIR_LINES` / `USER_LINES` remain only as the fallback for the six
+# default people, whose exact byte-for-byte output other tracks' tests depend on.
+#
+# `VOICES` is keyed by name. A person with no entry falls back to the shared pools.
+VOICES: dict[str, dict[str, list[str]]] = {
+    "Nina": {
+        "theirs": ["that trip feels like a lifetime ago", "we should do it again sometime",
+                   "hope the new place is treating you well"],
+        "mine": ["ha we really did", "miss that", "ill send you the photos"],
+    },
+    "Theo": {
+        "theirs": ["congrats again seriously", "let me know how it goes",
+                   "proud of you man"],
+        "mine": ["appreciate you", "will do", "thanks for checking in"],
+    },
+    "Bex": {
+        "theirs": ["is the band still playing", "you around for the summer",
+                   "we never did that thing"],
+        "mine": ["not for a while", "im around", "we should"],
+    },
+    "Ade": {
+        "theirs": ["did you ever hear back from them", "how did the interview go",
+                   "still thinking about that offer?"],
+        "mine": ["still waiting", "went ok i think", "ill know more soon"],
+    },
+    "Kit": {
+        "theirs": ["how is the shoulder", "are you back at the gym yet",
+                   "did the physio help"],
+        "mine": ["getting there", "slowly", "back next week hopefully"],
+    },
+    "Jonah": {
+        "theirs": ["no worries", "whenever suits", "all good"],
+        "mine": ["sorry just seeing this", "ill get back to u", "been buried"],
+    },
+    "Remy": {
+        "theirs": ["haha yeah", "true", "for sure"],
+        "mine": ["thinking of you", "we should catch up properly",
+                 "how have you been really"],
+    },
+    "Soraya": {
+        # THE ONE RECENT THREAD WITH A DATE THAT IS GENUINELY AHEAD. Two days silent, and
+        # `the 14th` has a horizon of 31 days, so it is still pending and a committing
+        # draft is CORRECT here. This is the case the product is best at, and until now
+        # the fixture could not represent it.
+        "theirs": ["are we still on for the 14th", "let me know either way",
+                   "looking forward to it"],
+        "mine": ["yes! putting it in the calendar", "cant wait", "ill confirm the time"],
+    },
+    "Ellis": {
+        "theirs": ["how was the weekend", "any plans this month", "hows work"],
+        "mine": ["quiet one", "nothing yet", "busy but fine"],
+    },
+    "Wren": {
+        "theirs": ["saw your post", "that looked fun", "we should get dinner"],
+        "mine": ["it was", "yes lets", "im free most evenings"],
+    },
+}
+
+
+def voice(name: str, from_me: bool, rng: random.Random) -> str:
+    """A line in this person's own register, or the shared pool for the default six."""
+    lines = VOICES.get(name, {}).get("mine" if from_me else "theirs")
+    if not lines:
+        return rng.choice(USER_LINES if from_me else THEIR_LINES)
+    return rng.choice(lines)
+
 
 # Questions, kept out of the shared line pools on purpose. `unansweredQuestions` keys on a
 # trailing `?` AND on `text` being non-null, so a question that lands in the NULL-text share
@@ -205,7 +286,7 @@ def _rich_threads(cur, rng: random.Random, now: datetime, stats: dict, mguid: in
     Returns the running message-guid counter. Everything here is additive: the six
     default people are written before this runs and are not touched by it.
     """
-    for handle, _name, service, kind, convos, quiet_days, span_days in RICH_PEOPLE:
+    for handle, person, service, kind, convos, quiet_days, span_days in RICH_PEOPLE:
         weight, user_opens, (lo, hi) = SHAPES[kind]
 
         cur.execute("INSERT INTO handle (id, service, country) VALUES (?,?,?)",
@@ -244,7 +325,7 @@ def _rich_threads(cur, rng: random.Random, now: datetime, stats: dict, mguid: in
                 if turn > 0:
                     from_me = from_me if rng.random() < 0.25 else not from_me
                     when = when + timedelta(seconds=rng.randint(40, 900))
-                body = rng.choice(USER_LINES if from_me else THEIR_LINES)
+                body = voice(person, from_me, rng)
                 text, attr = body, None
                 if rng.random() < 0.30:
                     text, attr = None, b"__SYNTHETIC_NO_TYPEDSTREAM__"
@@ -286,7 +367,7 @@ def _rich_threads(cur, rng: random.Random, now: datetime, stats: dict, mguid: in
                 # number wearing two names.
                 when = when + timedelta(seconds=rng.randint(60, 900))
                 for asker_is_me, line in ((0, rng.choice(THEIR_QUESTIONS)),
-                                          (1, rng.choice(USER_LINES))):
+                                          (1, voice(person, True, rng))):
                     mguid += 1
                     cur.execute(
                         """INSERT INTO message

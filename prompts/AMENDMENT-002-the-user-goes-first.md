@@ -53,6 +53,41 @@ cold-open posture. It is also the pattern every comparable product uses.
 | Pairing | 6-digit code typed after the Mac app installs | **the token in the prefilled body** — the code step disappears |
 | Contact card | the opening move | **Boi's first reply** — "here, save me", warmer and no longer load-bearing |
 
+## CORRECTED 4 Aug — line resolution, after the probe
+
+The section below told you to resolve a user's assigned line by creating a space and
+reading its `phone`. **That does not work on the Free tier, and the probe proved it:**
+
+```
+im.space.create("+1…")  ->  id "any;-;+1…", phone "shared", 1 ms
+```
+
+`space.phone` is the literal string `"shared"`. On a shared pool the line is chosen at
+**send** time, not at assignment time, so there is no per-recipient number to read. I had
+read the docs' *"each end user is routed through a number from a shared pool"* as
+per-recipient assignment; it is not.
+
+Three consequences, all from Track E:
+
+- **`Registrar.lineFor` cannot be implemented against `space.create` on this tier.** The
+  line comes from **config** — the project's assigned number, `+1 646 579-2868`, verified
+  end to end today.
+- **The deep link is a constant on Free, and legitimately so** — not because we hard-coded
+  it, but because the pool genuinely has one number per project until a dedicated line is
+  bought. The original text warned against a constant; that warning was wrong for this tier
+  and right for Business.
+- **`StubRegistrar` giving every user a different line stays correct.** It models the tier
+  we move to, and consuming code must not assume constancy.
+
+**And the good news, which is larger:** `space.create` is a *local* construction — one
+millisecond, a deterministic id derived from the handle, **no request**. So it does not
+consume the 50-new-conversations-per-line-per-day ceiling. **The one limit that would have
+capped onboarding rather than degraded it is not there.**
+
+This is the third time a prose mapping and a real type definition disagreed, and the
+reason compiling against the SDK mattered: `SPECTRUM_INTEGRATION.md` says `phone`, and the
+type says nothing about what is in it.
+
 ## Transport specifics — verify these, do not assume
 
 1. **The allowlist is documented as outbound-only.** *"A shared line will only message
@@ -120,6 +155,35 @@ lives. It would present as total silence with no error anywhere.
 Signup already collects **phone and email**. Register both with the transport. Then it
 does not matter which one Apple sends from. One line, and it converts the largest risk in
 this design into a non-event.
+
+## RESULT — tested 4 Aug, and the amendment holds
+
+**Run on a clean device by a third party**, which is the only way it could have failed.
+A friend with an iPhone who had **never texted the debug line**, with **Screen Unknown
+Senders switched ON**, sent the first message. The reply arrived **in the main
+conversation list**, not the filtered view.
+
+So a user who initiates is not an unknown sender, and the deep-link-first flow works.
+
+**The second observation is the confirmation of the other half:** when the *line* initiates
+to someone who has not written first, iMessage presents the message with the spam-report
+affordance. That is the outcome § 4.1's original design was walking into every single time,
+and it is worse than a filtered tab — it puts a "report junk" button under Boi's first
+words.
+
+The first attempt at this test was contaminated and worth recording as a method note: the
+same handle had been texted earlier the same day, before the filter was enabled. With prior
+interaction the reply lands in the main list *because of that history*, so the test would
+have passed while proving nothing. **The clean run required a person who had never
+contacted the handle** — the test had to be able to fail before its passing meant
+anything.
+
+### What remains unverified, and why it does not block
+
+The clean run was sent from a phone, not a Mac, so *"which handle does Messages on a Mac
+send from"* is still open. It does not block: the mitigation — **register both the phone
+and the email at signup** — is already in prompt `08`, costs one line, and makes the answer
+irrelevant. Build it and stop caring which handle Apple picks.
 
 ## The five-minute test that settles it
 

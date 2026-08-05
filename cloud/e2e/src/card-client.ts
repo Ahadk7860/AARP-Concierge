@@ -56,9 +56,13 @@ export async function renderCardForDigest(
 
   try {
     const response = await fetch(
-      `${options.baseUrl.replace(/\/$/, "")}/cards/${encodeURIComponent(userId)}`, {
+      `${options.baseUrl.replace(/\/$/, "")}/internal/cards/${encodeURIComponent(userId)}`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        // The write route is authenticated as well as being off the public prefix.
+        "x-boi-card-write": process.env["BOI_CARD_WRITE_SECRET"] ?? "",
+      },
       body: JSON.stringify(digest),
       signal: controller.signal,
     },

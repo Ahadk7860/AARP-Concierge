@@ -114,6 +114,46 @@ weekdays (`next thurs`), lowercase places (`the ferry building`) and single firs
 highest-frequency fabrications in real texting. Ship it if you ship it, but say so on
 the trust page rather than describing the gate as complete.
 
+**And a fifth, found 5 Aug in the dry run for the first live send: nothing ever checked
+the calendar.** This section has said since the beginning that "a specific is falsifiable
+against a calendar." `gist.facts` licenses a token because it **appeared in the corpus**,
+and the corpus can be months old — so `the 14th`, extracted from a message sent 54 days
+earlier, licensed *"friday the 14th works for me"* and committed the user to a date that
+had already gone. A confident wrong commitment in their own name, arriving **through** the
+gate built to stop exactly that.
+
+The rule, computable without knowing the year: **a date-shaped specific is unlicensed when
+the gist has been silent longer than the maximum distance to that date's next
+occurrence.** The next `friday` is at most 7 days away, the next `the 14th` at most 31, a
+month-and-day at most 366; at 54 days of silence the first two have certainly passed.
+Per-shape rather than one threshold, deliberately: a three-day-old thread naming `the 14th`
+stays licensed, because a recent thread with a real pending date is exactly where a
+committing draft is worth most. A specific carrying a **year** is exempt — `8/14/2026` is
+unambiguous and the reasoning does not apply.
+
+Times (`at 7`) are the same class and are **not** covered yet: a time recurs daily, so by
+this rule almost any thread outruns it, and blocking every time on every thread older than
+a day needs its own look rather than an extrapolation.
+
+### A rule in this file is not a rule in the code — added 5 Aug
+
+The finding above matters more than the rule it produced, and it is a new class.
+
+Every lost invariant this project has found until now was one that **never reached
+`CONTRACTS.md`** — `as_of` in the drafter prompt, the tense rule, US-only signup, the hedge
+allowlist. The remedy each time was to write it down here, and that remedy assumes the
+document is the hard part.
+
+"Falsifiable against a calendar" **was** written down here, from the beginning, in the
+section every track read. Four tracks built against it and none implemented it, and
+nothing anywhere detects the difference. **A rule stated in the contract is not a rule that
+exists in the code, and this project has no mechanism that checks the second.** The gate
+tests all passed; they tested the rules that were built.
+
+Treat a sentence in this file as a claim to be verified against the code, not as evidence
+about it. When you rely on one, find the line that enforces it — and if you cannot, that is
+a finding, not a search failure.
+
 ### `as_of` reaches the drafter, and stale state is never claimed in the present tense — added 4 Aug
 
 **This rule existed in `BOI_ARCHITECTURE.md` § 6.6 from the beginning and never reached
@@ -448,6 +488,79 @@ differently has to be pinned. Three are:
 - **Invitation, never verdict.** `"you've reached out to Sarah 12 times this month"`,
   never `"Sarah doesn't text you back"`. Every reveal ships with a one-tap remedy.
   Guilt without agency is repellent; guilt with a button is a product.
+- **A refusal with no remedy is guilt without agency** — added 4 Aug. The same rule as
+  invitation-never-verdict, stated in the case where it is hardest to follow. Every
+  refusal the product can produce says what would change it: the card's
+  `not_enough_ranked` names `Settings > Messages > Keep Messages`, and the report intent
+  distinguishes *"i don't have your history yet"* (our claim, with the setup step) from
+  *"there isn't enough of it"* (a claim about them, only sayable once we have looked).
+  Those two are one careless copy edit apart, and getting them backwards tells a
+  brand-new user their friendships are too thin to measure when nobody has looked.
+### The `sms:` deep-link format — pinned 4 Aug, empirically
+
+```
+sms:<E.164 line>&body=<percent-encoded body>
+```
+
+**`&body=`, not `?body=`.** Verified on a real device against the project's live line: the
+link opened Messages with the body prefilled, blue, delivered. The other separator was not
+assumed wrong — this one was observed right, which is the only reason it is pinned.
+
+This string is composed **in two languages** — `welcome.ts` in TypeScript and
+`ThreadHandoff.link` in Swift — and a one-character divergence produces a link that opens
+Messages with an **empty body**, silently dropping the pairing token, while both sides pass
+their own tests. That is the fourth cross-language seam in this project and the second to
+be pinned rather than discovered broken.
+
+A schema catches a wrong field. It does not catch two correct implementations of two
+different readings of the same sentence, and a separator is exactly that. So the format is
+pinned here **and** asserted by `testTheSwiftAndTypeScriptDeepLinksAgree`, which computes
+both sides from scratch and never asserts one against a literal — the shape that made
+`contact_id` the only cross-language value that has never diverged.
+
+### The `/cards/` prefix is public by design — added 4 Aug
+
+The card service is exposed through a Cloudflare tunnel whose ingress rule matches
+**path only**:
+
+```
+path: ^/cards/
+```
+
+Cloudflare ingress rules have **no method matching**. So:
+
+> **Any route ever added under `/cards/` is public the moment it exists — including a
+> `POST`.** Not "public if the rule is wrong." Public by design of the rule.
+
+This was verified against the live edge, not reasoned about: `POST /cards/:user_id`
+**is forwarded to the application**. It returns 404 only because the write route was moved
+to `/internal/cards/:user_id` and there is nothing left under that prefix to answer. The
+404 is an absence, not a defence.
+
+`POST /render` and `POST /internal/cards/:user_id` are genuinely unreachable — the edge
+returns 404 without forwarding, confirmed by comparing each response against the app's own
+answer on loopback, which differ.
+
+**The `/internal/` prefix is the boundary that must hold**, and the `x-boi-card-write`
+shared secret is the second layer under it. Adding a write route under `/cards/` publishes
+it to the internet, and no test in this repo would notice.
+
+### The process environment is the source of truth, never `.env`
+
+`.env` is loaded by `vite-node` and **not** by `vitest`, proven both ways. A card service
+started without the environment sourced silently falls back to the committed default
+signing secret — which is in the repository.
+
+**A signature scheme whose key depends on which launcher started the process is not a
+signature scheme.** Start the service with `set -a; source .env; set +a`, or a process
+manager that does the same.
+
+And the diagnostic trap, because it is what costs the hours: a suite minting URLs that its
+own child renderer rejects reads as a signature bug. It is two processes disagreeing about
+a file. Verify the secret **from inside the running process** — a URL signed with the real
+key returning 200 while the same URL signed with the default returns 401 — never from the
+file.
+
 - **Never auto-send.** Ever. The approval tap costs nothing and buys everything.
 - **Don't ship reciprocity.** Across 25 real relationships the spread was 0.465–0.615,
   sd 0.034 — it carries almost no information, and it is the most legally dangerous

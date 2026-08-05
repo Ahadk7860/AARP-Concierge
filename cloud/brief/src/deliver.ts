@@ -146,6 +146,22 @@ export function itemBlocks(item: BriefItem): OutboundBlock[] {
 export type DeliverInput = {
   brief: Brief;
   channel: Channel;
+  /**
+   * The FIRST brief into a conversation the user has never written to.
+   *
+   * One message: the card, and a question. The three items follow only when they answer.
+   *
+   * Three reasons, and the transport one is the least important. **Four unprompted
+   * messages from an unknown number is what the spam affordances exist for; one question
+   * is not** — the same reasoning as AMENDMENT-002, one message later. **The reply is
+   * engagement data we were discarding**: a user who answers wanted the brief and a user
+   * who does not, did not, and that distinction is free. And Photon caps a new
+   * conversation at roughly three messages until the recipient replies, so the shape fits
+   * the constraint by construction rather than routing around it — found the hard way,
+   * with `RESOURCE_EXHAUSTED` after the card had already landed and its explanation had
+   * not.
+   */
+  firstContact?: boolean;
   skip?: { skip: boolean; skip_reason: "digest_too_stale" | null };
   log?: (event: Record<string, unknown>) => void;
   /**
@@ -219,6 +235,42 @@ export async function deliverBrief(input: DeliverInput): Promise<DeliveryResult>
     delivered.push(sent);
     await onSent(sent);
     return result;
+  }
+
+  if (input.firstContact === true) {
+    const card = brief.card_url;
+    const blocks: OutboundBlock[] = [];
+    if (typeof card === "string" && card.length > 0 && capabilities.images === true
+        && brief.card_kind === "standard") {
+      blocks.push({ type: "image", url: card, alt: "your relationships this week" });
+    }
+    const n = brief.items.length;
+    blocks.push({
+      type: "text",
+      text: n === 1
+        ? "1 person is waiting on a reply from you — want me to list them?"
+        : `${n} people are waiting on a reply from you — want me to list them?`,
+    });
+
+    const opener: OutboundMessage = {
+      schema_version: "outbound.v1",
+      user_id: brief.user_id,
+      // Keyed like the lead it replaces, with its own suffix: a first brief and a normal
+      // one must never both go out for the same morning.
+      idempotency_key: briefIdempotencyKey(brief, "-opener"),
+      blocks,
+      reply_to_message_id: null,
+      ...(capabilities.images ? { requested_capabilities: ["images"] } : {}),
+    };
+    const result = await dispatch(opener, null);
+    log({
+      msg: "brief.opener_sent",
+      user_id: brief.user_id,
+      items_withheld: brief.items.length,
+      card: blocks.some((b) => b.type === "image"),
+      protocol: result?.protocol ?? null,
+    });
+    return { sent: true, messages, delivered, threaded };
   }
 
   const lead: OutboundMessage = {

@@ -38,6 +38,7 @@ from typing import Protocol
 from boi_intel import chatdb
 from boi_intel.facts import extract_facts, infer_topic
 from boi_intel.threads import ThreadStats, load_threads
+from boi_intel.validator import days_until_next_occurrence
 from boi_intel.voice import resolve_salt
 
 SCHEMA_VERSION = "gist.v1"
@@ -132,6 +133,35 @@ def priority(stats: ThreadStats, state: str) -> float:
 
 def _plural(n: int, word: str) -> str:
     return f"{n} {word}" if n == 1 else f"{n} {word}s"
+
+
+def drop_expired_dates(facts: dict[str, list[str]], days_silent: int) -> dict[str, list[str]]:
+    """`facts` with every date the thread has already outrun removed.
+
+    **Filtered HERE, not only at the validator, and the reason is not efficiency.** A gist
+    is a claim about what is pending. A gist that advertises `the 14th` on a thread silent
+    for 54 days is *itself wrong* — the thing it names is not pending — and the drafter is
+    supposed to be working from true gists.
+
+    The loop it removes: the gist said "mentioned friday", `facts` licensed `friday`, the
+    model used what it was handed, and the validator rejected it — twice, at two API calls
+    per item, arriving at zero drafts. The system tempted itself and then punished itself.
+
+    The rule is `validator.days_until_next_occurrence`, applied at construction: a
+    date-shaped specific whose next occurrence is nearer than the silence is gone. The
+    validator keeps its own copy as the BACKSTOP — a model can still invent a date nobody
+    handed it, and a backstop that never fires is still the reason you can sleep.
+    """
+    horizon = days_until_next_occurrence
+    kept = [d for d in facts.get("dates", []) if not _outrun(d, days_silent, horizon)]
+    if len(kept) == len(facts.get("dates", [])):
+        return facts
+    return {**facts, "dates": kept}
+
+
+def _outrun(value: str, days_silent: int, horizon) -> bool:
+    limit = horizon(value)
+    return limit is not None and days_silent > limit
 
 
 def deadline_for(stats: ThreadStats, facts: dict[str, list[str]]) -> str | None:
@@ -234,6 +264,10 @@ class SqlGistProducer:
         # AMENDMENT-001: prefer the allowlist the Mac already extracted. On the chat.db
         # path `stats.facts` is None and this re-extracts from the tail, unchanged.
         facts = stats.facts if stats.facts is not None else extract_facts(stats.recent_inbound_text)
+        # Expired dates never enter the gist. See `drop_expired_dates`: a gist that names
+        # a date which has already passed is a false claim about what is pending, and it
+        # is also what tempts the drafter into writing one.
+        facts = drop_expired_dates(facts, stats.days_silent)
         topic = infer_topic(stats.recent_inbound_text)
         deadline = deadline_for(stats, facts)
 

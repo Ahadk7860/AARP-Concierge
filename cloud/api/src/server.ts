@@ -3,7 +3,7 @@
 
 import Fastify, { type FastifyInstance } from "fastify";
 import type { Logger } from "pino";
-import { StubChannel, type Channel } from "../../shared/src/index.js";
+import { StubChannel, StubRegistrar, type Channel, type Registrar } from "../../shared/src/index.js";
 import { makeLogger } from "./logging.js";
 import { send, validation } from "./errors.js";
 import { registerIngestRoutes } from "./routes/ingest.js";
@@ -19,6 +19,16 @@ export type BuildOptions = {
    * from the foundation — CONTRACTS.md § 10. Nothing above the interface knows which.
    */
   channel?: Channel;
+  /**
+   * AMENDMENT-002. **Required in `SignupDeps`, optional here and defaulted to the stub**
+   * — a server built with no transport still starts, and still cannot select the retired
+   * cold open by omission, because there is no longer a path that sends first.
+   *
+   * The stub hands out fake `+1555…` lines, so a deployment that forgets to pass a real
+   * one produces obviously-wrong deep links rather than quietly reverting to a flow we
+   * have evidence is harmful. Loud beats plausible.
+   */
+  registrar?: Registrar;
   /** Injected so pairing expiry is tested by moving the clock, not by sleeping. */
   now?: Clock;
   /** Shared so a test can construct one with a known window. Per-process; see NOTES. */
@@ -91,8 +101,13 @@ export function buildServer(options: BuildOptions = {}): FastifyInstance {
     },
   );
 
-  registerIngestRoutes(app, log);
-  registerSignupRoutes(app, log, { channel, now, ...(options.pairLimiter !== undefined ? { pairLimiter: options.pairLimiter } : {}) });
+  registerIngestRoutes(app, log, { channel });
+  registerSignupRoutes(app, log, {
+    channel,
+    now,
+    registrar: options.registrar ?? new StubRegistrar(),
+    ...(options.pairLimiter !== undefined ? { pairLimiter: options.pairLimiter } : {}),
+  });
   registerWebhookRoutes(app, log, { channel });
   return app;
 }

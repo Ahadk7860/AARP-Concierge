@@ -66,6 +66,47 @@ FROZEN='^(contracts/|prompts/(CONTRACTS|MERGE-POLICY|TRACK-REVIEW|WORKTREE-PROTO
 # union from a deleted field. It is narrowed by review instead: the merge reads the diff.
 ALLOWED_FROZEN='^(prompts/CONTRACTS\.md$|contracts/transcripts/spectrum/|cloud/shared/src/contracts\.ts$|contracts/schema/(digest|brief|draft_bundle)\.v1\.json$|contracts/fixtures/digest/|mac/Sources/BoiKit/Contracts\.swift$|intelligence/boi_intel/contracts\.py$)'
 
+# AMENDMENT-002B — the rest of prompt 08, ruled 4 Aug after track E hit three walls.
+# A separate variable from AMENDMENT_002 for the same reason 002 is separate from 001:
+# appending to a neighbouring line is how a grant gets silently dropped.
+#
+#   pairing.test.ts     Track D's suite asserts the OLD onboarding as behaviour. Ten tests.
+#                       Granted to REWRITE, not to delete — see the mapping rule below.
+#   db/migrations/      the token does not fit `check (code ~ '^[0-9]{6}$')`.
+#   stub-registrar.ts   its own file; `stub-channel.ts` would under-describe its contents.
+#   shared/src/index.ts a one-line `export *` append.
+AMENDMENT_002B='^(cloud/api/src/pairing\.test\.ts$|cloud/db/migrations/|cloud/shared/src/(stub-registrar\.ts|index\.ts)$)'
+
+# AMENDMENT-002C — `server.ts`, granted 4 Aug. Its own variable, per the rule.
+#
+# Track E's diagnosis is why this is granted rather than deferred: `registrar` is
+# currently OPTIONAL on `SignupDeps` with a legacy fallback, which is why track D's ten
+# pairing tests are still green. That is not the amendment landing softly — it means the
+# cold-open flow the test proved harmful is STILL THE DEFAULT, and stays the default
+# until `buildServer` forwards a registrar. Make it required so the old path cannot be
+# selected by omission, and let those ten go red under the mapping table.
+AMENDMENT_002C='^cloud/api/src/server\.ts$'
+
+# AMENDMENT-002D — `routes/ingest.ts`, granted 4 Aug for prompt 09's last criterion.
+# Own variable, per the rule.
+#
+# "After the first sync, Boi sends the corpus size and the exact phrase to text back" has
+# to fire when the FIRST digest lands, which is the ingest route. The 8am tick is the one
+# seam track E already owns; this is the other end of the same requirement and it was
+# never granted.
+AMENDMENT_002D='^cloud/api/src/routes/ingest\.ts$'
+
+# AMENDMENT-003 — prompt 08, the nullable `digest_as_of`. Its own variable, same reason
+# as 002: a grant appended to a neighbouring line can be lost to a concurrent edit with
+# no conflict and no error, and the gate then goes green because the rule that would have
+# failed was removed from the gate.
+#
+# This is the FIRST grant against contracts/openapi/. The schema files were named
+# individually in ALLOWED_FROZEN and the OpenAPI document was not — an omission, not a
+# decision. Track F found the contract gap; track E found the missing grant before
+# hitting it.
+AMENDMENT_003='^contracts/openapi/boi-api\.v1\.yaml$'
+
 # AMENDMENT-002 — prompts 08 and 09, the onboarding inversion. Kept as its OWN variable
 # rather than appended to AMENDMENT_001, because a grant added to a shared line can be
 # lost when two authors edit that line concurrently. That is exactly what happened here:
@@ -78,6 +119,17 @@ AMENDMENT_002='^(cloud/api/src/welcome\.ts$|cloud/api/src/welcome\.test\.ts$|clo
 # amendment names these files explicitly. Not frozen, just not normally track E's.
 AMENDMENT_001='^(mac/Sources/BoiKit/(DigestBuilder|Fact[A-Za-z]*)\.swift$|mac/Tests/BoiKitTests/(Digest|Fact[A-Za-z]*)Tests\.swift$|intelligence/boi_intel/(gist|threads)\.py$|intelligence/tests/test_(gist|threads|facts)\.py$|scripts/(check_voice_pack_leak|validate_fixtures)\.py$|cloud/api/src/(schemas\.ts|schemas\.test\.ts|differential\.test\.ts|signup\.test\.ts|routes/signup\.ts)$|cloud/db/src/repository\.ts$|intelligence/boi_intel/(prompts|validator)\.py$|intelligence/tests/test_(prompts|validator|draft)\.py$|scripts/make_synthetic_chatdb\.py$)'
 
+# EVERY amendment variable, in one place. Track E found the bug this fixes: FROZEN is
+# checked first and exits, so the amendment variables — consulted only in the ownership
+# loop below — were never reached by a frozen path. The grants existed, were correct, and
+# were unreachable by control flow. A check that says OUT OF BOUNDS about a path its own
+# file explicitly permits.
+#
+# ADD A NEW AMENDMENT VARIABLE HERE AND NOWHERE ELSE. Both the frozen escape and the loop
+# read this one string, so a grant cannot be reachable in one and invisible in the other.
+AMENDMENTS="$AMENDMENT_001|$AMENDMENT_002|$AMENDMENT_002B|$AMENDMENT_002C|$AMENDMENT_002D|$AMENDMENT_003"
+SANCTIONED="$ALLOWED_FROZEN|$AMENDMENTS"
+
 if ! git rev-parse --verify --quiet "$BASE" >/dev/null; then
   echo "cannot resolve base ref '$BASE' — refusing to report a pass I cannot justify" >&2
   exit 2
@@ -86,8 +138,8 @@ changed="$(git diff --name-only "$BASE"...HEAD)"
 
 frozen_hits="$(echo "$changed" | grep -E "$FROZEN" || true)"
 if [ "$LETTER" = "e" ] && [ -n "$frozen_hits" ]; then
-  sanctioned="$(echo "$frozen_hits" | grep -E "$ALLOWED_FROZEN" || true)"
-  frozen_hits="$(echo "$frozen_hits" | grep -Ev "$ALLOWED_FROZEN" || true)"
+  sanctioned="$(echo "$frozen_hits" | grep -E "$SANCTIONED" || true)"
+  frozen_hits="$(echo "$frozen_hits" | grep -Ev "$SANCTIONED" || true)"
   if [ -n "$sanctioned" ]; then
     echo "FROZEN, SANCTIONED FOR TRACK E — must be in NOTES.md and read line-by-line at merge:"
     echo "$sanctioned" | sed 's/^/  /'
@@ -121,6 +173,22 @@ while IFS= read -r f; do
   fi
   if [ "$LETTER" = "e" ] && echo "$f" | grep -Eq "$AMENDMENT_002"; then
     echo "AMENDMENT-002 (onboarding surface, granted by the amendment): $f"
+    continue
+  fi
+  if [ "$LETTER" = "e" ] && echo "$f" | grep -Eq "$AMENDMENT_002B"; then
+    echo "AMENDMENT-002B (granted 4 Aug — pairing.test.ts DELETES assertions, read it at merge): $f"
+    continue
+  fi
+  if [ "$LETTER" = "e" ] && echo "$f" | grep -Eq "$AMENDMENT_002C"; then
+    echo "AMENDMENT-002C (server.ts — makes the new flow the DEFAULT, read at merge): $f"
+    continue
+  fi
+  if [ "$LETTER" = "e" ] && echo "$f" | grep -Eq "$AMENDMENT_002D"; then
+    echo "AMENDMENT-002D (ingest route — the first-sync greeting): $f"
+    continue
+  fi
+  if [ "$LETTER" = "e" ] && echo "$f" | grep -Eq "$AMENDMENT_003"; then
+    echo "AMENDMENT-003 (FROZEN OpenAPI, granted by the amendment — read this diff at merge): $f"
     continue
   fi
   if echo "$f" | grep -Eq "$SHARED"; then

@@ -34,7 +34,7 @@ import re
 import sys
 
 from boi_intel.contracts import FORBIDDEN_PHRASES
-from boi_intel.facts import extract_facts
+from boi_intel.facts import MONTHS, WEEKDAYS, extract_facts
 from boi_intel.prompts import hours_stale
 from boi_intel.register import EMOJI
 
@@ -240,9 +240,89 @@ def _licenses(licensed: str, found: str) -> bool:
     return _token_aligned(found, licensed) or _token_aligned(licensed, found)
 
 
+# ------------------------------------------------------- specifics that have EXPIRED
+#
+# `CONTRACTS.md` § 1 has always said a specific is "falsifiable against a calendar."
+# **Nothing ever checked one.** `gist.facts` licenses a token because it APPEARED IN THE
+# CORPUS, and the corpus can be months old — so `the 14th`, extracted from a message sent
+# 54 days ago, licensed a draft saying "friday the 14th works for me" and committed the
+# user to a date that had already gone. A confident wrong commitment in their own name,
+# which is the failure the whole gate exists to prevent, arriving through the gate.
+#
+# The rule, and it is computable without knowing the year: **a date-shaped specific is
+# unlicensed when the gist has been silent longer than the maximum distance to that
+# date's next occurrence.** The next `friday` is at most 7 days out; the next `the 14th`
+# at most 31; a month-and-day at most 366. At `days_silent = 54` the first two have
+# certainly passed and the third has not.
+#
+# It deliberately does NOT over-block. A three-day-old thread mentioning `the 14th` stays
+# licensed, because 3 < 31 and that is exactly the case the product is best at: a recent
+# thread with a real pending date is where a committing draft is worth most. The blunt
+# version — no bare ordinal past 30 days — would have thrown that away for a simpler rule.
+#
+# A specific carrying a YEAR is skipped: `8/14/2026` is unambiguous and this reasoning
+# does not apply to it. Rare, because `facts` entries are capped at three words and forty
+# characters, but a rule that blocked "March 14 2027" would simply be wrong.
+
+#: Weekdays recur weekly, bare ordinals monthly, month-and-day yearly.
+_NEXT_WITHIN_DAYS_WEEKDAY = 7
+_NEXT_WITHIN_DAYS_ORDINAL = 31
+_NEXT_WITHIN_DAYS_MONTH_DAY = 366
+#: `today`, `tonight`, `tomorrow` name a day at most one away.
+_NEXT_WITHIN_DAYS_RELATIVE = 2
+
+_YEAR = re.compile(r"(?:19|20)\d{2}")
+_WEEKDAY = re.compile(rf"\b(?:{'|'.join(WEEKDAYS)})\b", re.IGNORECASE)
+_MONTH_NAME = re.compile(rf"\b(?:{'|'.join(MONTHS)})\b", re.IGNORECASE)
+_ORDINAL = re.compile(r"\b\d{1,2}(?:st|nd|rd|th)\b", re.IGNORECASE)
+_NUMERIC_DATE = re.compile(r"\b\d{1,2}[/-]\d{1,2}\b")
+_RELATIVE = re.compile(r"\b(?:today|tonight|tomorrow)\b", re.IGNORECASE)
+
+
+def days_until_next_occurrence(value: str) -> float | None:
+    """The furthest this date-shaped specific can be in the future, or `None`.
+
+    `None` means "not date-shaped, or fully qualified with a year" — both of which this
+    rule leaves alone.
+    """
+    if _YEAR.search(value):
+        return None
+    if _MONTH_NAME.search(value) or _NUMERIC_DATE.search(value):
+        return _NEXT_WITHIN_DAYS_MONTH_DAY
+    if _WEEKDAY.search(value):
+        return _NEXT_WITHIN_DAYS_WEEKDAY
+    if _ORDINAL.search(value):
+        return _NEXT_WITHIN_DAYS_ORDINAL
+    if _RELATIVE.search(value):
+        return _NEXT_WITHIN_DAYS_RELATIVE
+    return None
+
+
+def expired_specifics(text: str, gist: dict) -> list[str]:
+    """Date-shaped specifics in `text` that the gist's own silence has already outrun."""
+    silent = gist.get("days_silent")
+    if not isinstance(silent, (int, float)):
+        return []
+    found = extract_facts([text])
+    expired: list[str] = []
+    for value in found.get("dates", []):
+        if _normalise(value) in HEDGES:
+            continue
+        horizon = days_until_next_occurrence(value)
+        if horizon is not None and silent > horizon:
+            expired.append(value)
+    return expired
+
+
 def fabrication_failures(candidates: list[dict], gist: dict) -> bool:
     facts = gist.get("facts", {})
-    return any(fabricated_specifics(c["text"], facts) for c in candidates)
+    # Two ways a specific fails: the gist never carried it, or the gist carried it so long
+    # ago that it has passed. Both are the same defect from the user's side — a date in
+    # their own name that is not true.
+    return any(
+        fabricated_specifics(c["text"], facts) or expired_specifics(c["text"], gist)
+        for c in candidates
+    )
 
 
 def forbidden_phrases_in(text: str) -> list[str]:

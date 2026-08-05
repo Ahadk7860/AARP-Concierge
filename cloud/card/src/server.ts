@@ -3,11 +3,29 @@
 // A separate process from the API on 3041: rendering is CPU-bound and a slow card must
 // not sit in front of a digest upload.
 
+import { timingSafeEqual } from "node:crypto";
+
 import Fastify, { type FastifyInstance } from "fastify";
 import { digestSchema } from "../../api/src/schemas.js";
 import { renderCard } from "./render.js";
 import { CARD_HEIGHT, CARD_WIDTH } from "./render.js";
 import { putCard, readCard, signedCardPath, verifyCardSignature } from "./store.js";
+
+/**
+ * The write secret. **Fails closed when unset**, and that is deliberate.
+ *
+ * A development default here would be the same mistake as
+ * `dev-card-secret-change-me` was for the URL signature: a value that works everywhere,
+ * including in production, including for anybody who has read this file. Unset means every
+ * write is refused — which breaks the end-to-end runner loudly on the first render rather
+ * than quietly accepting writes from the internet.
+ */
+function writeAuthorised(header: string | string[] | undefined): boolean {
+  const expected = process.env["BOI_CARD_WRITE_SECRET"];
+  if (expected === undefined || expected === "") return false;
+  if (typeof header !== "string" || header.length !== expected.length) return false;
+  return timingSafeEqual(Buffer.from(header, "utf8"), Buffer.from(expected, "utf8"));
+}
 
 export function buildCardServer(): FastifyInstance {
   const app = Fastify({ logger: false, bodyLimit: 8 * 1024 * 1024 });
@@ -62,7 +80,26 @@ export function buildCardServer(): FastifyInstance {
   // `POST /cards/:user_id` rather than a flag on `/render` because storing is a different
   // operation with a different lifetime: `/render` has no user and nothing to delete.
 
-  app.post("/cards/:user_id", async (req, reply) => {
+  // ---------------------------------------------------------------- the WRITE route
+  //
+  // `/internal/cards/:user_id`, NOT `/cards/:user_id`, and the prefix is the point.
+  //
+  // The public hostname is fronted by a Cloudflare tunnel whose ingress matches on
+  // hostname and PATH ONLY — a Go regex, `^/cards/`, with no method matching available.
+  // A write route sharing that prefix with the read route is forwarded by the edge no
+  // matter what verb it carries, because the edge cannot tell them apart. Moving it out
+  // of the prefix is what makes the existing rule exclude it.
+  //
+  // AND it is authenticated anyway, which is not redundancy for its own sake: relying on
+  // the edge rule alone means a mistyped regex or a deleted DNS record silently reopens
+  // an unauthenticated write into any user's card directory, and nothing in the app would
+  // notice. The failure mode is publishing somebody's relationship data.
+  app.post("/internal/cards/:user_id", async (req, reply) => {
+    if (!writeAuthorised(req.headers["x-boi-card-write"])) {
+      // 401 and nothing else. Not "the secret is wrong", not "the secret is unset" — a
+      // caller who is not authorised learns only that.
+      return reply.code(401).send({ error: "unauthorized" });
+    }
     const { user_id: userId } = req.params as { user_id: string };
     if (!/^usr_[A-Za-z0-9]{1,32}$/.test(userId)) {
       return reply.code(400).send({ error: "validation", detail: "user_id" });

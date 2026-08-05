@@ -12,6 +12,7 @@
 // first attempt is the outcome to be most suspicious of.
 
 import { execFile } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -24,24 +25,26 @@ import type {
   Gist,
   OutboundMessage,
 } from "../../shared/src/index.js";
-import { StubChannel } from "../../shared/src/index.js";
+import { StubChannel, type Channel } from "../../shared/src/index.js";
 import { buildServer } from "../../api/src/server.js";
 import { buildCardServer } from "../../card/src/server.js";
 import { runForUser } from "../../brief/src/run.js";
+import { handleInbound } from "../../brief/src/inbound.js";
 import { bridgeDeps, gistOutcomeFor, draftsForGists } from "../../intelligence-bridge/src/index.js";
 import {
-  createUser,
-  issuePairingCode,
+  findUserIdByPhone,
+  registerDevice,
   latestDigest,
   listBriefs,
+  getUser,
   listOutboundMessages,
   listRelationships,
-  newPairingCode,
   unsafeScopeFromUserId,
   type UserScope,
 } from "../../db/src/index.js";
 import { migrate } from "../../db/src/migrate.js";
 import { renderCardForDigest } from "./card-client.js";
+import { dryRunSpectrumChannel, writeDryRunReport } from "./spectrum-dry-run.js";
 
 const run = promisify(execFile);
 
@@ -107,6 +110,15 @@ export type E2EOptions = {
    * is never attached to a brief.
    */
   corpusProfile?: "minimal" | "rich";
+  /**
+   * `spectrum-dry` swaps `StubChannel` for the REAL `SpectrumChannel` over a port that
+   * records instead of transmitting — prompt 10's pre-send step 3.
+   *
+   * Everything above the port is production: the composer, the card, `deliverBrief`, the
+   * block-to-part mapping. The only thing that does not happen is the request, which is
+   * what makes it the last thing worth reading before a real phone rings.
+   */
+  channel?: "stub" | "spectrum-dry";
   /** Reuse an existing account, to exercise idempotency on a second run. */
   reuseScope?: UserScope;
   artifactRoot?: string;
@@ -176,10 +188,59 @@ export async function runEndToEnd(options: E2EOptions = {}): Promise<E2EResult> 
     });
 
   // ---------------------------------------------------------------- 3. servers
-  const channel = new StubChannel();
+  // THE CHANNEL. Named in the seam report, because a run that quietly used a stub and a
+  // run that exercised the real mapping must not be told apart by reading the source.
+  const dryRun = options.channel === "spectrum-dry"
+    ? dryRunSpectrumChannel({
+      handle: process.env["SPECTRUM_DRY_RUN_HANDLE"] ?? "+15550100001",
+      line: process.env["SPECTRUM_LINE_E164"] ?? "+16465792868",
+      log,
+    })
+    : null;
+  const channel: Channel = dryRun?.channel ?? new StubChannel();
+
+  // WHAT THE RUNNER HANDED THE CHANNEL, recorded here rather than read off the stub.
+  //
+  // `StubChannel.sent` exists; `SpectrumChannel` has no such thing and should not — a
+  // production channel that accumulated every message it ever sent is a memory leak with
+  // a nice name. Wrapping `send` records the same evidence for either implementation, and
+  // keeps every assertion in `e2e.test.ts` working across the substitution.
+  const handed: OutboundMessage[] = [];
+  const channelSend = channel.send.bind(channel);
+  channel.send = async (msg: OutboundMessage) => {
+    handed.push(msg);
+    return channelSend(msg);
+  };
   const api = buildServer({ channel });
   await api.listen({ port: 0, host: "127.0.0.1" });
   const apiPort = (api.server.address() as { port: number }).port;
+
+  // THE WRITE SECRET, for this run only.
+  //
+  // Nothing in this repo loads `.env` — `pool.ts` and every other consumer read
+  // `process.env` and fall back to a default, so a value sitting in `.env` is
+  // documentation until an operator exports it. A run that quietly used the empty string
+  // would be testing the 401 path and reporting it as a card failure.
+  // THE SIGNING SECRET, pinned for this process and everything it spawns.
+  //
+  // `vite-node` loads `.env` into `process.env`; `vitest` does NOT. So a card minted by a
+  // vitest parent and verified by a `vite-node` child renderer are signed with two
+  // different keys and every fetch is a 401 that looks like a signature bug. Pinning it
+  // here makes the run internally consistent whichever runner started it — and the
+  // deployment rule is the same fact from the other side: **the process environment is
+  // the source of truth, never the file.**
+  if (!process.env["BOI_CARD_SIGNING_SECRET"]) {
+    process.env["BOI_CARD_SIGNING_SECRET"] = randomBytes(32).toString("hex");
+  }
+
+  if (!process.env["BOI_CARD_WRITE_SECRET"]) {
+    process.env["BOI_CARD_WRITE_SECRET"] = randomBytes(24).toString("hex");
+    log({
+      msg: "e2e.write_secret_generated",
+      consequence: "this run authenticates its own card writes. In production the secret "
+        + "must be in the process environment, not merely in .env",
+    });
+  }
 
   let cardBase: string | null = null;
   let cardServer: ReturnType<typeof buildCardServer> | null = null;
@@ -190,33 +251,82 @@ export async function runEndToEnd(options: E2EOptions = {}): Promise<E2EResult> 
   }
 
   try {
-    // -------------------------------------------------------------- 4. signup + pair
-    const scope = options.reuseScope ?? (await stage("signup", "account, phone is the join key",
-      async () => {
-        const phone = `+1555${Math.floor(Math.random() * 9_000_000 + 1_000_000)}`;
-        const { scope } = await createUser({ phone_e164: phone, timezone: TZ });
-        return scope;
-      }));
+    // ------------------------------------------------- 4. signup, and THE USER GOES FIRST
+    //
+    // AMENDMENT-002. This stage used to call `createUser` and then pair with a six-digit
+    // code over `POST /v1/pair` — which exercised neither the signup surface nor the
+    // thread. It now runs the flow the product actually has: sign up over HTTP, read the
+    // deep link off the confirmation page, and send the message the link prefills.
+    const signup = options.reuseScope === undefined
+      ? await stage("signup", "register both handles, resolve the line, prefill the link",
+        async () => {
+          const phone = `+1555${Math.floor(Math.random() * 9_000_000 + 1_000_000)}`;
+          const email = `mac-${Math.random().toString(16).slice(2, 8)}@example.com`;
+          const response = await fetch(`http://127.0.0.1:${apiPort}/signup`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ phone_e164: phone, email, accept_terms: true }),
+          });
+          if (response.status !== 200) throw new Error(`signup failed: ${response.status}`);
+          const html = await response.text();
+          // Parsed out of the page exactly as the user's browser would hand it to
+          // Messages. If this regex stops matching, the link stopped working.
+          const link = /href="sms:([^&"]+)&amp;body=([^"]+)"/.exec(html);
+          if (link === null) throw new Error("no prefilled deep link on the confirmation page");
+          const scope = await findUserIdByPhone(phone);
+          if (scope === null) throw new Error("signup created no account");
+          return {
+            scope,
+            phone,
+            line: link[1] as string,
+            token: decodeURIComponent(link[2] as string),
+          };
+        })
+      : null;
+    const scope = options.reuseScope ?? signup!.scope;
 
     // The device id the Mac derives for itself, so pairing registers the one it will use.
-    const deviceId = await stage("pair", "six digits for a device token", async () => {
+    const deviceId = await stage("pair", "the user sends the prefilled message", async () => {
       const { stdout } = await run("/usr/bin/python3", ["-c",
         "import hmac,hashlib,sys;" +
         "print('dev_'+hmac.new(sys.argv[1].encode(),b'boi.local.device',hashlib.sha256)" +
         ".hexdigest()[:16])", SALT]);
       const id = stdout.trim();
-      const code = newPairingCode();
-      await issuePairingCode(scope, { code, ttl_seconds: 600 });
-      const paired = await fetch(`http://127.0.0.1:${apiPort}/v1/pair`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ code, device_id: id }),
-      });
-      if (paired.status !== 200) throw new Error(`pair failed: ${paired.status}`);
-      const body = (await paired.json()) as { device_token: string };
+
+      if (signup !== null) {
+        // THE USER'S FIRST MESSAGE, carrying the token the link prefilled. Boi replies
+        // with the download link — useful before it asks for anything.
+        const result = await handleInbound({
+          inbound: {
+            schema_version: "inbound.v1",
+            provider: "mock",
+            provider_message_id: `lmsg_${id}`,
+            line_id: "line_e2e",
+            from_handle: signup.phone,
+            user_id: null,
+            received_at: new Date().toISOString(),
+            kind: "text",
+            text: signup.token,
+            protocol: "imessage",
+          },
+          channel,
+          log,
+        });
+        if (result.selection.kind !== "paired") {
+          throw new Error(`pairing failed: ${result.selection.kind}`);
+        }
+        await writeFile(path.join(artifactDir, "first-reply.json"),
+          JSON.stringify(result.sent, null, 2));
+      }
+
+      // The device token. Under AMENDMENT-002 the ACCOUNT is already paired by the time
+      // the app exists, so the Mac no longer types a code — it is issued a token for the
+      // device id it derived. The app-side claim of that token is Track F's onboarding
+      // surface; this is the server half it will consume.
+      const { device_token } = await registerDevice(scope, { device_id: id });
       await writeFile(path.join(artifactDir, "pairing.json"),
         JSON.stringify({ device_id: id, user_id: scope.user_id }, null, 2));
-      return { id, token: body.device_token };
+      return { id, token: device_token };
     });
 
     // -------------------------------------------------------------- 5. THE MAC
@@ -292,6 +402,71 @@ export async function runEndToEnd(options: E2EOptions = {}): Promise<E2EResult> 
       });
     });
 
+    // ------------------------------------------------------- 7b. ASK BOI FOR THE REPORT
+    //
+    // Prompt 09, and the stage that makes the kill test runnable: twenty people asking
+    // for their report and screenshotting it is the same evidence as twenty receiving
+    // one, with no scheduler and no waiting until 8am tomorrow. `report.png` is the
+    // artifact — the card exactly as it arrives in the thread.
+    await stage("report", "send my friends report", async () => {
+      const before = handed.length;
+      const result = await handleInbound({
+        inbound: {
+          schema_version: "inbound.v1",
+          provider: "mock",
+          provider_message_id: `lmsg_report_${Date.now()}`,
+          line_id: "line_e2e",
+          from_handle: (await getUser(scope))?.phone_e164 ?? "",
+          user_id: null,
+          received_at: new Date().toISOString(),
+          kind: "text",
+          text: "send my friends report",
+          protocol: "imessage",
+        },
+        channel,
+        now: eightAmLocal(TZ),
+        timezone: TZ,
+        cardBaseUrl: cardBase,
+        renderCard: async (forScope, digest) => {
+          if (cardBase === null) return { url: null, kind: null };
+          const card = await renderCardForDigest(digest, {
+            baseUrl: cardBase, userId: forScope.user_id, artifactDir, log,
+          });
+          return {
+            url: card.url,
+            kind: card.kind as "standard" | "refusal" | null,
+            card_id: null,
+          };
+        },
+      });
+
+      // The IMAGE THE USER RECEIVED, fetched back from the URL that reached the thread —
+      // not the bytes the renderer returned. A card that renders and does not resolve is
+      // the defect prompt 05 was written to end.
+      const image = handed.slice(before)
+        .flatMap((m) => m.blocks)
+        .find((b) => b.type === "image");
+      if (image !== undefined && image.type === "image") {
+        // Tolerated, and the reason is a real property rather than test noise: the daily
+        // cache stores an ABSOLUTE URL, so a cached card outlives only as long as the
+        // host that issued it. In production that is the long-lived card service and the
+        // signature is good for seven days. Here every run gets an ephemeral port, so a
+        // second run against the same account on the same day holds a URL whose server is
+        // gone. The artifact is evidence; failing the run over it would be the tail
+        // wagging the dog.
+        try {
+          const fetched = await fetch(image.url);
+          await writeFile(path.join(artifactDir, "report.png"),
+            Buffer.from(await fetched.arrayBuffer()));
+        } catch {
+          log({ msg: "report.cached_url_unreachable", url_host: new URL(image.url).host });
+        }
+      }
+      await writeFile(path.join(artifactDir, "report.json"),
+        JSON.stringify(handed.slice(before), null, 2));
+      return result;
+    });
+
     // -------------------------------------------------------------- 8. artifacts
     const outboundRows = await listOutboundMessages(scope);
     // The BRIEF DOCUMENT, not the tick's return value. The first version wrote the
@@ -301,9 +476,17 @@ export async function runEndToEnd(options: E2EOptions = {}): Promise<E2EResult> 
     await writeFile(path.join(artifactDir, "brief.json"),
       JSON.stringify({ outcome, briefs: storedBriefs.map((b) => b.payload) }, null, 2));
     await writeFile(path.join(artifactDir, "outbound.json"),
-      JSON.stringify(channel.sent, null, 2));
+      JSON.stringify(handed, null, 2));
     await writeFile(path.join(artifactDir, "relationships.json"),
       JSON.stringify(await listRelationships(scope), null, 2));
+
+    if (dryRun !== null) {
+      // The dry-run report is the artifact this mode exists to produce. Written before the
+      // seam report so that a run which fails afterwards still leaves the thing a human
+      // was going to read.
+      const text = await writeDryRunReport(artifactDir, dryRun.port.records);
+      process.stdout.write(`\n${text}\n`);
+    }
 
     const report = seamReport(stages);
     await writeFile(path.join(artifactDir, "seam-report.md"), report);
@@ -313,12 +496,12 @@ export async function runEndToEnd(options: E2EOptions = {}): Promise<E2EResult> 
       artifactDir,
       stages,
       scope,
-      sent: channel.sent.length,
+      sent: handed.length,
       cardUrl,
       cardKind,
       briefItems: outboundRows.length,
       status: outcome.status,
-      outbound: channel.sent,
+      outbound: handed,
       briefs: storedBriefs.map((b) => b.payload),
       gists: gistOutcome.gists,
       drafts: [...drafts.values()],

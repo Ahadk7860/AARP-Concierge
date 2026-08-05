@@ -1,0 +1,11 @@
+{
+  "note": "The card. mimeType is explicit because the URL ends in a signature and has no extension to infer from.",
+  "request": {
+    "space": { "id": "any;-;+16465792868", "phone": "shared" },
+    "parts": [
+      { "kind": "attachment", "url": "https://cards.boi.app/cards/usr_x/card_abc.png?exp=1&sig=a", "mimeType": "image/png", "name": "boi-card.png" },
+      { "kind": "text", "text": "3 people worth a message today:" }
+    ]
+  },
+  "response": { "message_id": "msg_01J8ZK6SY", "service": "iMessage", "phone": "+16465792868" }
+}
