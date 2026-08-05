@@ -66,12 +66,15 @@ public struct WakeScheduler {
 
     public enum Error: Swift.Error, Equatable, LocalizedError, Sendable {
         case noFutureWake
+        case authorizedHelperUnavailable
         case commandFailed(operation: String, exitCode: Int32, detail: String)
 
         public var errorDescription: String? {
             switch self {
             case .noFutureWake:
                 return "could not find the next scheduled wake"
+            case .authorizedHelperUnavailable:
+                return "authorized wake helper is not installed; RTC wake scheduling is unavailable"
             case let .commandFailed(operation, exitCode, detail):
                 return "pmset \(operation) failed with exit \(exitCode): \(detail)"
             }
@@ -85,17 +88,20 @@ public struct WakeScheduler {
     private let runCommand: RunCommand
     private let log: Log
 
-    /// Production initializer. Constructing a scheduler is inert; a process is launched
-    /// only when `scheduleNextWake` is called.
-    public init(calendar: Calendar = .current) {
+    /// Ordinary-app initializer. `pmset schedule` requires root, so the app fails closed
+    /// until a separately authorized helper supplies `WakeSchedulerLifecycle.Schedule`
+    /// at the app boundary. This initializer never launches `pmset` and never claims an
+    /// RTC alarm was installed.
+    public init(calendar: Calendar = .current, log: Log? = nil) {
         self.calendar = calendar
-        self.runCommand = { command in try Self.run(command) }
-        self.log = { event, level, fields in
+        self.runCommand = { _ in throw Error.authorizedHelperUnavailable }
+        self.log = log ?? { event, level, fields in
             StructuredLog.emit(event, level: level, fields: fields)
         }
     }
 
-    /// Injection initializer used by tests and future dry-run tooling.
+    /// Deterministic executor seam for tests. A future helper integrates through the
+    /// higher-level lifecycle seam so no command or caller-supplied date crosses IPC.
     public init(calendar: Calendar = .current,
                 runCommand: @escaping RunCommand,
                 log: Log? = nil) {
@@ -132,7 +138,7 @@ public struct WakeScheduler {
     ///
     /// Listing is part of the write: if the scheduler cannot establish current state it
     /// refuses to append a possibly duplicate event. Tests inject `runCommand`; only a
-    /// shipping call site uses the default process runner.
+    /// tests can inject `runCommand`. The ordinary app always fails closed.
     @discardableResult
     public func scheduleNextWake(after date: Date = Date()) throws -> Outcome {
         guard let wake = nextWake(after: date) else {
@@ -162,6 +168,12 @@ public struct WakeScheduler {
         let result: CommandResult
         do {
             result = try runCommand(command)
+        } catch let schedulerError as Error where schedulerError == .authorizedHelperUnavailable {
+            log("wake.authorization_unavailable", .error, [
+                "operation": operation,
+                "detail": schedulerError.localizedDescription,
+            ])
+            throw schedulerError
         } catch {
             let detail = String(describing: error)
             log("wake.command_failed", .error, [
@@ -219,24 +231,4 @@ public struct WakeScheduler {
         return "no command output"
     }
 
-    private static func run(_ command: Command) throws -> CommandResult {
-        let process = Process()
-        let standardOutput = Pipe()
-        let standardError = Pipe()
-        process.executableURL = URL(fileURLWithPath: command.executable)
-        process.arguments = command.arguments
-        process.standardOutput = standardOutput
-        process.standardError = standardError
-
-        try process.run()
-        process.waitUntilExit()
-
-        let outputData = standardOutput.fileHandleForReading.readDataToEndOfFile()
-        let errorData = standardError.fileHandleForReading.readDataToEndOfFile()
-        return CommandResult(
-            exitCode: process.terminationStatus,
-            standardOutput: String(decoding: outputData, as: UTF8.self),
-            standardError: String(decoding: errorData, as: UTF8.self)
-        )
-    }
 }

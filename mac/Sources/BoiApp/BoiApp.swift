@@ -32,8 +32,11 @@ enum Entry {
         // headlessly — otherwise the only way to verify `launchctl list` shows it is to
         // click a button, which is not evidence anybody can reproduce.
         if CommandLine.arguments.contains("--register-agent") {
-            StructuredLog.emit("agent.register", fields: [
-                "result": ScheduledSync.register(),
+            let result = ScheduledSync.register()
+            StructuredLog.emit("agent.register",
+                               level: result.degradation == nil ? .info : .warn,
+                               fields: [
+                "result": result.summary,
                 "status": ScheduledSync.statusDescription,
                 "label": AppInfo.launchAgentLabel,
                 "plist": LaunchAgentPlist.fileName,
@@ -164,6 +167,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 /// helper does not, and its failure mode is silence.
 enum ScheduledSync {
 
+    struct RegistrationResult {
+        let serviceResult: String
+        let wake: WakeSchedulerLifecycle.ScheduleDisposition?
+
+        var summary: String {
+            guard let wake else { return serviceResult }
+            switch wake {
+            case .scheduled(let date):
+                return "\(serviceResult); wake scheduled \(StructuredLog.timestamp(date))"
+            case .alreadyScheduled(let date):
+                return "\(serviceResult); wake already scheduled \(StructuredLog.timestamp(date))"
+            case .failed(let detail):
+                return "\(serviceResult); wake scheduling degraded: \(detail)"
+            }
+        }
+
+        var degradation: String? {
+            if serviceResult.hasPrefix("failed:") {
+                return "Background refresh could not be registered. Boi still works when opened."
+            }
+            guard case .failed(let detail) = wake else { return nil }
+            return "Closed-lid freshness is unavailable: \(detail). "
+                + "Boi still works when opened, but reports can be stale until then."
+        }
+    }
+
     static var service: SMAppService { .agent(plistName: LaunchAgentPlist.fileName) }
 
     @discardableResult
@@ -171,7 +200,7 @@ enum ScheduledSync {
         scheduleNextWake: @escaping WakeSchedulerLifecycle.Schedule = { date in
             try WakeScheduler().scheduleNextWake(after: date)
         }
-    ) -> String {
+    ) -> RegistrationResult {
         let registration: String
         do {
             if service.status == .enabled {
@@ -181,18 +210,11 @@ enum ScheduledSync {
                 registration = "registered"
             }
         } catch {
-            return "failed: \(error)"
+            return RegistrationResult(serviceResult: "failed: \(error)", wake: nil)
         }
 
         let wake = WakeSchedulerLifecycle.scheduleInitialWake(schedule: scheduleNextWake)
-        switch wake {
-        case .scheduled(let date):
-            return "\(registration); wake scheduled \(StructuredLog.timestamp(date))"
-        case .alreadyScheduled(let date):
-            return "\(registration); wake already scheduled \(StructuredLog.timestamp(date))"
-        case .failed(let detail):
-            return "\(registration); wake scheduling degraded: \(detail)"
-        }
+        return RegistrationResult(serviceResult: registration, wake: wake)
     }
 
     static func unregister() {

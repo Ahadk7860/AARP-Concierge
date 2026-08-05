@@ -138,11 +138,18 @@ final class WakeSchedulerLifecycleTests: XCTestCase {
         let onboarding = try String(
             contentsOf: appRoot.appendingPathComponent("PermissionModel.swift"),
             encoding: .utf8)
+        let view = try String(
+            contentsOf: appRoot.appendingPathComponent("OnboardingView.swift"),
+            encoding: .utf8)
 
         XCTAssertTrue(entry.contains("WakeSchedulerLifecycle.runEligibleSync"))
         XCTAssertTrue(entry.contains("WakeScheduler().scheduleNextWake"))
         XCTAssertTrue(entry.contains("WakeSchedulerLifecycle.scheduleInitialWake"))
         XCTAssertTrue(onboarding.contains("ScheduledSync.register()"),
                       "successful onboarding must register the agent and first wake")
+        XCTAssertTrue(onboarding.contains("backgroundFreshnessDegradation = result.degradation"),
+                      "agent enabled and RTC wake authorized are distinct states")
+        XCTAssertTrue(view.contains("wake-freshness-degraded"),
+                      "wake degradation must remain visible while the app stays usable")
     }
 }

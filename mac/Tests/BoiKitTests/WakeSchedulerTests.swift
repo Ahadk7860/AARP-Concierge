@@ -105,6 +105,21 @@ final class WakeSchedulerTests: XCTestCase {
         ])
     }
 
+    func testOrdinaryAppFailsClosedWhenAuthorizedHelperIsUnavailable() throws {
+        let calendar = newYorkCalendar()
+        let logs = LogSpy()
+        let scheduler = WakeScheduler(calendar: calendar, log: logs.record)
+
+        XCTAssertThrowsError(try scheduler.scheduleNextWake(
+            after: date(2026, 8, 5, 9, 0, calendar: calendar))) { error in
+            XCTAssertEqual(error as? WakeScheduler.Error, .authorizedHelperUnavailable)
+        }
+        let failure = try XCTUnwrap(logs.entries.last)
+        XCTAssertEqual(failure.event, "wake.authorization_unavailable")
+        XCTAssertEqual(failure.level, .error)
+        XCTAssertTrue(failure.fields["detail"]?.contains("not installed") == true)
+    }
+
     func testProductionSourceHasNoAlwaysOnOrPrivilegeEscalationEscapeHatch() throws {
         let sourceURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -116,6 +131,7 @@ final class WakeSchedulerTests: XCTestCase {
             "disable" + "sleep",
             "/usr/bin/" + "sudo",
             "arguments: [\"" + "repeat" + "\"",
+            "Process" + "()",
         ]
 
         for token in forbidden {

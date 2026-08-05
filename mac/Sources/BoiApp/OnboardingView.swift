@@ -264,14 +264,23 @@ private struct HandoffScreen: View {
                         .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
                 }
 
-                HStack {
-                    Button("Enable background refresh") {
-                        StructuredLog.emit("agent.register",
-                                           fields: ["result": ScheduledSync.register()])
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Button("Enable background refresh") {
+                            model.enableBackgroundRefresh()
+                        }
+                        Text(ScheduledSync.statusDescription)
+                            .font(.caption).foregroundStyle(.secondary)
+                        Spacer()
                     }
-                    Text(ScheduledSync.statusDescription)
-                        .font(.caption).foregroundStyle(.secondary)
-                    Spacer()
+                    if let degradation = model.backgroundFreshnessDegradation {
+                        Label("Background freshness is degraded",
+                              systemImage: "exclamationmark.triangle.fill")
+                            .font(.callout).foregroundStyle(.orange)
+                        Text(degradation)
+                            .font(.caption).foregroundStyle(.secondary)
+                            .accessibilityIdentifier("wake-freshness-degraded")
+                    }
                 }
                 .padding(.top, 4)
             }
