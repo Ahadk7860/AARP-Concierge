@@ -1257,6 +1257,47 @@ The suite now pins both secrets in `beforeAll` before spawning the child, and
 the process environment is the source of truth, never the file** — `set -a; source .env;
 set +a`, or a process manager that does it.
 
+## The last gate before the send — two findings in the drafts
+
+The Gemini dry run put four real candidates in front of a human for the first time. Both
+findings came from reading them, not from a test.
+
+### A specific the thread had already outrun
+
+Kit's drafts said **"friday the 14th works for me"** on a thread silent for **54 days**.
+Checked, because the reviewer asked the right question and the answer had three possible
+shapes:
+
+- **Cross-item contamination?** No. `the 14th` is in Kit's *own* `facts.dates`. Falsified:
+  a date present only in another item's facts returns `['fabrication_gate']` against Kit's
+  gist, and `[]` against a gist that licenses it. The allowlist is per-gist; nothing merges.
+  All three items looked alike because the synthetic corpus draws every person's inbound
+  lines from **one shared pool** — a fixture artefact.
+- **Stale measurements?** No. `hours_stale = 0.089`; the digest was six minutes old. The
+  prompt-06 gate ran and correctly passed, and would pass on a four-day-old digest too —
+  its question is *"are our measurements current"*, and `"they asked you a question 54 days
+  ago"` is a true present-tense claim.
+- **A third thing, and the real one.** `gist.facts` licenses a token because it appeared in
+  the corpus. Nothing checked whether the date it names is still ahead. See `CONTRACTS.md`
+  § 1 for the rule and the class; the horizon is per-shape (weekday 7, ordinal 31,
+  month-day 366, relative 2) so a recent thread with a genuine pending date keeps its
+  committing draft.
+
+### Four candidates, one opener
+
+Every candidate in the bundle began **"sorry been mia for ages"**. Corpus register rather
+than drafter behaviour — it is drawn from the voice pack's `apology_openers` — but the
+contract gap it exposes is real:
+
+**`draft_bundle.v1` requires two stances within a pair and says nothing about variety
+across a bundle.** Four identical openers satisfy it completely. And **a richer corpus will
+not surface it, because nothing asserts it** — the register would vary and no test would
+notice either way. "In your own voice" is the product's distinctive claim, and a template
+is what it sounds like when it fails.
+
+Not fixed here: it needs either a bundle-level rule in the contract or a variety check in
+the validator, and both are decisions rather than repairs.
+
 ## Runtime resources
 
 `CONTRACTS.md` § 9 has no row for Track E. Reusing Track D's `3041` and Track A's
