@@ -432,24 +432,55 @@ public final class GrantNarrator {
 /// Messages with an empty body and silently loses the pairing token.
 public enum ThreadHandoff {
 
+    /// **Two facts, both knowable from the token store, four states.**
+    ///
+    /// `lineUnresolved` used to be one state covering two situations that are not the same
+    /// thing at all. Paired-with-no-line is a *display* problem — the thread exists on the
+    /// user's phone and Boi is texting into it; only this window cannot open it.
+    /// Unpaired-with-no-line is a *reachability* problem — there is no thread, the handle
+    /// is not on the transport's allowlist, and nothing will arrive however long they wait.
+    ///
+    /// Telling both the same thing meant reassuring the second group into waiting for a
+    /// message that could never come.
     public enum State: Sendable, Equatable {
-        /// A device token exists — the normal path under AMENDMENT-002, where the thread
-        /// was opened before the app was ever installed. The thread is already there.
+        /// Paired, line known. The thread exists and this window can open it — the normal
+        /// path under AMENDMENT-002, where the thread was opened before the app was ever
+        /// installed.
         case paired(link: String)
-        /// Direct download, or pairing never completed. The link carries the token that
-        /// creates the pairing, the same one the confirmation page renders.
+        /// **Paired, line unknown.** The thread is real and Boi is texting into it; only
+        /// this Mac does not know which number to point Messages at. Claiming future
+        /// contact here is *true*, and the split exists so this state can keep saying it.
+        case pairedLineUnknown
+        /// Unpaired, line known. The link carries the token that creates the pairing, the
+        /// same one the confirmation page renders.
         case unpaired(link: String)
-        /// **The line could not be resolved, so there is no honest link to render.**
-        /// The number is per-user and comes from the registrar; a constant would open a
-        /// thread with somebody else's line. Saying so plainly beats a malformed `sms:`
-        /// URL that opens Messages addressed to nothing.
-        case lineUnresolved
+        /// **Unpaired and unreachable — the genuinely broken state.**
+        ///
+        /// No thread, so the handle is not on the transport's allowlist, so Boi cannot text
+        /// them and they cannot text Boi. Track E's live send made this concrete: the
+        /// transport gates a new conversation until the recipient replies, which means the
+        /// user opening the thread is not a convenience — it is the precondition for every
+        /// later message being deliverable. This state gets a **remedy**, not reassurance.
+        case unreachable(signupLink: String?)
 
-        /// The `sms:` URL to open, or nil when there is none to open honestly.
+        /// The URL a button would open, or nil when there is none to open honestly.
         public var link: String? {
             switch self {
             case .paired(let link), .unpaired(let link): return link
-            case .lineUnresolved: return nil
+            case .unreachable(let signupLink): return signupLink
+            case .pairedLineUnknown: return nil
+            }
+        }
+
+        /// Whether this state can honestly promise the user will hear from Boi.
+        ///
+        /// True exactly when a thread exists. The Definition of Done asks for the absence
+        /// of an unsupportable claim rather than the presence of a better sentence, and
+        /// this is the property the copy is checked against.
+        public var contactIsAssured: Bool {
+            switch self {
+            case .paired, .pairedLineUnknown: return true
+            case .unpaired, .unreachable: return false
             }
         }
     }
@@ -475,26 +506,34 @@ public enum ThreadHandoff {
             return Copy(headline: "One tap opens Messages with everything filled in.",
                         detail: "Send it and Boi takes it from there.",
                         button: "Start the conversation")
-        case .lineUnresolved:
-            // **Says only what is known.**
-            //
-            // This used to end "Boi will still text you — this window just cannot open the
-            // thread for you." That is true when paired and **false when not**: an unpaired
-            // user with no resolvable line has no thread and no completed pairing, so
-            // nothing is going to text them.
-            //
-            // `lineUnresolved` collapses two different situations — *we know who you are
-            // but not which line* and *you were never paired* — and pairing is knowable
-            // from the token store, so this is a distinction the code declined to make
-            // rather than one the platform withholds. Prompt 03 splits it and gives each
-            // state accurate copy. Until then the claim is **deleted, not softened**:
-            // whether Boi will text them is the part that cannot yet be determined, so
-            // this says nothing about it.
-            return Copy(headline: "Boi could not work out which number to text you from.",
-                        detail: "Every account gets its own line, and this Mac has not been "
-                            + "told which one is yours — so this window cannot open the "
-                            + "thread for you.",
+        case .pairedLineUnknown:
+            // **This state CAN promise contact, because here it is true.** The thread
+            // exists on their phone and Boi is texting into it; the only thing missing is
+            // this Mac knowing which number to point Messages at. The whole reason for the
+            // four-way split is so this sentence survives while the unreachable state stops
+            // borrowing it.
+            return Copy(headline: "Your thread with Boi is already open on your phone.",
+                        detail: "This Mac has not been told which number Boi texts you "
+                            + "from, so this window cannot open it for you. The thread is "
+                            + "there — look for it in Messages.",
                         button: nil)
+
+        case .unreachable:
+            // **The one genuinely broken state, and it gets a remedy rather than
+            // reassurance.**
+            //
+            // There is no thread, so the handle is not on the transport's allowlist, so
+            // nothing will arrive however long they wait. Track E's live send made the
+            // stakes concrete: the transport gates a new conversation until the recipient
+            // replies, so the user opening the thread is what makes every later message
+            // deliverable at all. Telling this user to sit tight is the worst available
+            // answer — it costs them the one action that would fix it.
+            return Copy(headline: "Boi cannot reach you yet.",
+                        detail: "There is no thread between you and Boi, and this Mac has "
+                            + "not been told which number to use — so Boi cannot text you "
+                            + "and you cannot text Boi. Finishing signup opens the thread, "
+                            + "and everything else follows from there.",
+                        button: "Finish signing up")
         }
     }
 
@@ -503,16 +542,40 @@ public enum ThreadHandoff {
     ///     constant, and `nil` when it could not be resolved.
     ///   - pairingToken: the token that completes pairing, for the unpaired path.
     ///   - isPaired: whether a device token already exists. Ask the token store; this is
-    ///     knowable rather than guessed.
+    ///     knowable rather than guessed — which is what makes the four-way split available
+    ///     at all, unlike the Later case in prompt 02 which the platform genuinely hides.
+    ///   - signupURL: where to send a user who cannot be reached. `GET /signup` on the API
+    ///     host; nil when this Mac has no configured endpoint, in which case the broken
+    ///     state still names the remedy but cannot offer a button for it.
     public static func resolve(handle: String?,
                                pairingToken: String?,
-                               isPaired: Bool) -> State {
-        guard let handle, isUsable(handle) else { return .lineUnresolved }
-        if isPaired { return .paired(link: "sms:\(handle)") }
-        // Unpaired with no token is not a usable link either: it would open a thread and
-        // send nothing that pairs anything, which looks like it worked and does not.
-        guard let pairingToken, !pairingToken.isEmpty else { return .lineUnresolved }
+                               isPaired: Bool,
+                               signupURL: String? = nil) -> State {
+        let lineKnown = handle.map(isUsable) ?? false
+
+        // Paired: the thread exists either way. Only whether this window can open it
+        // differs, and neither branch is a reachability problem.
+        if isPaired {
+            guard let handle, lineKnown else { return .pairedLineUnknown }
+            return .paired(link: "sms:\(handle)")
+        }
+
+        // Unpaired: a link needs both the line and the token. Without the token the link
+        // would open a thread and send nothing that pairs anything — it looks like it
+        // worked and does not — so that is the unreachable case too, and it has the same
+        // remedy.
+        guard let handle, lineKnown, let pairingToken, !pairingToken.isEmpty else {
+            return .unreachable(signupLink: signupURL)
+        }
         return .unpaired(link: link(handle: handle, token: pairingToken))
+    }
+
+    /// The signup page for a Mac that knows its API host. `GET /signup` — see
+    /// `cloud/api/src/routes/signup.ts`.
+    public static func signupURL(apiBase: URL?) -> String? {
+        guard let apiBase else { return nil }
+        let base = apiBase.absoluteString
+        return (base.hasSuffix("/") ? String(base.dropLast()) : base) + "/signup"
     }
 
     /// `sms:<handle>&body=<percent-encoded token>` — byte-for-byte the cloud's shape.

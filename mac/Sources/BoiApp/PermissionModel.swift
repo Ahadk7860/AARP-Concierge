@@ -46,7 +46,7 @@ final class PermissionModel: ObservableObject {
     /// opened actually lives.
     @Published private(set) var bundlePath: String?
     /// The way into the thread. Resolved once the scan completes.
-    @Published private(set) var handoff: ThreadHandoff.State = .lineUnresolved
+    @Published private(set) var handoff: ThreadHandoff.State = .unreachable(signupLink: nil)
 
     private var timer: Timer?
     private var relaunchWatchdog: Timer?
@@ -359,14 +359,30 @@ final class PermissionModel: ObservableObject {
     /// the normal path and unpaired means a direct download or a pairing that never
     /// completed.
     private func resolveHandoff() -> ThreadHandoff.State {
-        let state = ThreadHandoff.resolve(handle: assignedLine(),
-                                          pairingToken: pairingToken(),
-                                          isPaired: EnvironmentTokenStore().identity() != nil)
-        if state == .lineUnresolved {
-            StructuredLog.emit("handoff.line_unresolved", level: .warn, fields: [
-                "detail": "no assigned line for this user; rendering the honest message "
-                    + "rather than a malformed sms: link",
+        let state = ThreadHandoff.resolve(
+            handle: assignedLine(),
+            pairingToken: pairingToken(),
+            isPaired: EnvironmentTokenStore().identity() != nil,
+            signupURL: ThreadHandoff.signupURL(
+                apiBase: Uploader.Configuration.fromEnvironment()?.baseURL))
+
+        // Logged apart, because they are different problems with different owners. A
+        // paired user missing the line is a display gap on this Mac; an unreachable user
+        // cannot receive anything at all, and that is the one worth a warning.
+        switch state {
+        case .pairedLineUnknown:
+            StructuredLog.emit("handoff.line_unknown", fields: [
+                "paired": true,
+                "detail": "thread exists; this Mac does not know the assigned line",
             ])
+        case .unreachable(let signupLink):
+            StructuredLog.emit("handoff.unreachable", level: .warn, fields: [
+                "paired": false,
+                "has_signup_link": signupLink != nil,
+                "detail": "no thread, so the transport will not carry a brief at all",
+            ])
+        case .paired, .unpaired:
+            break
         }
         return state
     }
@@ -433,7 +449,7 @@ final class PermissionModel: ObservableObject {
             // better. Ending on two things that are wrong is the wrong reward for having
             // just granted full disk access.
             handoff = resolveHandoff()
-            enter(handoff == .lineUnresolved ? .ready : .handoff)
+            enter(handoff.link == nil ? .ready : .handoff)
         } catch {
             failureDetail = "\(error)"
             enter(.failed)

@@ -352,7 +352,7 @@ final class OnboardingTests: XCTestCase {
                        "+1555/x", "a<b>@c.com", "a\"b@c.com", "+1555?x=1"] {
             XCTAssertEqual(
                 ThreadHandoff.resolve(handle: handle, pairingToken: "tok", isPaired: false),
-                .lineUnresolved,
+                .unreachable(signupLink: nil),
                 "handle \(handle ?? "nil") must not become a link")
         }
     }
@@ -365,10 +365,10 @@ final class OnboardingTests: XCTestCase {
     func testUnpairedWithNoTokenIsNotOfferedAsALink() {
         XCTAssertEqual(
             ThreadHandoff.resolve(handle: "+15551234567", pairingToken: nil, isPaired: false),
-            .lineUnresolved)
+            .unreachable(signupLink: nil))
         XCTAssertEqual(
             ThreadHandoff.resolve(handle: "+15551234567", pairingToken: "", isPaired: false),
-            .lineUnresolved)
+            .unreachable(signupLink: nil))
     }
 
     /// An email handle is legitimate — the registrar registers both the phone number and
@@ -397,7 +397,7 @@ final class OnboardingTests: XCTestCase {
             switch state {
             case .paired(let link), .unpaired(let link):
                 XCTAssertNotNil(URL(string: link), "\(link) is not a parseable URL")
-            case .lineUnresolved:
+            default:
                 continue
             }
         }
@@ -417,7 +417,7 @@ final class OnboardingTests: XCTestCase {
     /// MUTATION: restore the "Boi will still text you" sentence to `lineUnresolved`'s
     /// detail. Red.
     func testTheUnresolvedScreenPromisesNothingItCannotKnow() {
-        let copy = ThreadHandoff.copy(for: .lineUnresolved)
+        let copy = ThreadHandoff.copy(for: .unreachable(signupLink: nil))
         let text = (copy.headline + " " + copy.detail).lowercased()
 
         for claim in ["will still text you", "will text you", "boi will still",
@@ -427,9 +427,8 @@ final class OnboardingTests: XCTestCase {
         }
 
         // It still says the two things it *does* know.
-        XCTAssertTrue(text.contains("has not been told which one is yours"))
-        XCTAssertTrue(text.contains("cannot open the thread"))
-        XCTAssertNil(copy.button, "no link to open means no button pointing at one")
+        XCTAssertTrue(text.contains("cannot text you"))
+        XCTAssertTrue(text.contains("has not been told which number"))
     }
 
     /// The paired state may promise contact, because there it is true — the thread exists.
@@ -440,6 +439,115 @@ final class OnboardingTests: XCTestCase {
         let copy = ThreadHandoff.copy(for: .paired(link: "sms:+15551234567"))
         XCTAssertTrue(copy.detail.lowercased().contains("on its way"))
         XCTAssertNotNil(copy.button)
+    }
+
+    // MARK: - Prompt 03: two facts, four states
+
+    /// **Two knowable facts produce four states, and each says something different.**
+    ///
+    /// MUTATION: collapse `pairedLineUnknown` back into `unreachable` in `resolve`. Red —
+    /// the four states stop being four.
+    func testTwoFactsProduceFourDistinctStates() {
+        let line = "+15551234567"
+        let token = "tok_abc"
+        let signup = "https://api.example.com/signup"
+
+        let states: [ThreadHandoff.State] = [
+            .resolveFixture(paired: true,  lineKnown: true,  token: token, signup: signup),
+            .resolveFixture(paired: true,  lineKnown: false, token: token, signup: signup),
+            .resolveFixture(paired: false, lineKnown: true,  token: token, signup: signup),
+            .resolveFixture(paired: false, lineKnown: false, token: token, signup: signup),
+        ]
+
+        XCTAssertEqual(states[0], .paired(link: "sms:\(line)"))
+        XCTAssertEqual(states[1], .pairedLineUnknown)
+        XCTAssertEqual(states[2], .unpaired(link: ThreadHandoff.link(handle: line, token: token)))
+        XCTAssertEqual(states[3], .unreachable(signupLink: signup))
+
+        // Four states, four distinct copy paths.
+        let headlines = states.map { ThreadHandoff.copy(for: $0).headline }
+        XCTAssertEqual(Set(headlines).count, 4, "two states are saying the same thing")
+        let details = states.map { ThreadHandoff.copy(for: $0).detail }
+        XCTAssertEqual(Set(details).count, 4)
+    }
+
+    /// **No state claims future contact it cannot support.**
+    ///
+    /// Asserted as the *absence* of the claim, per the Definition of Done — not as the
+    /// presence of some better sentence, which a rewrite could satisfy while leaving the
+    /// promise in.
+    ///
+    /// MUTATION: give `unreachable` the `pairedLineUnknown` copy — the exact bug prompt 03
+    /// exists to fix, one state borrowing another's truthful sentence. Red.
+    func testNoStateClaimsContactItCannotSupport() {
+        let claims = ["will text you", "will still text you", "on its way",
+                      "you'll hear from", "boi is texting you", "already open"]
+
+        for state in ThreadHandoff.State.everyShape {
+            guard !state.contactIsAssured else { continue }
+            let copy = ThreadHandoff.copy(for: state)
+            let text = (copy.headline + " " + copy.detail).lowercased()
+            for claim in claims {
+                XCTAssertFalse(text.contains(claim),
+                               "\(state) cannot support the claim \"\(claim)\"")
+            }
+        }
+    }
+
+    /// The converse, so the fix did not flatten every state into saying nothing: where a
+    /// thread genuinely exists, the copy still says so.
+    ///
+    /// MUTATION: strip the reassurance from `pairedLineUnknown`. Red.
+    func testTheStatesWithARealThreadStillSaySo() {
+        for state in [ThreadHandoff.State.paired(link: "sms:+1555"), .pairedLineUnknown] {
+            XCTAssertTrue(state.contactIsAssured)
+            let copy = ThreadHandoff.copy(for: state)
+            let text = (copy.headline + " " + copy.detail).lowercased()
+            XCTAssertTrue(text.contains("already open") || text.contains("on its way"),
+                          "\(state) has a real thread and should say so")
+        }
+    }
+
+    /// **The one broken state offers a remedy the user can act on**, rather than telling
+    /// them to wait for a message the transport will never carry.
+    ///
+    /// Track E's live send is why this matters more than it looks: the transport gates a
+    /// new conversation until the recipient replies, so with no thread opened it will not
+    /// carry a brief at all. Reassurance here costs the user the one action that fixes it.
+    ///
+    /// MUTATION: return `button: nil` for `unreachable`. Red.
+    func testTheUnreachableStateOffersARemedyRatherThanReassurance() {
+        let signup = "https://api.example.com/signup"
+        let state = ThreadHandoff.State.unreachable(signupLink: signup)
+        let copy = ThreadHandoff.copy(for: state)
+
+        XCTAssertNotNil(copy.button, "the broken state must offer an action")
+        XCTAssertEqual(state.link, signup, "and the action goes to signup")
+        XCTAssertTrue(copy.detail.lowercased().contains("signup")
+                      || copy.detail.lowercased().contains("signing up"),
+                      "the remedy is named in the copy, not only on the button")
+    }
+
+    /// A Mac with no configured API host still names the remedy; it just cannot offer a
+    /// button to a URL it does not have. Never a link to nowhere — the same rule as the
+    /// `sms:` one.
+    ///
+    /// MUTATION: make `signupURL` fall back to a hard-coded host. Red.
+    func testAnUnknownAPIHostStillNamesTheRemedyWithoutInventingALink() {
+        XCTAssertNil(ThreadHandoff.signupURL(apiBase: nil))
+        let state = ThreadHandoff.State.unreachable(signupLink: nil)
+        XCTAssertNil(state.link)
+        XCTAssertFalse(ThreadHandoff.copy(for: state).detail.isEmpty)
+    }
+
+    /// The signup URL is built off the configured API base, with no double slash.
+    ///
+    /// MUTATION: drop the trailing-slash trim. Red.
+    func testTheSignupURLIsBuiltFromTheConfiguredHost() {
+        XCTAssertEqual(ThreadHandoff.signupURL(apiBase: URL(string: "https://api.example.com")),
+                       "https://api.example.com/signup")
+        XCTAssertEqual(ThreadHandoff.signupURL(apiBase: URL(string: "https://api.example.com/")),
+                       "https://api.example.com/signup")
     }
 
     // MARK: - The cross-language seam
@@ -709,5 +817,31 @@ final class OnboardingTests: XCTestCase {
                 identity: DeviceIdentity(user_id: "usr_test", device_token: "tok_test")),
             deviceID: "dev_test",
             appVersion: "1.0.0-test")
+    }
+}
+
+// MARK: - Handoff fixtures
+
+extension ThreadHandoff.State {
+
+    /// The four states, one of each shape. Used by the "no unsupported claim" test so it
+    /// iterates the whole space rather than the states somebody remembered — the same
+    /// reason `GrantStage` is `CaseIterable`. Associated values stop the compiler
+    /// synthesising that, so this stands in for it.
+    static var everyShape: [ThreadHandoff.State] {
+        [.paired(link: "sms:+15551234567"),
+         .pairedLineUnknown,
+         .unpaired(link: ThreadHandoff.link(handle: "+15551234567", token: "tok_abc")),
+         .unreachable(signupLink: "https://api.example.com/signup")]
+    }
+
+    /// Builds a state from the two facts that decide it, so a test reads as the truth table
+    /// in the prompt rather than as four calls with different arguments.
+    static func resolveFixture(paired: Bool, lineKnown: Bool,
+                               token: String?, signup: String?) -> ThreadHandoff.State {
+        ThreadHandoff.resolve(handle: lineKnown ? "+15551234567" : nil,
+                              pairingToken: token,
+                              isPaired: paired,
+                              signupURL: signup)
     }
 }
