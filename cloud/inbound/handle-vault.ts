@@ -3,7 +3,7 @@ import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 const ALGORITHM = "aes-256-gcm" as const;
 const NONCE_BYTES = 12;
 const KEY_BYTES = 32;
-const AAD = Buffer.from("boi.contact-handle.v1", "utf8");
+const PURPOSE = "boi.contact-handle.v1";
 
 /** A key is supplied by platform wiring; no key material is ever read from the database. */
 export type HandleVaultKey = {
@@ -24,6 +24,11 @@ export type EncryptedHandle = {
   nonce: string;
   ciphertext: string;
   auth_tag: string;
+};
+
+export type HandleVaultContext = {
+  user_id: string;
+  contact_id: string;
 };
 
 export class HandleVaultError extends Error {
@@ -51,13 +56,14 @@ export type HandleVaultOptions = {
 export class HandleVault {
   constructor(private readonly options: HandleVaultOptions) {}
 
-  async seal(handle: string): Promise<EncryptedHandle> {
+  async seal(context: HandleVaultContext, handle: string): Promise<EncryptedHandle> {
     try {
+      assertContext(context);
       const key = await this.options.keyProvider.active();
       assertKey(key);
       const nonce = this.random(NONCE_BYTES);
       const cipher = createCipheriv(ALGORITHM, key.key, nonce);
-      cipher.setAAD(AAD);
+      cipher.setAAD(aad(context, key.key_version));
       const ciphertext = Buffer.concat([cipher.update(handle, "utf8"), cipher.final()]);
       return {
         algorithm: ALGORITHM,
@@ -71,15 +77,16 @@ export class HandleVault {
     }
   }
 
-  async open(envelope: EncryptedHandle): Promise<string> {
+  async open(context: HandleVaultContext, envelope: EncryptedHandle): Promise<string> {
     try {
+      assertContext(context);
       assertEnvelope(envelope);
       const key = await this.options.keyProvider.byVersion(envelope.key_version);
       if (key === null) throw new Error("unknown key version");
       assertKey(key);
       if (key.key_version !== envelope.key_version) throw new Error("key version mismatch");
       const decipher = createDecipheriv(ALGORITHM, key.key, Buffer.from(envelope.nonce, "base64url"));
-      decipher.setAAD(AAD);
+      decipher.setAAD(aad(context, envelope.key_version));
       decipher.setAuthTag(Buffer.from(envelope.auth_tag, "base64url"));
       return Buffer.concat([
         decipher.update(Buffer.from(envelope.ciphertext, "base64url")),
@@ -93,6 +100,15 @@ export class HandleVault {
   private random(size: number): Buffer {
     return this.options.randomBytes?.(size) ?? randomBytes(size);
   }
+}
+
+function aad(context: HandleVaultContext, keyVersion: string): Buffer {
+  // Length-prefixing through JSON's string representation prevents ambiguous joins.
+  return Buffer.from(JSON.stringify([PURPOSE, ALGORITHM, keyVersion, context.user_id, context.contact_id]), "utf8");
+}
+
+function assertContext(context: HandleVaultContext): void {
+  if (context.user_id.length === 0 || context.contact_id.length === 0) throw new Error("invalid vault context");
 }
 
 function assertKey(key: HandleVaultKey): void {

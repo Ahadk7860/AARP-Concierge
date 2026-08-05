@@ -21,7 +21,7 @@ export type ComposedDraftDelivery = {
  */
 export function composeTapToSend(delivery: DraftDelivery): ComposedDraftDelivery {
   const { text } = delivery;
-  if (delivery.recipient.kind !== "resolved" || delivery.recipient.handle.length === 0) {
+  if (delivery.recipient.kind !== "resolved" || !isUsableMessageHandle(delivery.recipient.handle)) {
     return { text, recipient_state: "unavailable", sms_link: null };
   }
   return {
@@ -29,4 +29,19 @@ export function composeTapToSend(delivery: DraftDelivery): ComposedDraftDelivery
     recipient_state: "resolved",
     sms_link: `sms:${encodeURIComponent(delivery.recipient.handle)}&body=${encodeURIComponent(text)}`,
   };
+}
+
+function isUsableMessageHandle(handle: string): boolean {
+  if (handle.length === 0 || handle.length > 254 || handle.trim() !== handle) return false;
+  // Delimiters could escape the recipient position even if a future URI encoder changes.
+  if (/[\u0000-\u001f\u007f\s&#?]/u.test(handle)) return false;
+  if (/^\+[1-9][0-9]{7,14}$/u.test(handle)) return true;
+  const parts = handle.split("@");
+  if (parts.length !== 2) return false;
+  const [local, domain] = parts;
+  if (local === undefined || domain === undefined || local.length === 0 || local.length > 64) return false;
+  if (!/^[A-Za-z0-9.!$%*+\-/=_^`{|}~]+$/u.test(local) || local.startsWith(".") || local.endsWith(".") || local.includes("..")) return false;
+  if (domain.length > 253 || !domain.includes(".")) return false;
+  return domain.split(".").every((label) =>
+    label.length > 0 && label.length <= 63 && /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/u.test(label));
 }
