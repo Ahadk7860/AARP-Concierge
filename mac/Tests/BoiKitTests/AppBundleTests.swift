@@ -222,6 +222,63 @@ final class LaunchAgentTests: XCTestCase {
     }
 }
 
+// MARK: - The least-privilege wake helper bundle structure
+
+final class AppBundleWakeHelperTests: XCTestCase {
+    private var bundle: String { "/tmp/boi-a/app/Boi.app" }
+
+    func testBuiltBundleEmbedsTheSignedHelperAndDedicatedDaemonPlist() throws {
+        let helper = bundle + "/Contents/Resources/BoiWakeHelper"
+        let plist = bundle + "/Contents/Library/LaunchDaemons/"
+            + WakeHelperContract.plistName
+        guard FileManager.default.fileExists(atPath: helper),
+              FileManager.default.fileExists(atPath: plist) else {
+            throw Fixture.FixtureUnavailable(
+                detail: "no Prompt 03 bundle. Run: bash mac/scripts/build-app.sh")
+        }
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: helper))
+        let value = try XCTUnwrap(PropertyListSerialization.propertyList(
+            from: Data(contentsOf: URL(fileURLWithPath: plist)), format: nil) as? [String: Any])
+        XCTAssertEqual(value["BundleProgram"] as? String, WakeHelperContract.bundleProgram)
+        XCTAssertEqual(value["MachServices"] as? [String: Bool],
+                       [WakeHelperContract.serviceName: true])
+
+        try verifySignature(at: helper)
+        try verifySignature(at: bundle, deep: true)
+    }
+
+    func testBuildScriptSignsNestedHelperBeforeOuterApp() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let script = try String(contentsOf: root.appendingPathComponent("scripts/build-app.sh"))
+        let branchStart = try XCTUnwrap(script.range(of: "if [ \"$SIGN_IDENTITY\" = \"-\" ]"))
+        let branchEnd = try XCTUnwrap(script.range(of: "\nfi\n", range: branchStart.upperBound..<script.endIndex))
+        let signingBlock = String(script[branchStart.lowerBound..<branchEnd.upperBound])
+        let branches = signingBlock.components(separatedBy: "\nelse\n")
+        XCTAssertEqual(branches.count, 2)
+        for branch in branches {
+            let helper = try XCTUnwrap(branch.range(of: "--identifier \"$HELPER_ID\""))
+            let app = try XCTUnwrap(branch.range(of: "--identifier \"$BUNDLE_ID\""))
+            XCTAssertLessThan(helper.lowerBound, app.lowerBound,
+                              "nested helper must be signed before its containing app")
+        }
+        XCTAssertTrue(script.contains("codesign --verify --deep --strict \"$APP\""))
+    }
+
+    private func verifySignature(at path: String, deep: Bool = false) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
+        process.arguments = ["--verify", "--strict"] + (deep ? ["--deep"] : []) + [path]
+        let errors = Pipe()
+        process.standardError = errors
+        try process.run()
+        process.waitUntilExit()
+        let detail = String(decoding: errors.fileHandleForReading.readDataToEndOfFile(),
+                            as: UTF8.self)
+        XCTAssertEqual(process.terminationStatus, 0, detail)
+    }
+}
+
 // MARK: - The heartbeat
 
 final class HeartbeatTests: XCTestCase {

@@ -143,8 +143,12 @@ final class WakeSchedulerLifecycleTests: XCTestCase {
             encoding: .utf8)
 
         XCTAssertTrue(entry.contains("WakeSchedulerLifecycle.runEligibleSync"))
-        XCTAssertTrue(entry.contains("WakeScheduler().scheduleNextWake"))
+        XCTAssertFalse(entry.contains("WakeScheduler().scheduleNextWake"),
+                       "ordinary app must never use the root-only command scheduler")
+        XCTAssertEqual(entry.components(separatedBy: "WakeHelperClient().scheduleNextWake").count - 1,
+                       2, "initial and subsequent wakes must use the authenticated helper")
         XCTAssertTrue(entry.contains("WakeSchedulerLifecycle.scheduleInitialWake"))
+        XCTAssertTrue(entry.contains(".daemon(plistName: WakeHelperContract.plistName)"))
         XCTAssertTrue(onboarding.contains("ScheduledSync.register()"),
                       "successful onboarding must register the agent and first wake")
         XCTAssertTrue(onboarding.contains("backgroundFreshnessDegradation = result.degradation"),

@@ -112,3 +112,74 @@ ad-hoc test bundle cannot prove the authorization boundary.
   import `datetime.UTC`.
 - No privileged helper was installed or invoked, no physical `pmset` command ran, and no
   physical closed-lid/iPhone measurement is claimed by this verification.
+
+## Prompt 03 — least-privilege wake helper
+
+### Implemented boundary
+
+- SwiftPM now builds `BoiWakeHelper` as a separate executable. `build-app.sh` embeds it
+  at `Boi.app/Contents/Resources/BoiWakeHelper`, embeds the dedicated daemon plist at
+  `Contents/Library/LaunchDaemons/app.boi.mac.wake-helper.plist`, signs the nested helper
+  first, and signs the outer app last.
+- The plist uses `BundleProgram=Contents/Resources/BoiWakeHelper` and exposes exactly one
+  Mach service, `app.boi.mac.wake-helper`. The app registers and reports it through
+  `SMAppService.daemon(plistName:)`; the existing LaunchAgent still invokes the main app
+  for Full-Disk-Access-protected sync work.
+- XPC exposes exactly one argument-free method, `reschedule(reply:)`. The caller cannot
+  supply a date, executable, argv, command, or power mode. The root helper uses its own
+  clock and `WakeScheduler` to select the next local 08:00/12:00/17:00/21:00 slot.
+- The privileged process command policy accepts only `/usr/bin/pmset -g sched` and
+  `/usr/bin/pmset schedule wake <internally formatted date>`. Mutations to shell,
+  repeat, sleep, wake-or-power-on, cancel-all, invalid dates, and extra arguments fail.
+- Production caller authorization derives the helper's Team ID from its own signature,
+  then validates the connecting PID against the exact designated requirement for
+  identifier `app.boi.mac` and that Team ID. Missing Team ID (including ad-hoc signing),
+  invalid PID, wrong identifier, wrong team, or unverifiable code fails closed. Tests
+  inject the Team-ID and code-validation seams; production callers cannot inject them.
+- Both initial registration and subsequent headless sync scheduling use the typed helper
+  response through the existing `WakeSchedulerLifecycle.Schedule` seam. Missing,
+  rejected, interrupted, unapproved, or timed-out helper access stays visible as degraded
+  closed-lid freshness and does not make foreground reports unusable.
+
+### What the local dry run proves — and does not prove
+
+- `bash mac/scripts/build-app.sh --out /tmp/boi-a/app` builds the two products, embeds the
+  plist/helper at the required paths, signs nested code before the outer app, lints both
+  service plists, and passes strict code-sign verification.
+- This dry run is ad-hoc. Its `codesign -dv` output says `TeamIdentifier=not set`, so the
+  production helper authorization deliberately rejects it. It proves bundle shape and
+  seal integrity only; it does not prove daemon approval, XPC authorization, or RTC wake.
+- This prompt did not call `SMAppService.register()`, install/bootstrap the daemon, launch
+  `BoiWakeHelper`, or execute physical `pmset`.
+
+### Exact gates before physical validation
+
+1. **Developer gate:** build the helper and outer app with the same valid Developer ID
+   Application certificate (`BOI_CODESIGN_IDENTITY`), hardened runtime, and timestamp;
+   verify identifiers `app.boi.mac.wake-helper` and `app.boi.mac`, matching nonempty Team
+   IDs, nested strict verification, notarization, and stapling. An ad-hoc or differently
+   signed build cannot pass caller authorization.
+2. **Install/user gate:** place that stable notarized bundle in `/Applications/Boi.app`,
+   launch it normally, and have the user choose **Enable background refresh**. Separately,
+   the user must grant Full Disk Access to the main Boi app for Messages reads; the root
+   helper neither receives nor needs that TCC grant.
+3. **Admin/macOS gate:** an administrator must approve the embedded LaunchDaemon in
+   System Settings > General > Login Items when macOS requests it. Do not claim wake
+   scheduling until `SMAppService.daemon(...).status == .enabled`; `requiresApproval`,
+   `notRegistered`, and `notFound` remain degraded states.
+4. **Physical evidence gate:** only after all three gates pass may a signed installed app
+   issue the argument-free XPC request, inspect the resulting scheduled event, close the
+   on-battery Mac, and collect the four-wake battery/iPhone artifacts required by
+   measurement schema v2. No such physical result exists yet.
+
+### Prompt 03 verification
+
+- Focused `WakeScheduler|LaunchAgentTests|AppBundleWakeHelperTests`: 48 passed, 0 failed.
+- Full Swift suite: 310 tests discovered and executed; 309 passed. The sole failure is
+  still the unrelated
+  `DigestAmendment001Tests.testTheFourFieldsMatchWhatPythonComputesFromTheSameCorpus`
+  bootstrap, because this worktree has no project `.venv` and Xcode Python 3.9 cannot
+  import `datetime.UTC`.
+- Bundle dry run, source and embedded LaunchDaemon `plutil -lint`, nested-helper strict
+  verification, outer-app deep strict verification, `git diff --check`, and Track G
+  ownership all passed. No daemon registration or physical power operation was run.

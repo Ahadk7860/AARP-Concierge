@@ -67,6 +67,7 @@ public struct WakeScheduler {
     public enum Error: Swift.Error, Equatable, LocalizedError, Sendable {
         case noFutureWake
         case authorizedHelperUnavailable
+        case helperRejected(detail: String)
         case commandFailed(operation: String, exitCode: Int32, detail: String)
 
         public var errorDescription: String? {
@@ -75,6 +76,8 @@ public struct WakeScheduler {
                 return "could not find the next scheduled wake"
             case .authorizedHelperUnavailable:
                 return "authorized wake helper is not installed; RTC wake scheduling is unavailable"
+            case .helperRejected(let detail):
+                return "authorized wake helper rejected scheduling: \(detail)"
             case let .commandFailed(operation, exitCode, detail):
                 return "pmset \(operation) failed with exit \(exitCode): \(detail)"
             }

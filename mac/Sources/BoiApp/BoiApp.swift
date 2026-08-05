@@ -63,7 +63,7 @@ enum Entry {
 enum HeadlessSync {
     static func run(
         scheduleNextWake: @escaping WakeSchedulerLifecycle.Schedule = { date in
-            try WakeScheduler().scheduleNextWake(after: date)
+            try WakeHelperClient().scheduleNextWake(after: date)
         }
     ) -> Int32 {
         let result = WakeSchedulerLifecycle.runEligibleSync(
@@ -160,11 +160,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 /// Registers the scheduled sync.
 ///
-/// `SMAppService.agent` reads the plist from `Contents/Library/LaunchAgents/` inside this
-/// bundle. That location is the reason it works: an agent registered from inside the app
-/// bundle runs *as* the app, so it inherits the responsible process and therefore the
-/// Full Disk Access grant. A plist dropped in `~/Library/LaunchAgents` pointing at a
-/// helper does not, and its failure mode is silence.
+/// The LaunchAgent still runs the main app for TCC-protected Messages reads. The separate
+/// LaunchDaemon has no TCC role: it exposes one authenticated, argument-free request and
+/// performs only the root-required RTC wake operation.
 enum ScheduledSync {
 
     struct RegistrationResult {
@@ -184,7 +182,7 @@ enum ScheduledSync {
         }
 
         var degradation: String? {
-            if serviceResult.hasPrefix("failed:") {
+            if serviceResult.hasPrefix("agent failed:") {
                 return "Background refresh could not be registered. Boi still works when opened."
             }
             guard case .failed(let detail) = wake else { return nil }
@@ -194,11 +192,14 @@ enum ScheduledSync {
     }
 
     static var service: SMAppService { .agent(plistName: LaunchAgentPlist.fileName) }
+    static var wakeService: SMAppService {
+        .daemon(plistName: WakeHelperContract.plistName)
+    }
 
     @discardableResult
     static func register(
         scheduleNextWake: @escaping WakeSchedulerLifecycle.Schedule = { date in
-            try WakeScheduler().scheduleNextWake(after: date)
+            try WakeHelperClient().scheduleNextWake(after: date)
         }
     ) -> RegistrationResult {
         let registration: String
@@ -210,19 +211,58 @@ enum ScheduledSync {
                 registration = "registered"
             }
         } catch {
-            return RegistrationResult(serviceResult: "failed: \(error)", wake: nil)
+            return RegistrationResult(serviceResult: "agent failed: \(error)", wake: nil)
+        }
+
+        let helperRegistration: String
+        do {
+            if wakeService.status == .enabled {
+                helperRegistration = "wake helper enabled"
+            } else {
+                try wakeService.register()
+                switch wakeService.status {
+                case .enabled:
+                    helperRegistration = "wake helper registered"
+                case .requiresApproval:
+                    helperRegistration = "wake helper requires admin approval"
+                case .notFound:
+                    helperRegistration = "wake helper failed: embedded daemon not found"
+                case .notRegistered:
+                    helperRegistration = "wake helper failed: daemon not registered"
+                @unknown default:
+                    helperRegistration = "wake helper failed: unknown registration status"
+                }
+            }
+        } catch {
+            return RegistrationResult(
+                serviceResult: "\(registration); wake helper failed: \(error)",
+                wake: .failed(detail: "authorized wake helper registration failed")
+            )
+        }
+
+        guard wakeService.status == .enabled else {
+            return RegistrationResult(
+                serviceResult: "\(registration); \(helperRegistration)",
+                wake: .failed(detail: "authorized wake helper requires admin approval")
+            )
         }
 
         let wake = WakeSchedulerLifecycle.scheduleInitialWake(schedule: scheduleNextWake)
-        return RegistrationResult(serviceResult: registration, wake: wake)
+        return RegistrationResult(serviceResult: "\(registration); \(helperRegistration)",
+                                  wake: wake)
     }
 
     static func unregister() {
         try? service.unregister()
+        try? wakeService.unregister()
     }
 
     static var statusDescription: String {
-        switch service.status {
+        "agent: \(description(service.status)); wake helper: \(description(wakeService.status))"
+    }
+
+    private static func description(_ status: SMAppService.Status) -> String {
+        switch status {
         case .enabled: return "enabled"
         case .requiresApproval: return "requires approval in System Settings > Login Items"
         case .notFound: return "not found"
