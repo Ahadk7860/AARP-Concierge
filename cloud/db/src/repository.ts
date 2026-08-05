@@ -28,6 +28,27 @@ import {
 /** 'mismatch' means the first send came back as sms — see migration 006. */
 export type HandleStatus = "unknown" | "imessage" | "mismatch" | "unreachable";
 
+/**
+ * Phase 2 private-storage seam. These interfaces deliberately accept ciphertext and
+ * a per-user key envelope, never a phone number or chat text. Track H owns crypto
+ * wiring; Track I owns implementations and retention-job invocation.
+ */
+export type EncryptedContactHandle = {
+  contact_id: string; ciphertext: Buffer; key_envelope: Buffer;
+  algorithm: "aes-256-gcm";
+};
+export type EncryptedTurn = {
+  turn_id: string; direction: "inbound" | "outbound"; ciphertext: Buffer;
+  key_envelope: Buffer; occurred_at: Date; expires_at: Date;
+};
+export interface Phase2PrivateRepository {
+  putEncryptedContactHandle(scope: UserScope, handle: EncryptedContactHandle): Promise<void>;
+  encryptedContactHandleFor(scope: UserScope, contactId: string): Promise<EncryptedContactHandle | null>;
+  appendEncryptedTurn(scope: UserScope, turn: EncryptedTurn): Promise<void>;
+  /** Deletes only expired encrypted turn rows. Track I must schedule this from its worker. */
+  purgeExpiredTurns(now: Date): Promise<number>;
+}
+
 export type UserRow = {
   user_id: string;
   phone_e164: string;

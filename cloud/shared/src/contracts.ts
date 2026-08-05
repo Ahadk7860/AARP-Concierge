@@ -38,6 +38,23 @@ export type Digest = {
   whole_life: Record<string, unknown> & { as_of: ISO8601 };
 };
 
+/** Phase 2's bounded understanding block. Derived on-device from both sides; never a quote. */
+export type ContextualExemplar = {
+  text: string; answered: "question_from_them" | "statement_from_them" | "plan_unresolved" | "none";
+  register: "casual" | "warm" | "terse" | "formal" | "mixed";
+};
+export type RelationshipUnderstanding = {
+  register: ContextualExemplar["register"];
+  relationship_kind: "close_friend" | "logistics" | "work" | "family" | "dormant_close" | "other";
+  open_thread: string | null;
+  last_exchange_shape: "question_from_them" | "statement_from_them" | "statement_from_you" | "plan_unresolved" | "none";
+  topics: string[]; cadence_norm: string | null; voice_exemplars: ContextualExemplar[];
+};
+export type DigestV2 = Omit<Digest, "schema_version" | "relationships"> & {
+  schema_version: "digest.v2"; synced_through: ISO8601;
+  relationships: Array<Relationship & { understanding: RelationshipUnderstanding }>;
+};
+
 export type VoicePack = {
   schema_version: "voice_pack.v1";
   voice_pack_version: string;
@@ -55,6 +72,22 @@ export type VoicePack = {
   /** THE USER'S OWN SENT MESSAGES ONLY, redacted. is_from_me = 1, always. */
   exemplars: string[];
   as_of: ISO8601;
+};
+
+export type VoicePackV2 = Omit<VoicePack, "schema_version" | "exemplars"> & {
+  schema_version: "voice_pack.v2"; exemplars: ContextualExemplar[];
+};
+
+/** The model may select only this named query during Phase 2. */
+export type ChatQuery = { schema_version: "chat_query.v1"; name: "waiting_on_me"; limit?: number };
+export type DraftDelivery = {
+  schema_version: "draft_delivery.v1"; contact_id: string; text: string;
+  recipient: { kind: "resolved"; handle: string } | { kind: "unavailable" };
+};
+export type ChatLicense = { contact_id: string; display: string; reason: string };
+export type ChatReply = {
+  schema_version: "chat_reply.v1"; kind: "answer" | "decline"; text: string;
+  synced_through: ISO8601; licenses: ChatLicense[]; follow_up_draft?: DraftDelivery;
 };
 
 export type Gist = {

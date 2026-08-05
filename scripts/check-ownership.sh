@@ -10,7 +10,7 @@ set -euo pipefail
 
 LETTER="${1:-}"
 BASE="${BOI_BASE:-main}"
-if [ -z "$LETTER" ]; then echo "usage: check-ownership.sh <a|b|c|d|e|f>" >&2; exit 2; fi
+if [ -z "$LETTER" ]; then echo "usage: check-ownership.sh <a|b|c|d|e|f|g|h|i|j|k|m>" >&2; exit 2; fi
 
 case "$LETTER" in
   a) OWNED='^mac/' ;;
@@ -33,6 +33,14 @@ case "$LETTER" in
   # Uploader and GrantWatcher and may not modify them, which a path regex cannot express
   # — it is enforced by reading the diff at merge.
   f) OWNED='^(mac/Sources/BoiApp/|mac/Sources/BoiKit/GrantNarrator\.swift$|mac/Tests/BoiKitTests/(GrantNarrator|Onboarding)Tests\.swift$)' ;;
+  # Phase 2 tracks. Contracts and shared interfaces remain frozen: foundation alone
+  # changes them, and K only wires real producers to real consumers after merge.
+  g) OWNED='^(mac/Sources/BoiApp/|mac/Sources/BoiKit/WakeScheduler.*\.swift$|mac/Tests/BoiKitTests/WakeScheduler.*Tests\.swift$|scripts/(build|release|notarize)-.*|release/)' ;;
+  h) OWNED='^(cloud/api/src/main\.ts$|cloud/api/src/health.*|cloud/api/src/main.*test\.ts$|cloud/card/src/main\.ts$|cloud/db/src/deploy.*|cloud/db/migrations/|railway\.toml$|Dockerfile$|\.dockerignore$|deploy/)' ;;
+  m) OWNED='^(mac/Sources/BoiKit/Understanding.*\.swift$|mac/Sources/BoiKit/DigestBuilder\.swift$|mac/Sources/BoiKit/VoicePack.*\.swift$|mac/Tests/BoiKitTests/(Understanding|DigestBuilder|VoicePack).*Tests\.swift$)' ;;
+  i) OWNED='^(cloud/channel/src/spectrum-stream.*|cloud/channel/test/spectrum-stream.*|cloud/inbound/|cloud/db/src/(encrypted|turns).*\.ts$|cloud/db/src/repository\.ts$|cloud/db/migrations/)' ;;
+  j) OWNED='^(cloud/chat/|intelligence/boi_intel/chat\.py$|intelligence/tests/test_chat.*\.py$)' ;;
+  k) OWNED='^(cloud/e2e/|mac/Tests/Integration/|prompts/track-k-join/)' ;;
   *) echo "unknown track: $LETTER" >&2; exit 2 ;;
 esac
 

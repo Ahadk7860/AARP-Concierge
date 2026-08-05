@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://boi.app/schema/digest.v2.json",
+  "title": "Digest v2 — bounded relationship understanding leaving the Mac",
+  "description": "Two-way reading, one-way transmission. Never contains another person's words or quoted spans.",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "user_id", "device_id", "generated_at", "synced_through", "corpus", "relationships", "whole_life"],
+  "properties": {
+    "schema_version": {"const": "digest.v2"},
+    "user_id": {"type": "string", "pattern": "^usr_[0-9a-zA-Z]{8,32}$"},
+    "device_id": {"type": "string", "pattern": "^dev_[0-9a-zA-Z]{8,32}$"},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "synced_through": {"type": "string", "format": "date-time", "description": "The newest local message the Mac observed; every answer discloses this horizon."},
+    "corpus": {"$ref": "digest.v1.json#/properties/corpus"},
+    "whole_life": {"$ref": "digest.v1.json#/properties/whole_life"},
+    "relationships": {"type": "array", "items": {"$ref": "#/$defs/relationship"}}
+  },
+  "$defs": {
+    "token": {"type": "string", "minLength": 1, "maxLength": 40, "pattern": "^\\S+(?:\\s+\\S+){0,2}$"},
+    "understanding": {
+      "type": "object", "additionalProperties": false,
+      "required": ["register", "relationship_kind", "open_thread", "last_exchange_shape", "topics", "cadence_norm", "voice_exemplars"],
+      "properties": {
+        "register": {"enum": ["casual", "warm", "terse", "formal", "mixed"]},
+        "relationship_kind": {"enum": ["close_friend", "logistics", "work", "family", "dormant_close", "other"]},
+        "open_thread": {"type": ["string", "null"], "maxLength": 140, "description": "Derived description, never a quote."},
+        "last_exchange_shape": {"enum": ["question_from_them", "statement_from_them", "statement_from_you", "plan_unresolved", "none"]},
+        "topics": {"type": "array", "maxItems": 8, "items": {"$ref": "#/$defs/token"}},
+        "cadence_norm": {"type": ["string", "null"], "maxLength": 140, "description": "Derived description, never a quote."},
+        "voice_exemplars": {"type": "array", "maxItems": 40, "items": {"$ref": "#/$defs/contextual_exemplar"}}
+      }
+    },
+    "contextual_exemplar": {"type": "object", "additionalProperties": false, "required": ["text", "answered", "register"], "properties": {"text": {"type": "string", "minLength": 1, "maxLength": 200, "description": "Redacted USER-authored text only."}, "answered": {"enum": ["question_from_them", "statement_from_them", "plan_unresolved", "none"]}, "register": {"enum": ["casual", "warm", "terse", "formal", "mixed"]}}},
+    "relationship": {"type": "object", "additionalProperties": false, "required": ["contact_id", "display", "is_group", "message_count", "sent_count", "received_count", "days_since_last_contact", "momentum_90d", "initiation_ratio", "last_from_me", "max_gap_days", "unanswered_question", "facts", "as_of", "understanding"], "properties": {"contact_id": {"type": "string", "pattern": "^h_[0-9a-f]{8,32}$"}, "display": {"type": "string", "minLength": 1, "maxLength": 64}, "is_group": {"type": "boolean"}, "message_count": {"type": "integer", "minimum": 0}, "sent_count": {"type": "integer", "minimum": 0}, "received_count": {"type": "integer", "minimum": 0}, "days_since_last_contact": {"type": "integer", "minimum": 0}, "momentum_90d": {"type": "number", "minimum": 0}, "initiation_ratio": {"type": "number", "minimum": 0, "maximum": 1}, "last_from_me": {"type": "boolean"}, "max_gap_days": {"type": "integer", "minimum": 0}, "unanswered_question": {"type": "boolean"}, "facts": {"type": "object"}, "as_of": {"type": "string", "format": "date-time"}, "understanding": {"$ref": "#/$defs/understanding"}}}
+  }
+}
