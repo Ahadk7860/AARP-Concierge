@@ -21,6 +21,26 @@ export function databaseUrl(): string {
 
 let pool: pg.Pool | null = null;
 
+/**
+ * Install the one process-wide pool before any repository function is called.
+ *
+ * Production composition owns the pool lifecycle. Repositories intentionally keep
+ * their default `getPool()` arguments, but this seam makes those defaults resolve to
+ * the exact resource whose URL, readiness, and shutdown the runtime controls.
+ * Replacing a live pool would split readiness from request traffic, so refuse it.
+ */
+export function installPool(next: pg.Pool): void {
+  if (pool !== null && pool !== next) {
+    throw new Error("database_pool_already_installed");
+  }
+  pool = next;
+}
+
+/** True only when `candidate` is the pool repository defaults will use. */
+export function isInstalledPool(candidate: pg.Pool): boolean {
+  return pool === candidate;
+}
+
 export function getPool(): pg.Pool {
   if (pool === null) {
     pool = new pg.Pool({ connectionString: databaseUrl(), max: 8 });

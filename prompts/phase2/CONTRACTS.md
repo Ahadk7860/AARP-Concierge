@@ -19,3 +19,8 @@ fixture, log, or error may contain plaintext handles or counterpart message text
 
 Platform master-secret and key-envelope wiring is Track H's deployment responsibility;
 Track I must not persist a handle until that capability exists.
+
+Production Track H must install its validated Postgres pool through
+`cloud/db/src/pool.ts::installPool` before building the API. Readiness, repository
+defaults, migrations, and shutdown must all observe that one pool; a second implicit
+pool is a contract failure.
