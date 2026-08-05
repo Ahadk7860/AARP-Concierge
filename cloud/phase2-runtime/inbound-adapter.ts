@@ -1,8 +1,7 @@
 // Adapters that wire the Spectrum stream into I's InboundRouter and J's ClosedChat port.
 //
 // Every adapter here is deliberately thin: it maps one existing interface to another
-// without adding logic. The event decoder is intentionally minimal until the Photon SDK
-// is documented (per guardrail: "do not guess Photon cursor/SDK shapes").
+// without adding logic.
 
 import type { SpectrumStreamEvent } from "../channel/src/spectrum-stream.js";
 import type {
@@ -22,24 +21,61 @@ import type { ChatReply } from "../shared/src/contracts.js";
 import type { ChatSelectorProvider } from "../chat/src/selector.js";
 
 // ---------------------------------------------------------------------------
-// Event decoder — intentionally minimal until Photon SDK is documented.
+// Event decoder for the Photon SDK (photon.codes) Message type.
+//
+// The payload from liveStreamPort is { space: Space, message: Message }.
+// Content is a discriminated union; we extract text/reaction/typing from it.
 // ---------------------------------------------------------------------------
+
+interface PhotonPayload {
+  space: { id: string; phone?: unknown };
+  message: {
+    id: string;
+    direction: string;
+    sender?: { id: string; __platform: string };
+    timestamp: Date;
+    content: { type: string; text?: string; emoji?: string; state?: string };
+  };
+}
 
 export class SpectrumEventDecoder implements InboundEventDecoder {
   decode(event: SpectrumStreamEvent): InboundMessage {
-    const payload = event.payload as Record<string, unknown> | null;
-    const from = typeof payload?.from === "string" ? payload.from : "";
-    const text = typeof payload?.text === "string" ? payload.text : null;
-    const kind: InboundMessage["kind"] =
-      typeof text === "string" && text.length > 0 ? "text" : "tapback";
+    const payload = event.payload as PhotonPayload | null;
+    const msg = payload?.message;
+    const space = payload?.space;
+
+    const content = msg?.content;
+    let kind: InboundMessage["kind"] = "tapback";
+    let text: string | null = null;
+
+    if (content !== undefined) {
+      if (content.type === "text") {
+        kind = "text";
+        const raw = content.text;
+        text = typeof raw === "string" && raw.length > 0 ? raw : null;
+      } else if (content.type === "reaction") {
+        kind = "tapback";
+        text = typeof content.emoji === "string" ? content.emoji : null;
+      } else if (content.type === "typing") {
+        kind = "typing";
+      }
+    }
+
+    const phone = (() => {
+      const val = space?.phone;
+      return typeof val === "string" ? val : "unknown";
+    })();
+
     return {
       schema_version: "inbound.v1",
       provider: "spectrum",
       provider_message_id: event.id,
-      line_id: typeof payload?.line_id === "string" ? payload.line_id : "",
-      from_handle: from,
+      line_id: space?.id ?? "",
+      from_handle: phone,
       user_id: null,
-      received_at: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
+      received_at: (msg?.timestamp
+        ? new Date(msg.timestamp).toISOString().replace(/\.\d{3}Z$/, "Z")
+        : new Date().toISOString().replace(/\.\d{3}Z$/, "Z")),
       kind,
       text,
     };

@@ -4,7 +4,7 @@
 import { createHash } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import pg from "pg";
-import { Spectrum, type Space } from "@spectrum-ts/core";
+import { Spectrum, type Space, type SpectrumInstance } from "@spectrum-ts/core";
 import { imessage } from "@spectrum-ts/imessage";
 
 import type {
@@ -38,6 +38,7 @@ import { buildServer } from "./server.js";
 import type { ChatSelectorProvider } from "../../chat/src/selector.js";
 import { enhanceRuntimeWithPhase2, type Phase2Config } from "../../phase2-runtime/compose-runtime.js";
 import { stubStreamPort } from "../../phase2-runtime/stub-stream-port.js";
+import { liveSpectrumStreamPort } from "../../phase2-runtime/live-stream-port.js";
 
 export type SpectrumConfig = {
   projectId: string;
@@ -225,7 +226,7 @@ export function createHandleEnvelopeKeyProvider(masterKey: Buffer): HandleEnvelo
 }
 
 type SpaceOps = { create(handle: string): Promise<Space>; get(id: string): Promise<Space> };
-type SpectrumResource = { spaces: SpaceOps; stop(): Promise<void> };
+type SpectrumResource = { spaces: SpaceOps; stop(): Promise<void>; app?: SpectrumInstance };
 type RuntimeLog = (event: { msg: string; component?: string; outcome?: string }) => void;
 
 export type RuntimeFactories = {
@@ -289,7 +290,7 @@ export const defaultRuntimeFactories: RuntimeFactories = {
       projectSecret: config.projectSecret,
       providers: [imessage.config()],
     });
-    return { spaces: imessage(app).space, stop: () => app.stop() };
+    return { spaces: imessage(app).space, stop: () => app.stop(), app };
   },
   createKeyProvider: createHandleEnvelopeKeyProvider,
   createSpectrumChannel({ port, db, webhookSecret }) {
@@ -547,7 +548,9 @@ export async function startRuntime(
     let phase2: Awaited<ReturnType<typeof enhanceRuntimeWithPhase2>> = null;
     if (config.phase2.enabled && config.phase2.user_id !== null && handleEnvelopeKeys !== null
         && factories.createPhase2StreamPort && factories.createPhase2SelectorProvider) {
-      const streamPort = factories.createPhase2StreamPort();
+      const streamPort = spectrum?.app !== undefined
+        ? liveSpectrumStreamPort(spectrum.app)
+        : factories.createPhase2StreamPort();
       const selector = factories.createPhase2SelectorProvider();
       phase2 = await enhanceRuntimeWithPhase2(
         { enabled: true, user_id: config.phase2.user_id },
