@@ -44,7 +44,9 @@ case "$LETTER" in
   m) OWNED='^(mac/Sources/BoiKit/Understanding.*\.swift$|mac/Sources/BoiKit/DigestBuilder\.swift$|mac/Sources/BoiKit/VoicePack.*\.swift$|mac/Tests/BoiKitTests/(Understanding|DigestBuilder|VoicePack).*Tests\.swift$)' ;;
   i) OWNED='^(cloud/channel/src/spectrum-stream.*|cloud/channel/test/spectrum-stream.*|cloud/inbound/|cloud/db/src/(encrypted|turns).*\.ts$|cloud/db/src/repository\.ts$|cloud/db/migrations/)' ;;
   j) OWNED='^(cloud/chat/|intelligence/boi_intel/chat\.py$|intelligence/tests/test_chat.*\.py$)' ;;
-  k) OWNED='^(cloud/e2e/|mac/Tests/Integration/|prompts/track-k-join/)' ;;
+  # Track K is the Phase 2 join. New composition belongs under phase2-runtime; edits to
+  # existing production code are explicit call sites, not broad directory grants.
+  k) OWNED='^(cloud/phase2-runtime/|cloud/e2e/|mac/Tests/Integration/|prompts/track-k-join/|mac/Sources/BoiKit/(SyncRun|Uploader)\.swift$|mac/Tests/BoiKitTests/(Uploader|Phase2.*)Tests\.swift$|cloud/api/src/(main|main.*\.test|schemas|schemas\.test|differential\.test|ingest\.test)\.ts$|cloud/api/src/routes/ingest\.ts$|cloud/db/src/(repository|phase2-runtime\.test)\.ts$|cloud/db/migrations/015_phase2_stream_checkpoint(\.down)?\.sql$|deploy/|Dockerfile$|railway\.toml$)' ;;
   *) echo "unknown track: $LETTER" >&2; exit 2 ;;
 esac
 
@@ -146,7 +148,27 @@ if ! git rev-parse --verify --quiet "$BASE" >/dev/null; then
   echo "cannot resolve base ref '$BASE' — refusing to report a pass I cannot justify" >&2
   exit 2
 fi
-changed="$(git diff --name-only "$BASE"...HEAD)"
+if [ "$LETTER" = "k" ]; then
+  # A join branch inherits every source-track path through merge commits. Comparing the
+  # final tree with main calls all of those inherited paths "K changes", which makes the
+  # ownership gate unusable precisely where it matters most. Walk K's first-parent
+  # history instead: ordinary K commits contribute their normal diff; merge commits
+  # contribute only their combined diff, so clean inheritance disappears while a manual
+  # conflict/semantic resolution (different from every parent) remains reviewable.
+  changed="$({
+    while IFS= read -r commit; do
+      [ -z "$commit" ] && continue
+      parent_count="$(git rev-list --parents -n 1 "$commit" | awk '{print NF - 1}')"
+      if [ "$parent_count" -gt 1 ]; then
+        git diff-tree --cc --no-commit-id --name-only -r "$commit"
+      else
+        git diff-tree --no-commit-id --name-only -r "${commit}^" "$commit"
+      fi
+    done < <(git rev-list --first-parent --reverse "$BASE"..HEAD)
+  } | sed '/^$/d' | sort -u)"
+else
+  changed="$(git diff --name-only "$BASE"...HEAD)"
+fi
 
 frozen_hits="$(echo "$changed" | grep -E "$FROZEN" || true)"
 if [ "$LETTER" = "e" ] && [ -n "$frozen_hits" ]; then
