@@ -51,6 +51,18 @@ export type RuntimeConfig = {
   readinessTimeoutMs: number;
 };
 
+export type BoiProcess = "api" | "card";
+export function processTargetFor(env: NodeJS.ProcessEnv = process.env): {
+  name: BoiProcess;
+  relativeFile: string;
+} {
+  const name = env["BOI_PROCESS"];
+  if (name !== "api" && name !== "card") {
+    throw new Error("BOI_PROCESS must be exactly 'api' or 'card'");
+  }
+  return { name, relativeFile: `dist/cloud/${name}/src/main.js` };
+}
+
 export class RuntimeConfigError extends Error {
   constructor(readonly missing: readonly string[], readonly invalid: readonly string[] = []) {
     super(`invalid runtime configuration: ${[...missing, ...invalid].join(", ")}`);
