@@ -53,6 +53,41 @@ cold-open posture. It is also the pattern every comparable product uses.
 | Pairing | 6-digit code typed after the Mac app installs | **the token in the prefilled body** — the code step disappears |
 | Contact card | the opening move | **Boi's first reply** — "here, save me", warmer and no longer load-bearing |
 
+## CORRECTED 4 Aug — line resolution, after the probe
+
+The section below told you to resolve a user's assigned line by creating a space and
+reading its `phone`. **That does not work on the Free tier, and the probe proved it:**
+
+```
+im.space.create("+1…")  ->  id "any;-;+1…", phone "shared", 1 ms
+```
+
+`space.phone` is the literal string `"shared"`. On a shared pool the line is chosen at
+**send** time, not at assignment time, so there is no per-recipient number to read. I had
+read the docs' *"each end user is routed through a number from a shared pool"* as
+per-recipient assignment; it is not.
+
+Three consequences, all from Track E:
+
+- **`Registrar.lineFor` cannot be implemented against `space.create` on this tier.** The
+  line comes from **config** — the project's assigned number, `+1 646 579-2868`, verified
+  end to end today.
+- **The deep link is a constant on Free, and legitimately so** — not because we hard-coded
+  it, but because the pool genuinely has one number per project until a dedicated line is
+  bought. The original text warned against a constant; that warning was wrong for this tier
+  and right for Business.
+- **`StubRegistrar` giving every user a different line stays correct.** It models the tier
+  we move to, and consuming code must not assume constancy.
+
+**And the good news, which is larger:** `space.create` is a *local* construction — one
+millisecond, a deterministic id derived from the handle, **no request**. So it does not
+consume the 50-new-conversations-per-line-per-day ceiling. **The one limit that would have
+capped onboarding rather than degraded it is not there.**
+
+This is the third time a prose mapping and a real type definition disagreed, and the
+reason compiling against the SDK mattered: `SPECTRUM_INTEGRATION.md` says `phone`, and the
+type says nothing about what is in it.
+
 ## Transport specifics — verify these, do not assume
 
 1. **The allowlist is documented as outbound-only.** *"A shared line will only message

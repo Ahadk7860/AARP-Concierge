@@ -124,7 +124,8 @@ export type OutboundMessage = {
 
 export type InboundMessage = {
   schema_version: "inbound.v1";
-  provider: "linq" | "mock" | "twilio";
+  /** Widened for prompt 10: `spectrum`. A union widening; nothing that compiled stops. */
+  provider: "linq" | "mock" | "twilio" | "spectrum";
   provider_message_id: string; line_id: string;
   from_handle: string; user_id: string | null;
   received_at: ISO8601;
@@ -143,7 +144,20 @@ export type Capabilities = {
 export type SendResult = {
   message_id: string;
   provider: string;
-  protocol: "imessage" | "rcs" | "sms";
+  /**
+   * **NULLABLE from prompt 10, and this is a widening of a frozen type — not free.**
+   * `deliver.ts` and Track C's adapter both read it.
+   *
+   * Photon reports four services (`iMessage | SMS | RCS | unknown`) against these three
+   * protocols. `unknown` must not become `"sms"`: "we do not know whether this was blue"
+   * and "this was green" are different facts and only one of them is true, and the wrong
+   * one drives the handle-mismatch flag that tells a user their number is not on iMessage.
+   *
+   * `null` rather than a fourth string, for consistency: `inbound.v1.protocol` already
+   * encodes exactly this fact as `null`, so both directions end up with ONE encoding for
+   * "we do not know" instead of two.
+   */
+  protocol: "imessage" | "rcs" | "sms" | null;
   line_id: string;
 };
 

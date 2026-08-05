@@ -832,7 +832,9 @@ export async function allUserSchedules(
 export async function markOutboundSent(
   scope: UserScope,
   idempotencyKey: string,
-  result: { protocol: string; provider: string; provider_message_id?: string | null; line_id?: string | null },
+  // `protocol` is nullable from prompt 10: a transport that reports `unknown` records
+  // "we do not know", never a guess. The column already permits null.
+  result: { protocol: string | null; provider: string; provider_message_id?: string | null; line_id?: string | null },
   db: Queryable = getPool(),
 ): Promise<void> {
   await scopedQuery(
