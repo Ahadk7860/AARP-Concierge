@@ -126,6 +126,37 @@ final class UnderstandingBuilderTests: XCTestCase {
                        ["apartment", "climbing", "family", "plans", "work"])
     }
 
+    func testPunctuationlessModalAssertionsAreNotOutstandingQuestions() {
+        for (offset, text) in [
+            "Can confirm I’m coming",
+            "Will be there at 8",
+            "Should be fine",
+            "Could work tomorrow"
+        ].enumerated() {
+            let output = UnderstandingBuilder().build(messages: [
+                message("\(offset)", text, fromMe: false, day: offset + 1)
+            ], identities: [identity])
+            XCTAssertEqual(output[0].lastExchangeShape, .statementFromThem, text)
+            XCTAssertNil(output[0].openThread, text)
+        }
+    }
+
+    func testDefensiblePunctuationlessInterrogativePatternsRemainQuestions() {
+        for (offset, text) in [
+            "Can you come tonight",
+            "Will you be there at 8",
+            "When are you coming",
+            "What time works",
+            "How long will it take"
+        ].enumerated() {
+            let output = UnderstandingBuilder().build(messages: [
+                message("\(offset)", text, fromMe: false, day: offset + 1)
+            ], identities: [identity])
+            XCTAssertEqual(output[0].lastExchangeShape, .questionFromThem, text)
+            XCTAssertEqual(output[0].openThread, "unanswered question from them", text)
+        }
+    }
+
     private func rendered(_ value: RelationshipUnderstanding) -> String {
         [value.contactID, value.register.rawValue, value.relationshipKind.rawValue,
          value.openThread ?? "", value.lastExchangeShape.rawValue,

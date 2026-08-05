@@ -125,6 +125,23 @@ final class UnderstandingVoiceExemplarsTests: XCTestCase {
         XCTAssertEqual(output.exemplars[0].answered, .questionFromThem)
     }
 
+    func testPunctuationlessAssertionAndQuestionProduceDifferentSafeContexts() {
+        let assertion = ContextualVoiceExemplarBuilder().build(messages: [
+            messageAt("1", "Can confirm I’m coming", fromMe: false, seconds: 0),
+            messageAt("2", "great", fromMe: true, seconds: 10)
+        ])
+        let question = ContextualVoiceExemplarBuilder().build(messages: [
+            messageAt("1", "Can you come tonight", fromMe: false, seconds: 0),
+            messageAt("2", "great", fromMe: true, seconds: 10)
+        ])
+
+        XCTAssertEqual(assertion.exemplars[0].answered, .statementFromThem)
+        XCTAssertEqual(question.exemplars[0].answered, .questionFromThem)
+        XCTAssertEqual(assertion.exemplars[0].text, question.exemplars[0].text)
+        XCTAssertFalse(rendered(assertion).contains("confirm"))
+        XCTAssertFalse(rendered(question).contains("tonight"))
+    }
+
     func testSelectionSpansTimeAndDeduplicatesFinalText() throws {
         var messages: [MirrorDatabase.StoredMessage] = []
         for index in 1...100 {

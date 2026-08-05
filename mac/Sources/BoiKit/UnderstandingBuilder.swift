@@ -185,10 +185,30 @@ struct UnderstandingBuilder {
     private static func looksLikeQuestion(_ text: String) -> Bool {
         if text.contains("?") { return true }
         let words = lexicalWords(in: text)
-        guard let first = words.first else { return false }
-        return ["are", "can", "could", "did", "do", "does", "how", "is", "should",
-                "what", "when", "where", "which", "who", "why", "will", "would"]
-            .contains(first)
+        guard words.count >= 2 else { return false }
+
+        // Without punctuation, a leading modal is not enough: "can confirm I'm
+        // coming" and "will be there" are ordinary assertions. Accept only the
+        // bounded inversion shapes where the next word is a subject-like pronoun.
+        let auxiliaries: Set<String> = [
+            "am", "are", "can", "could", "did", "do", "does", "has", "have", "is",
+            "should", "was", "were", "will", "would"
+        ]
+        let subjectOpeners: Set<String> = [
+            "he", "i", "it", "she", "that", "there", "they", "this", "we", "you"
+        ]
+        if auxiliaries.contains(words[0]) { return subjectOpeners.contains(words[1]) }
+
+        // Wh-forms are accepted only when their next token pins an interrogative
+        // construction. Ambiguous fragments such as "what a day" require `?`.
+        let whWords: Set<String> = ["how", "what", "when", "where", "which", "who", "why"]
+        if whWords.contains(words[0]), auxiliaries.contains(words[1]) { return true }
+        if words[0] == "what" && ["date", "day", "time"].contains(words[1]) { return true }
+        if words[0] == "how"
+            && ["far", "late", "long", "many", "much", "old", "soon"].contains(words[1]) {
+            return true
+        }
+        return false
     }
 
     static func lexicalWords(in text: String) -> [String] {
@@ -197,8 +217,9 @@ struct UnderstandingBuilder {
 
     private static func containsPlanMarker(_ text: String) -> Bool {
         let words = Set(lexicalWords(in: text))
-        return !words.isDisjoint(with: ["coming", "plan", "planned", "planning", "plans",
-                                       "tonight", "weekend", "weekends"])
+        // Directional confirmations such as "I'm coming tonight" close uncertainty;
+        // they do not create it. The stronger plan nouns/verbs are the bounded signal.
+        return !words.isDisjoint(with: ["plan", "planned", "planning", "plans"])
     }
 
     private func topics(in messages: [MirrorDatabase.StoredMessage]) -> [String] {
