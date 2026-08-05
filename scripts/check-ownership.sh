@@ -35,7 +35,11 @@ case "$LETTER" in
   f) OWNED='^(mac/Sources/BoiApp/|mac/Sources/BoiKit/GrantNarrator\.swift$|mac/Tests/BoiKitTests/(GrantNarrator|Onboarding)Tests\.swift$)' ;;
   # Phase 2 tracks. Contracts and shared interfaces remain frozen: foundation alone
   # changes them, and K only wires real producers to real consumers after merge.
-  g) OWNED='^(mac/Sources/BoiApp/|mac/Sources/BoiKit/WakeScheduler.*\.swift$|mac/Tests/BoiKitTests/WakeScheduler.*Tests\.swift$|scripts/(build|release|notarize)-.*|release/)' ;;
+  # AMENDMENT-P2-G-HELPER — reviewed after direct pmset proved root-only. Track G may
+  # add one least-privilege SMAppService LaunchDaemon helper and wire it into the app
+  # bundle. The helper accepts no caller-supplied command or date; review must enforce
+  # that semantic constraint because path ownership cannot.
+  g) OWNED='^(mac/Package\.swift$|mac/Sources/BoiApp/|mac/Sources/BoiWakeHelper/|mac/Sources/BoiKit/(WakeScheduler.*|LaunchAgentPlist)\.swift$|mac/Tests/BoiKitTests/(WakeScheduler.*|AppBundle)Tests\.swift$|mac/scripts/(build-app|release-app|notarize-app).*|scripts/(build|release|notarize)-.*|release/)' ;;
   h) OWNED='^(cloud/api/src/main\.ts$|cloud/api/src/health.*|cloud/api/src/main.*test\.ts$|cloud/card/src/main\.ts$|cloud/db/src/deploy.*|cloud/db/migrations/|railway\.toml$|Dockerfile$|\.dockerignore$|deploy/)' ;;
   m) OWNED='^(mac/Sources/BoiKit/Understanding.*\.swift$|mac/Sources/BoiKit/DigestBuilder\.swift$|mac/Sources/BoiKit/VoicePack.*\.swift$|mac/Tests/BoiKitTests/(Understanding|DigestBuilder|VoicePack).*Tests\.swift$)' ;;
   i) OWNED='^(cloud/channel/src/spectrum-stream.*|cloud/channel/test/spectrum-stream.*|cloud/inbound/|cloud/db/src/(encrypted|turns).*\.ts$|cloud/db/src/repository\.ts$|cloud/db/migrations/)' ;;
