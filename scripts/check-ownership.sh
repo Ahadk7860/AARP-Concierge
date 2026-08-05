@@ -46,7 +46,7 @@ case "$LETTER" in
   j) OWNED='^(cloud/chat/|intelligence/boi_intel/chat\.py$|intelligence/tests/test_chat.*\.py$)' ;;
   # Track K is the Phase 2 join. New composition belongs under phase2-runtime; edits to
   # existing production code are explicit call sites, not broad directory grants.
-  k) OWNED='^(cloud/phase2-runtime/|cloud/e2e/|mac/Tests/Integration/|prompts/track-k-join/|mac/Sources/BoiKit/(SyncRun|Uploader)\.swift$|mac/Tests/BoiKitTests/(Uploader|Phase2.*)Tests\.swift$|cloud/api/src/(main|main.*\.test|schemas|schemas\.test|differential\.test|ingest\.test)\.ts$|cloud/api/src/routes/ingest\.ts$|cloud/db/src/(repository|phase2-runtime\.test)\.ts$|cloud/db/migrations/015_phase2_stream_checkpoint(\.down)?\.sql$|deploy/|Dockerfile$|railway\.toml$)' ;;
+  k) OWNED='^(cloud/phase2-runtime/|cloud/e2e/|mac/Tests/Integration/|prompts/track-k-join/|mac/Sources/BoiKit/(SyncRun|Uploader)\.swift$|mac/Tests/BoiKitTests/(Uploader|Phase2.*)Tests\.swift$|cloud/api/src/(main|main.*\.test|schemas|schemas\.test|differential\.test|ingest\.test)\.ts$|cloud/api/src/routes/ingest\.ts$|cloud/api/src/redaction\.ts$|cloud/db/src/(repository|schema\.test|phase2-runtime\.test)\.ts$|cloud/db/migrations/015_phase2_stream_checkpoint(\.down)?\.sql$|deploy/|Dockerfile$|railway\.toml$)' ;;
   *) echo "unknown track: $LETTER" >&2; exit 2 ;;
 esac
 

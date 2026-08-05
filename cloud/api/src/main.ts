@@ -33,7 +33,11 @@ import {
   type ReadinessSnapshot,
   type RuntimeStatus,
 } from "./health.js";
+import type { SpectrumStreamPort } from "../../channel/src/spectrum-stream.js";
 import { buildServer } from "./server.js";
+import type { ChatSelectorProvider } from "../../chat/src/selector.js";
+import { enhanceRuntimeWithPhase2, type Phase2Config } from "../../phase2-runtime/compose-runtime.js";
+import { stubStreamPort } from "../../phase2-runtime/stub-stream-port.js";
 
 export type SpectrumConfig = {
   projectId: string;
@@ -56,6 +60,8 @@ export type RuntimeConfig = {
     proxyMaxBytes: number;
   } | null;
   readinessTimeoutMs: number;
+  /** Phase 2 inbound stream + retention. Off by default until Photon is documented. */
+  phase2: { enabled: boolean; user_id: string | null };
 };
 
 export type BoiProcess = "api" | "card";
@@ -179,6 +185,9 @@ export function loadRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Runtime
   }
   if (missing.length > 0 || invalid.length > 0) throw new RuntimeConfigError(missing, invalid);
 
+
+  const phase2Enabled = nonEmpty(env, "BOI_PHASE2_ENABLED") === "1";
+  const phase2UserId = nonEmpty(env, "BOI_PHASE2_USER_ID") ?? null;
   return {
     production,
     host: "0.0.0.0",
@@ -197,6 +206,7 @@ export function loadRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Runtime
       }
       : null,
     readinessTimeoutMs: readinessTimeout.value,
+    phase2: { enabled: phase2Enabled, user_id: phase2UserId },
   };
 }
 
@@ -231,6 +241,8 @@ export type RuntimeFactories = {
   closeApp(app: FastifyInstance): Promise<void>;
   fetch(input: string, init?: RequestInit): Promise<Response>;
   log: RuntimeLog;
+  createPhase2StreamPort?(): SpectrumStreamPort;
+  createPhase2SelectorProvider?(): ChatSelectorProvider;
 };
 
 const LOCAL_DATABASE_URL = "postgres://localhost:5432/boi_dev_d";
@@ -291,7 +303,13 @@ export const defaultRuntimeFactories: RuntimeFactories = {
   listen: (app, options) => app.listen(options).then(() => undefined),
   closeApp: (app) => app.close(),
   fetch: (input, init) => fetch(input, init),
-  log: (event) => process.stdout.write(`${JSON.stringify(event)}\n`),
+  log: (event) => process.stdout.write(`${JSON.stringify(event)}
+`),
+  /** Stub until Photon SDK is documented. Replace before production. */
+  createPhase2StreamPort: () => stubStreamPort(),
+  createPhase2SelectorProvider: (): ChatSelectorProvider => ({
+    select: async () => ({ kind: "decline" as const }),
+  }),
 };
 
 const CARD_PATH = /^\/cards\/usr_[0-9A-Za-z]{8,32}\/card_[0-9a-f]{16}\.png$/;
@@ -524,15 +542,41 @@ export async function startRuntime(
     const handleEnvelopeKeys = config.contactKeyEnvelopeMasterKey === null
       ? null
       : factories.createKeyProvider(config.contactKeyEnvelopeMasterKey);
+
+    // Phase 2 inbound stream + retention (K-02). Off by default until Photon is verified.
+    let phase2: Awaited<ReturnType<typeof enhanceRuntimeWithPhase2>> = null;
+    if (config.phase2.enabled && config.phase2.user_id !== null && handleEnvelopeKeys !== null
+        && factories.createPhase2StreamPort && factories.createPhase2SelectorProvider) {
+      const streamPort = factories.createPhase2StreamPort();
+      const selector = factories.createPhase2SelectorProvider();
+      phase2 = await enhanceRuntimeWithPhase2(
+        { enabled: true, user_id: config.phase2.user_id },
+        {
+          db: database,
+          streamPort,
+          channel,
+          keyProvider: handleEnvelopeKeys,
+          selectorProvider: selector,
+        },
+      );
+      if (phase2 !== null) {
+        cleanups.unshift(() => phase2!.close());
+      }
+    }
+
+    const phase2Ready = phase2 === null ? null : () => phase2.readinessCheck();
+    const statusDeps = { ...(config.card === null ? {} : {
+      card: () => checkPrivateCardReadiness(config.card!, factories.fetch),
+    })} as Record<string, () => Promise<boolean>>;
+    if (phase2Ready !== null) statusDeps.phase2 = phase2Ready;
+
     const status = createRuntimeStatus({
       db: database,
       channel,
       timeoutMs: config.readinessTimeoutMs,
       isClosing: () => closing,
       log: factories.log,
-      dependencies: config.card === null ? {} : {
-        card: () => checkPrivateCardReadiness(config.card!, factories.fetch),
-      },
+      dependencies: statusDeps,
     });
     if (!(await status.ready()).ready) throw new Error("runtime_dependencies_unready");
 
