@@ -4,6 +4,7 @@
 
 - `npm run typecheck`
 - `npm test -- cloud/chat/src/waiting-on-me.test.ts`
+- `npm test -- cloud/chat/src/reply.test.ts`
 - `bash scripts/check-ownership.sh j`
 
 ## Contract gaps
