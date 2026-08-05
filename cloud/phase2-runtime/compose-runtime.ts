@@ -24,6 +24,8 @@ import {
 } from "./inbound-adapter.js";
 import type { ChatSelectorProvider } from "../chat/src/selector.js";
 import type { HandleEnvelopeKeyProvider } from "../api/src/main.js";
+import { liveModelConfigFromEnv, ModelChatSelectorProvider, ModelFollowUpDraftProvider, type LiveModelConfig } from "./live-providers.js";
+import type { FollowUpDraftProvider } from "../chat/src/draft.js";
 
 export type Phase2Dependencies = {
   db: Queryable;
@@ -32,6 +34,8 @@ export type Phase2Dependencies = {
   channel: Channel;
   keyProvider: HandleEnvelopeKeyProvider;
   selectorProvider: ChatSelectorProvider;
+  liveModelConfig?: LiveModelConfig | null;
+  draftProvider?: FollowUpDraftProvider | null;
 };
 
 export type Phase2Runtime = {
@@ -128,6 +132,8 @@ export async function enhanceRuntimeWithPhase2(
     channel: Channel;
     keyProvider: HandleEnvelopeKeyProvider;
     selectorProvider: ChatSelectorProvider;
+    liveModelConfig?: LiveModelConfig | null;
+    draftProvider?: FollowUpDraftProvider | null;
   } | null,
 ): Promise<Phase2Enhancement | null> {
   if (!config.enabled || phase2Deps === null) return null;
@@ -139,6 +145,8 @@ export async function enhanceRuntimeWithPhase2(
     channel: phase2Deps.channel,
     keyProvider: phase2Deps.keyProvider,
     selectorProvider: phase2Deps.selectorProvider,
+    liveModelConfig: phase2Deps.liveModelConfig ?? null,
+    draftProvider: phase2Deps.draftProvider ?? null,
   });
 
   return {
