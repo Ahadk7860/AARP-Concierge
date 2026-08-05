@@ -19,6 +19,7 @@ import type {
 import { StubChannel, StubRegistrar } from "../../shared/src/index.js";
 import {
   closePool,
+  installExternalCardStore,
   installPool,
   isInstalledPool,
   type Queryable,
@@ -48,6 +49,12 @@ export type RuntimeConfig = {
   databaseUrl: string | null;
   contactKeyEnvelopeMasterKey: Buffer | null;
   spectrum: SpectrumConfig | null;
+  card: {
+    privateBase: string;
+    publicBase: string;
+    writeSecret: string;
+    proxyMaxBytes: number;
+  } | null;
   readinessTimeoutMs: number;
 };
 
@@ -96,7 +103,8 @@ export function loadRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Runtime
   const invalid: string[] = [];
   const port = integerSetting(env, "PORT", 3041, 1, 65535, production);
   const readinessTimeout = integerSetting(env, "READINESS_TIMEOUT_MS", 2_000, 10, 30_000);
-  invalid.push(...port.invalid, ...readinessTimeout.invalid);
+  const proxyMaxBytes = integerSetting(env, "BOI_CARD_PROXY_MAX_BYTES", 8 * 1024 * 1024, 1024, 32 * 1024 * 1024);
+  invalid.push(...port.invalid, ...readinessTimeout.invalid, ...proxyMaxBytes.invalid);
 
   const databaseUrl = nonEmpty(env, "DATABASE_URL");
   if (databaseUrl !== null) {
@@ -136,6 +144,39 @@ export function loadRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Runtime
       invalid.push("SPECTRUM_LINE_E164 (must be E.164)");
     }
   }
+
+  const cardPrivateBase = nonEmpty(env, "BOI_CARD_PRIVATE_BASE");
+  const cardPublicBase = nonEmpty(env, "BOI_CARD_PUBLIC_BASE");
+  const cardWriteSecret = nonEmpty(env, "BOI_CARD_WRITE_SECRET");
+  const configuredCard = [cardPrivateBase, cardPublicBase, cardWriteSecret]
+    .some((value) => value !== null);
+  if (configuredCard || production) {
+    for (const [name, value] of [
+      ["BOI_CARD_PRIVATE_BASE", cardPrivateBase],
+      ["BOI_CARD_PUBLIC_BASE", cardPublicBase],
+      ["BOI_CARD_WRITE_SECRET", cardWriteSecret],
+    ] as const) if (value === null) missing.push(name);
+    for (const [name, value, protocol] of [
+      ["BOI_CARD_PRIVATE_BASE", cardPrivateBase, "http:"],
+      ["BOI_CARD_PUBLIC_BASE", cardPublicBase, production ? "https:" : null],
+    ] as const) {
+      if (value === null) continue;
+      try {
+        const parsed = new URL(value);
+        if ((protocol !== null && parsed.protocol !== protocol)
+            || parsed.username !== "" || parsed.password !== ""
+            || parsed.pathname !== "/" || parsed.search !== "" || parsed.hash !== "") {
+          invalid.push(`${name} (must be an origin${protocol === null ? "" : ` using ${protocol}`})`);
+        }
+        if (production && name === "BOI_CARD_PRIVATE_BASE"
+            && !parsed.hostname.endsWith(".railway.internal")) {
+          invalid.push("BOI_CARD_PRIVATE_BASE (must use Railway private networking)");
+        }
+      } catch {
+        invalid.push(`${name} (must be a URL origin)`);
+      }
+    }
+  }
   if (missing.length > 0 || invalid.length > 0) throw new RuntimeConfigError(missing, invalid);
 
   return {
@@ -146,6 +187,14 @@ export function loadRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Runtime
     contactKeyEnvelopeMasterKey,
     spectrum: configuredSpectrum && projectId && projectSecret && lineE164 && webhookSecret
       ? { projectId, projectSecret, lineE164, webhookSecret }
+      : null,
+    card: configuredCard && cardPrivateBase && cardPublicBase && cardWriteSecret
+      ? {
+        privateBase: cardPrivateBase.replace(/\/$/, ""),
+        publicBase: cardPublicBase.replace(/\/$/, ""),
+        writeSecret: cardWriteSecret,
+        proxyMaxBytes: proxyMaxBytes.value,
+      }
       : null,
     readinessTimeoutMs: readinessTimeout.value,
   };
@@ -180,6 +229,7 @@ export type RuntimeFactories = {
   }): Channel;
   listen(app: FastifyInstance, options: { host: string; port: number }): Promise<void>;
   closeApp(app: FastifyInstance): Promise<void>;
+  fetch(input: string, init?: RequestInit): Promise<Response>;
   log: RuntimeLog;
 };
 
@@ -240,8 +290,130 @@ export const defaultRuntimeFactories: RuntimeFactories = {
   },
   listen: (app, options) => app.listen(options).then(() => undefined),
   closeApp: (app) => app.close(),
+  fetch: (input, init) => fetch(input, init),
   log: (event) => process.stdout.write(`${JSON.stringify(event)}\n`),
 };
+
+const CARD_PATH = /^\/cards\/usr_[0-9A-Za-z]{8,32}\/card_[0-9a-f]{16}\.png$/;
+const CARD_SIGNATURE = /^[0-9a-f]{64}$/;
+
+function validSignedCardUrl(rawUrl: string): URL | null {
+  let parsed: URL;
+  try { parsed = new URL(rawUrl, "http://proxy.invalid"); } catch { return null; }
+  if (!CARD_PATH.test(parsed.pathname)) return null;
+  const keys = [...parsed.searchParams.keys()];
+  if (keys.length !== 2 || keys[0] !== "exp" || keys[1] !== "sig") return null;
+  const exp = parsed.searchParams.get("exp");
+  const sig = parsed.searchParams.get("sig");
+  if (exp === null || !/^[1-9][0-9]{0,12}$/.test(exp) || sig === null || !CARD_SIGNATURE.test(sig)) {
+    return null;
+  }
+  return parsed;
+}
+
+async function boundedResponseBody(response: Response, maxBytes: number): Promise<Buffer | null> {
+  if (response.body === null) return Buffer.alloc(0);
+  const reader = response.body.getReader();
+  const chunks: Buffer[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) return Buffer.concat(chunks, total);
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel();
+        return null;
+      }
+      chunks.push(Buffer.from(value));
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+export function registerCardProxy(
+  app: FastifyInstance,
+  card: NonNullable<RuntimeConfig["card"]>,
+  request: RuntimeFactories["fetch"] = defaultRuntimeFactories.fetch,
+): void {
+  app.route({
+    method: "GET",
+    url: "/cards/*",
+    exposeHeadRoute: false,
+    async handler(req, reply) {
+      const parsed = validSignedCardUrl(req.raw.url ?? "");
+      if (parsed === null) return reply.code(400).send({ error: "invalid_card_url" });
+      let upstream: Response;
+      try {
+        upstream = await request(`${card.privateBase}${parsed.pathname}${parsed.search}`, {
+          method: "GET",
+          redirect: "manual",
+          signal: AbortSignal.timeout(5_000),
+          headers: { accept: "image/png" },
+        });
+      } catch {
+        return reply.code(502).send({ error: "bad_gateway" });
+      }
+      if (upstream.status === 401) return reply.code(401).send({ error: "unauthorized" });
+      if (upstream.status === 404) return reply.code(404).send({ error: "not_found" });
+      if (upstream.status !== 200 || upstream.headers.get("content-type")?.split(";", 1)[0] !== "image/png") {
+        return reply.code(502).send({ error: "bad_gateway" });
+      }
+      const declared = upstream.headers.get("content-length");
+      if (declared !== null && (!/^[0-9]+$/.test(declared) || Number(declared) > card.proxyMaxBytes)) {
+        return reply.code(413).send({ error: "card_too_large" });
+      }
+      const body = await boundedResponseBody(upstream, card.proxyMaxBytes);
+      if (body === null) return reply.code(413).send({ error: "card_too_large" });
+      return reply.code(200)
+        .header("content-type", "image/png")
+        .header("cache-control", upstream.headers.get("cache-control") ?? "private, max-age=300")
+        .header("content-location", `${card.publicBase}${parsed.pathname}${parsed.search}`)
+        .send(body);
+    },
+  });
+}
+
+async function cardIsReady(
+  card: NonNullable<RuntimeConfig["card"]>,
+  request: RuntimeFactories["fetch"],
+): Promise<boolean> {
+  const response = await request(`${card.privateBase}/readyz`, {
+    method: "GET",
+    redirect: "manual",
+    signal: AbortSignal.timeout(5_000),
+    headers: { accept: "application/json" },
+  });
+  if (response.status !== 200) return false;
+  const text = await response.text();
+  return text.length <= 256 && (JSON.parse(text) as { status?: unknown }).status === "ready";
+}
+
+export function createPrivateCardStore(
+  card: NonNullable<RuntimeConfig["card"]>,
+  request: RuntimeFactories["fetch"],
+): { name: string; deleteAndCount(userId: string): Promise<number> } {
+  return {
+    name: "cards(private)",
+    async deleteAndCount(userId) {
+      const response = await request(`${card.privateBase}/internal/cards/${userId}`, {
+        method: "DELETE",
+        redirect: "manual",
+        signal: AbortSignal.timeout(10_000),
+        headers: { "x-boi-card-write": card.writeSecret, accept: "application/json" },
+      });
+      if (response.status !== 200) throw new Error("private card deletion failed");
+      const text = await response.text();
+      if (text.length > 256) throw new Error("private card deletion response too large");
+      const payload = JSON.parse(text) as { remaining?: unknown };
+      if (!Number.isSafeInteger(payload.remaining) || Number(payload.remaining) < 0) {
+        throw new Error("private card deletion returned invalid residue");
+      }
+      return Number(payload.remaining);
+    },
+  };
+}
 
 type Cleanup = () => Promise<void>;
 async function closeAll(cleanups: readonly Cleanup[], primary?: unknown): Promise<void> {
@@ -278,20 +450,24 @@ export function createRuntimeStatus(input: {
   timeoutMs: number;
   isClosing: () => boolean;
   log: RuntimeLog;
+  dependencies?: Record<string, () => Promise<boolean>>;
 }): RuntimeStatus {
   return {
     live: () => !input.isClosing(),
     async ready(): Promise<ReadinessSnapshot> {
       if (input.isClosing()) return { ready: false, components: { runtime: "down" } };
-      const [database, spectrum] = await Promise.all([
-        boundedCheck("database", input.timeoutMs, async () => {
+      const checks: Record<string, () => Promise<boolean>> = {
+        database: async () => {
           await input.db.query("select 1");
           return true;
-        }, input.log),
-        boundedCheck("spectrum", input.timeoutMs, async () =>
-          (await input.channel.health()).status === "up", input.log),
-      ]);
-      return { ready: database === "up" && spectrum === "up", components: { database, spectrum } };
+        },
+        spectrum: async () => (await input.channel.health()).status === "up",
+        ...input.dependencies,
+      };
+      const entries = await Promise.all(Object.entries(checks).map(async ([component, check]) =>
+        [component, await boundedCheck(component, input.timeoutMs, check, input.log)] as const));
+      const components = Object.fromEntries(entries);
+      return { ready: entries.every(([, state]) => state === "up"), components };
     },
   };
 }
@@ -322,6 +498,11 @@ export async function startRuntime(
     });
     installPool(database);
 
+    if (config.card !== null) {
+      const restoreCardStore = installExternalCardStore(createPrivateCardStore(config.card, factories.fetch));
+      cleanups.unshift(async () => { restoreCardStore(); });
+    }
+
     let channel: Channel;
     let registrar: Registrar;
     if (config.spectrum !== null) {
@@ -348,10 +529,14 @@ export async function startRuntime(
       timeoutMs: config.readinessTimeoutMs,
       isClosing: () => closing,
       log: factories.log,
+      dependencies: config.card === null ? {} : {
+        card: () => cardIsReady(config.card!, factories.fetch),
+      },
     });
     if (!(await status.ready()).ready) throw new Error("runtime_dependencies_unready");
 
     const app = buildServer({ channel, registrar });
+    if (config.card !== null) registerCardProxy(app, config.card, factories.fetch);
     registerHealthRoutes(app, status);
     cleanups.unshift(() => factories.closeApp(app));
     await factories.listen(app, { port: config.port, host: config.host });

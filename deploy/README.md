@@ -19,9 +19,16 @@ managed-Postgres `DATABASE_URL` reference.
 - `SPECTRUM_LINE_E164`
 - `SPECTRUM_WEBHOOK_SECRET`
 - `CONTACT_KEY_ENVELOPE_MASTER_KEY` — canonical base64 encoding of 32 random bytes
+- `BOI_CARD_PRIVATE_BASE=http://${{boi-card.RAILWAY_PRIVATE_DOMAIN}}:${{boi-card.PORT}}`
+- `BOI_CARD_PUBLIC_BASE=https://${{RAILWAY_PUBLIC_DOMAIN}}` — signed card links stay
+  on the API domain and are proxied to the private card service
+- `BOI_CARD_WRITE_SECRET` — the same secret reference used by `boi-card`
+- `BOI_CARD_PROXY_MAX_BYTES=8388608` (optional)
 - `READINESS_TIMEOUT_MS=2000` (optional)
 
-Railway supplies `PORT`. Generate a public domain and probe `/healthz` and `/readyz`.
+Railway supplies `PORT`. Generate the project's **only public domain** on this API
+service. Railway probes `/readyz`, which verifies Postgres, Spectrum, and the card
+service over private networking. `/healthz` remains the process-liveness endpoint.
 
 ## Card service variables and volume
 
@@ -31,18 +38,22 @@ Railway supplies `PORT`. Generate a public domain and probe `/healthz` and `/rea
 - `BOI_CARD_DIR=/data/cards`
 - `BOI_CARD_SIGNING_SECRET` — random, independent of the write secret
 - `BOI_CARD_WRITE_SECRET` — random, independent of the signing secret
-- `BOI_CARD_PUBLIC_BASE=https://<generated-card-domain>`
+- `BOI_CARD_PUBLIC_BASE=https://${{boi-api.RAILWAY_PUBLIC_DOMAIN}}`
+- `PORT=8080` — set this service variable explicitly so the API's cross-service
+  `${{boi-card.PORT}}` reference resolves
 - `RAILWAY_RUN_UID=0` — Railway volumes mount as root while the image defaults to a
   non-root user
 
-Mount a persistent Railway volume at `/data/cards`. Railway supplies `PORT`. Generate a
-public domain and the matching `RAILWAY_VOLUME_MOUNT_PATH` automatically, then probe
-`/healthz`; card reads should remain private signed URLs.
+Mount a persistent Railway volume at `/data/cards`; Railway supplies the matching
+`RAILWAY_VOLUME_MOUNT_PATH`. **Do not generate a public domain for this service.** Its
+`/cards/*`, `/readyz`, and authenticated deletion endpoint are reachable only through
+the Railway private network. The shared config probes `/readyz`; that probe performs a
+small create/read/delete cycle on the mounted volume without returning paths or errors.
 
 ## Live gates deliberately not performed by this commit
 
 1. User authenticates Railway and creates/links the project, Postgres, and two services.
 2. User adds secrets through Railway's variable UI or CLI; never paste them into chat.
-3. User attaches the card volume and generates both public domains.
+3. User attaches the card volume and generates only the API public domain.
 4. Deploy and wait for terminal `SUCCESS`, then verify API readiness, card persistence
    across a redeploy, TLS, migrations, and a synthetic Spectrum send before real data.
