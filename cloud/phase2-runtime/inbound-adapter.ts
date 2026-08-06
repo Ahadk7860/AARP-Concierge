@@ -61,17 +61,17 @@ export class SpectrumEventDecoder implements InboundEventDecoder {
       }
     }
 
-    const phone = (() => {
-      const val = space?.phone;
-      return typeof val === "string" ? val : "unknown";
-    })();
+    // sender.id is the Photon User ID — for iMessage, the E.164 phone number.
+    // space.phone is Boi's own line; using it as from_handle would match nothing.
+    const fromHandle = msg?.sender?.id
+      ?? (() => { throw new Error("spectrum_message_no_sender"); })();
 
     return {
       schema_version: "inbound.v1",
       provider: "spectrum",
       provider_message_id: event.id,
       line_id: space?.id ?? "",
-      from_handle: phone,
+      from_handle: fromHandle,
       user_id: null,
       received_at: (msg?.timestamp
         ? new Date(msg.timestamp).toISOString().replace(/\.\d{3}Z$/, "Z")

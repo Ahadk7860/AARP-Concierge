@@ -56,11 +56,18 @@ export async function startPhase2Runtime(deps: Phase2Dependencies): Promise<Phas
   const privateStore = new EncryptedPrivateStore(repository, turnVault, handleVault);
   const checkpoint = new PostgresStreamCheckpoint(deps.db, deps.user_id);
 
+  // When a live model config is available, use it for chat selection.
+  // Otherwise fall back to the injected selector (offline/decline stub).
+  const chatSelector: ChatSelectorProvider = deps.liveModelConfig !== undefined
+    && deps.liveModelConfig !== null
+    ? new ModelChatSelectorProvider(deps.liveModelConfig)
+    : deps.selectorProvider;
+
   const router = new InboundRouter({
     decoder: new SpectrumEventDecoder(),
     users: new HandleUserResolver(deps.db),
     deterministic: new DeterministicIntentAdapter(),
-    chat: new ClosedChatAdapter(deps.db, deps.selectorProvider),
+    chat: new ClosedChatAdapter(deps.db, chatSelector),
     delivery: new SpectrumReplyDeliveryPort(deps.channel),
     privateStore,
   });
@@ -68,7 +75,7 @@ export async function startPhase2Runtime(deps: Phase2Dependencies): Promise<Phas
   const stream = new SpectrumStream({
     port: deps.streamPort,
     checkpoint,
-    onEvent: (event) => { void router.route(event); },
+    onEvent: async (event) => { await router.route(event); },
     log: (event) => {
       // Operational metadata only — no payload, no provider error strings.
       process.stderr.write(JSON.stringify({ component: "spectrum.stream", ...event }) + "\n");
