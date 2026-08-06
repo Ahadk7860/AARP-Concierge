@@ -82,10 +82,15 @@ export async function startPhase2Runtime(deps: Phase2Dependencies): Promise<Phas
     },
   });
 
+  let retentionFailed = false;
+
   const retentionWorker = new TurnRetentionWorker({
     repository,
     observe: (event: RetentionLogEvent) => {
       process.stderr.write(JSON.stringify({ component: "turns.retention", ...event }) + "\n");
+      if (event.msg === "turns.retention.failed") {
+        retentionFailed = true;
+      }
     },
   });
   const stopRetention = scheduleTurnRetention(
@@ -105,7 +110,7 @@ export async function startPhase2Runtime(deps: Phase2Dependencies): Promise<Phas
       const h = stream.health();
       return {
         stream: h.state === "connected" ? "up" : h.state === "degraded" ? "degraded" : "down",
-        retention: "up",
+        retention: retentionFailed ? "down" : "up",
       };
     },
     async close() {
