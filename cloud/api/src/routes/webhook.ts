@@ -25,7 +25,7 @@ import { handleInbound } from "../../../brief/src/inbound.js";
 import { badSignature, send, validation } from "../errors.js";
 import { logEvent } from "../logging.js";
 
-const PROVIDERS = new Set(["linq", "mock", "twilio"]);
+const PROVIDERS = new Set(["linq", "mock", "twilio", "spectrum"]);
 
 /**
  * Exactly one signature header, as a string, or null.
