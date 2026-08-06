@@ -68,17 +68,22 @@ export async function startPhase2Runtime(deps: Phase2Dependencies): Promise<Phas
   const stream = new SpectrumStream({
     port: deps.streamPort,
     checkpoint,
-    onEvent: (event) => { void router.route(event); },
+    onEvent: async (event) => { await router.route(event); },
     log: (event) => {
       // Operational metadata only — no payload, no provider error strings.
       process.stderr.write(JSON.stringify({ component: "spectrum.stream", ...event }) + "\n");
     },
   });
 
+  let retentionFailed = false;
+
   const retentionWorker = new TurnRetentionWorker({
     repository,
     observe: (event: RetentionLogEvent) => {
       process.stderr.write(JSON.stringify({ component: "turns.retention", ...event }) + "\n");
+      if (event.msg === "turns.retention.failed") {
+        retentionFailed = true;
+      }
     },
   });
   const stopRetention = scheduleTurnRetention(
@@ -98,7 +103,7 @@ export async function startPhase2Runtime(deps: Phase2Dependencies): Promise<Phas
       const h = stream.health();
       return {
         stream: h.state === "connected" ? "up" : h.state === "degraded" ? "degraded" : "down",
-        retention: "up",
+        retention: retentionFailed ? "down" : "up",
       };
     },
     async close() {

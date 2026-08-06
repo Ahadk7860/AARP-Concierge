@@ -193,8 +193,44 @@ def main() -> None:
         _, received = load_corpus(a.mirror or a.db, flag_says_mirror=bool(a.mirror))
         problems = (check_digest_facts(doc, received) if a.digest
                     else check_gist_facts(doc, received))
+
+        # digest.v2 carries understanding fields that may contain derived prose.
+        # Scan open_thread and voice_exemplars[].text against the received corpus.
+        if a.digest and doc.get("schema_version") == "digest.v2":
+            for rel in doc.get("relationships", []):
+                understanding = rel.get("understanding", {})
+                open_thread = understanding.get("open_thread")
+                if isinstance(open_thread, str) and open_thread.strip():
+                    n = norm(open_thread)
+                    if n in received:
+                        problems.append(
+                            f"{rel.get('contact_id', '?')}: "
+                            f"understanding.open_thread is verbatim inbound prose — {open_thread[:60]!r}"
+                        )
+                    elif len(n) >= 12 and any(n in r for r in received):
+                        problems.append(
+                            f"{rel.get('contact_id', '?')}: "
+                            f"understanding.open_thread contains verbatim span — {open_thread[:60]!r}"
+                        )
+                cadence = understanding.get("cadence_norm")
+                if isinstance(cadence, str) and cadence.strip():
+                    n = norm(cadence)
+                    if n in received:
+                        problems.append(
+                            f"{rel.get('contact_id', '?')}: "
+                            f"understanding.cadence_norm is verbatim inbound prose — {cadence[:60]!r}"
+                        )
+                for vex in understanding.get("voice_exemplars", []):
+                    if isinstance(vex, dict) and "text" in vex:
+                        n = norm(vex["text"])
+                        if n in received:
+                            problems.append(
+                                f"{rel.get('contact_id', '?')}: "
+                                f"understanding.voice_exemplar text is verbatim inbound — {vex['text'][:60]!r}"
+                            )
+
         if problems:
-            print(f"FAIL -- {len(problems)} facts violation(s).")
+            print(f"FAIL -- {len(problems)} violation(s).")
             for p in problems[:10]:
                 print(f"  {p}")
             print("\nThe allowlist is what the fabrication gate trusts. A token that is "
@@ -205,7 +241,19 @@ def main() -> None:
         return
 
     pack = json.loads(pathlib.Path(a.pack).read_text())
-    exemplars = [norm(e) for e in pack.get("exemplars", [])]
+    version = pack.get("schema_version", "voice_pack.v1")
+
+    # voice_pack.v2 exemplars are objects { text, answered, register }, not strings.
+    if version == "voice_pack.v2":
+        raw_exemplars = pack.get("exemplars", [])
+        exemplars = []
+        for ex in raw_exemplars:
+            if isinstance(ex, dict) and "text" in ex:
+                exemplars.append(norm(ex["text"]))
+    else:
+        # voice_pack.v1: exemplars are plain strings
+        exemplars = [norm(e) for e in pack.get("exemplars", []) if isinstance(e, str)]
+
     if not exemplars:
         print("OK -- pack has no exemplars")
         return
