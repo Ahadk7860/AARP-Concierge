@@ -24,8 +24,6 @@ import {
 } from "./inbound-adapter.js";
 import type { ChatSelectorProvider } from "../chat/src/selector.js";
 import type { HandleEnvelopeKeyProvider } from "../api/src/main.js";
-import { liveModelConfigFromEnv, ModelChatSelectorProvider, ModelFollowUpDraftProvider, type LiveModelConfig } from "./live-providers.js";
-import type { FollowUpDraftProvider } from "../chat/src/draft.js";
 
 export type Phase2Dependencies = {
   db: Queryable;
@@ -34,8 +32,6 @@ export type Phase2Dependencies = {
   channel: Channel;
   keyProvider: HandleEnvelopeKeyProvider;
   selectorProvider: ChatSelectorProvider;
-  liveModelConfig?: LiveModelConfig | null;
-  draftProvider?: FollowUpDraftProvider | null;
 };
 
 export type Phase2Runtime = {
@@ -56,18 +52,15 @@ export async function startPhase2Runtime(deps: Phase2Dependencies): Promise<Phas
   const privateStore = new EncryptedPrivateStore(repository, turnVault, handleVault);
   const checkpoint = new PostgresStreamCheckpoint(deps.db, deps.user_id);
 
-  // When a live model config is available, use it for chat selection.
-  // Otherwise fall back to the injected selector (offline/decline stub).
-  const chatSelector: ChatSelectorProvider = deps.liveModelConfig !== undefined
-    && deps.liveModelConfig !== null
-    ? new ModelChatSelectorProvider(deps.liveModelConfig)
-    : deps.selectorProvider;
-
+  // The selector is created at the main.ts factory level — it already
+  // reads liveModelConfigFromEnv() when configured, falling back to the
+  // decline stub when no model key is present. compose-runtime uses whatever
+  // it receives.
   const router = new InboundRouter({
     decoder: new SpectrumEventDecoder(),
     users: new HandleUserResolver(deps.db),
     deterministic: new DeterministicIntentAdapter(),
-    chat: new ClosedChatAdapter(deps.db, chatSelector),
+    chat: new ClosedChatAdapter(deps.db, deps.selectorProvider),
     delivery: new SpectrumReplyDeliveryPort(deps.channel),
     privateStore,
   });
@@ -144,8 +137,6 @@ export async function enhanceRuntimeWithPhase2(
     channel: Channel;
     keyProvider: HandleEnvelopeKeyProvider;
     selectorProvider: ChatSelectorProvider;
-    liveModelConfig?: LiveModelConfig | null;
-    draftProvider?: FollowUpDraftProvider | null;
   } | null,
 ): Promise<Phase2Enhancement | null> {
   if (!config.enabled || phase2Deps === null) return null;
@@ -157,8 +148,6 @@ export async function enhanceRuntimeWithPhase2(
     channel: phase2Deps.channel,
     keyProvider: phase2Deps.keyProvider,
     selectorProvider: phase2Deps.selectorProvider,
-    liveModelConfig: phase2Deps.liveModelConfig ?? null,
-    draftProvider: phase2Deps.draftProvider ?? null,
   });
 
   return {

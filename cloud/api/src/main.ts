@@ -38,6 +38,7 @@ import { buildServer } from "./server.js";
 import type { ChatSelectorProvider } from "../../chat/src/selector.js";
 import { enhanceRuntimeWithPhase2, type Phase2Config } from "../../phase2-runtime/compose-runtime.js";
 import { stubStreamPort } from "../../phase2-runtime/stub-stream-port.js";
+import { liveModelConfigFromEnv, ModelChatSelectorProvider } from "../../phase2-runtime/live-providers.js";
 import { liveSpectrumStreamPort } from "../../phase2-runtime/live-stream-port.js";
 
 export type SpectrumConfig = {
@@ -308,11 +309,14 @@ export const defaultRuntimeFactories: RuntimeFactories = {
 `),
   /** Stub until Photon SDK is documented. Replace before production. */
   createPhase2StreamPort: () => stubStreamPort(),
-  createPhase2SelectorProvider: (): ChatSelectorProvider => ({
-    select: async () => ({ kind: "decline" as const }),
-  }),
+  createPhase2SelectorProvider: (): ChatSelectorProvider => {
+    // When env is configured, use live model directly from here so that
+    // the production path activates without compose-runtime wiring changes.
+    const config = liveModelConfigFromEnv();
+    if (config) return new ModelChatSelectorProvider(config);
+    return { select: async () => ({ kind: "decline" as const }) };
+  },
 };
-
 const CARD_PATH = /^\/cards\/usr_[0-9A-Za-z]{8,32}\/card_[0-9a-f]{16}\.png$/;
 const CARD_SIGNATURE = /^[0-9a-f]{64}$/;
 const PUBLIC_CARD_CACHE_CONTROL = "private, max-age=300";

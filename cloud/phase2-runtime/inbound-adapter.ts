@@ -32,7 +32,11 @@ interface PhotonPayload {
   message: {
     id: string;
     direction: string;
-    sender?: { id: string; __platform: string };
+    // The webhook path (spectrum-channel.ts:172) correctly reads sender["address"].
+    // The SDK stream delivers Message objects where sender is a User{id, __platform}.
+    // We have not yet verified a live SDK message — id MAY be the E.164 or may be a
+    // Photon-internal identifier. Until confirmed, prefer address when available.
+    sender?: { id: string; address?: string; __platform: string };
     timestamp: Date;
     content: { type: string; text?: string; emoji?: string; state?: string };
   };
@@ -61,9 +65,11 @@ export class SpectrumEventDecoder implements InboundEventDecoder {
       }
     }
 
-    // sender.id is the Photon User ID — for iMessage, the E.164 phone number.
-    // space.phone is Boi's own line; using it as from_handle would match nothing.
-    const fromHandle = msg?.sender?.id
+    // The webhook path uses sender["address"], confirmed from Photon JSON payload.
+    // The SDK stream delivers User{id} — id MAY be the E.164 but is UNVERIFIED.
+    // Prefer address (webhook parity); fall back to id; throw only when neither exists.
+    const fromHandle = msg?.sender?.address
+      ?? msg?.sender?.id
       ?? (() => { throw new Error("spectrum_message_no_sender"); })();
 
     return {
