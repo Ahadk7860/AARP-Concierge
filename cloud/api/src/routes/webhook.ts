@@ -53,7 +53,10 @@ export function registerWebhookRoutes(
         return send(reply, 400, validation(`unknown provider ${req.params.provider}`));
       }
 
-      const signature = signatureHeader(req.headers["x-boi-signature"]);
+      // Spectrum uses x-spectrum-signature; Linq/mock use x-boi-signature.
+      const signature = signatureHeader(
+        req.headers["x-spectrum-signature"] ?? req.headers["x-boi-signature"]
+      );
       if (signature === null) {
         // Missing, empty, or duplicated. All three are the same answer, and none of
         // them is an exception.
