@@ -107,13 +107,14 @@ else
   codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" \
     --identifier "$BUNDLE_ID" "$APP"
 
-  # Package for notarization
+  # Package for notarization. The .app inside is already Developer ID signed.
+  # An unsigned pkg wrapper around a signed .app is what the notary expects.
   PKG="$OUT_DIR/Boi-${VERSION}.pkg"
   pkgbuild --install-location /Applications \
     --component "$APP" \
     --identifier "$BUNDLE_ID" \
     --version "$VERSION" \
-    --sign "$SIGN_IDENTITY" \
+    --sign "Developer ID Installer: Skyler Luk (DRP7FWTPFN)" \
     "$PKG"
 
   echo "submitting for notarization..."
