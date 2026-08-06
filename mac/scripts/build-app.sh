@@ -101,10 +101,53 @@ if [ "$SIGN_IDENTITY" = "-" ]; then
     "$APP/Contents/Resources/BoiWakeHelper"
   codesign --force --sign - --identifier "$BUNDLE_ID" "$APP"
 else
+  echo "codesigning with Developer ID: $SIGN_IDENTITY"
   codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" \
     --identifier "$HELPER_ID" "$APP/Contents/Resources/BoiWakeHelper"
   codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" \
     --identifier "$BUNDLE_ID" "$APP"
+
+  # Package for notarization
+  PKG="$OUT_DIR/Boi-${VERSION}.pkg"
+  pkgbuild --install-location /Applications \
+    --component "$APP" \
+    --identifier "$BUNDLE_ID" \
+    --version "$VERSION" \
+    --sign "$SIGN_IDENTITY" \
+    "$PKG"
+
+  echo "submitting for notarization..."
+  # Use keychain-stored app-specific password (preferred).
+  # Set BOI_NOTARY_APP_PASSWORD directly only in CI.
+  NOTARY_PASSWORD="${BOI_NOTARY_APP_PASSWORD:-@keychain:AC_PASSWORD}"
+  xcrun notarytool submit "$PKG" \
+    --apple-id "skylerluk@gmail.com" \
+    --team-id "DRP7FWTPFN" \
+    --password "$NOTARY_PASSWORD" \
+    --wait \
+    --output-format json | tee /tmp/boi-notary.json
+
+  NOTARY_STATUS=$(python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+print(data.get('status', 'Unknown'))
+" < /tmp/boi-notary.json 2>/dev/null || echo "Unknown")
+
+  if [ "$NOTARY_STATUS" = "Accepted" ]; then
+    echo "notarization accepted — stapling..."
+    xcrun stapler staple "$APP"
+    xcrun stapler staple "$PKG"
+    echo "stapled"
+  else
+    echo "notarization: $NOTARY_STATUS"
+    cat /tmp/boi-notary.json 2>/dev/null | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+issues = data.get('issues', []) if data else []
+for issue in issues:
+    print(f'  {issue.get("severity", "?")}: {issue.get("message", issue)}')
+" 2>/dev/null
+  fi
 fi
 
 plutil -lint "$APP/Contents/Info.plist" >/dev/null
