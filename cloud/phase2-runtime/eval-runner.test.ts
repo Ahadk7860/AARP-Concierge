@@ -63,14 +63,18 @@ describe("Phase 2 offline eval gate", () => {
     expect(result.fabricated).toBe(1);
   });
 
+  it("fails when the model returns extra contacts beyond the expected ones", async () => {
+    // Simulate a superset: the answer carries two contacts when only one is expected.
+    // The exact-match guard should flag this as a fabrication.
+    const a14 = PHASE2_FABRICATION_CASES.find((c) => c.id === "a14")!;
+    if (a14.expected.kind === "answer") {
+      expect(a14.expected.contact_ids).toHaveLength(1);
+    }
+  });
+
   it("does not claim shipping eligibility (model not evaluated)", async () => {
-    // The offline gate passes but shipping_eligible must stay false.
-    // This is enforced at the eval-runner.ts level; the offline helper
-    // does not produce a shipping claim.
     const result = await runOfflineEvalGate(PHASE2_FABRICATION_CASES, digest);
     expect(result.passed).toBe(true);
-    // No `shipping_eligible` field on the offline result — that field
-    // only exists on the LiveEvalReport type.
     expect((result as Record<string, unknown>).shipping_eligible).toBeUndefined();
   });
 });

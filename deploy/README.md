@@ -25,6 +25,13 @@ managed-Postgres `DATABASE_URL` reference.
 - `BOI_CARD_WRITE_SECRET` — the same secret reference used by `boi-card`
 - `BOI_CARD_PROXY_MAX_BYTES=8388608` (optional)
 - `READINESS_TIMEOUT_MS=2000` (optional)
+- `BOI_PHASE2_ENABLED=0` — Phase 2 inbound stream + chat, off by default. Set to `1`
+  after verifying base deploy health; readys the stream listener and retention worker.
+- `BOI_PHASE2_USER_ID` — required only when `BOI_PHASE2_ENABLED=1`. The user_id used
+  for stream checkpoint and retention scoping.
+- `BOI_LIVE_CHAT_MODEL` — model name (e.g. `gpt-4o`) for live chat selection; unset
+  means the offline/decline provider runs, which is correct for staging.
+- `BOI_LIVE_CHAT_API_KEY` — API key matching the model; unset when live chat is off.
 
 Railway supplies `PORT`. Generate the project's **only public domain** on this API
 service. Railway probes `/readyz`, which verifies Postgres, Spectrum, and the card
@@ -49,6 +56,16 @@ Mount a persistent Railway volume at `/data/cards`; Railway supplies the matchin
 `/cards/*`, `/readyz`, and authenticated deletion endpoint are reachable only through
 the Railway private network. The shared config probes `/readyz`; that probe performs a
 small create/read/delete cycle on the mounted volume without returning paths or errors.
+
+## Webhook configuration
+
+Photon inbound messages arrive at `POST /v1/webhooks/spectrum`. Configure the webhook
+URL in the Photon dashboard to `https://<api-public-domain>/v1/webhooks/spectrum`.
+Photon signs each request with an `X-Spectrum-Signature: v0=<sha256>` header; the
+SpectrumChannel handler verifies this against `SPECTRUM_WEBHOOK_SECRET`.
+
+The webhook path correctly extracts `sender.address` as the inbound phone number.
+(The Phase 2 stream decoder, by contrast, reads `message.sender.id` from the SDK.)
 
 ## Live gates deliberately not performed by this commit
 

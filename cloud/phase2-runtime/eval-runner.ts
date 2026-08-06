@@ -72,7 +72,7 @@ export async function runLiveEval(
     if (reply.kind === "answer") {
       const actual = reply.licenses.map((l) => l.contact_id);
       const expected = testCase.expected.contact_ids;
-      if (actual.length > 0 && expected.every((id: string) => actual.includes(id))) {
+      if (actual.length === expected.length && expected.every((id: string) => actual.includes(id))) {
         correctAnswers += 1;
       } else {
         fabricated += 1;
@@ -119,7 +119,7 @@ export async function runOfflineEvalGate(
     } else if (reply.kind === "answer") {
       const actual = reply.licenses.map((l) => l.contact_id);
       const expected = testCase.expected.contact_ids;
-      if (!expected.every((id: string) => actual.includes(id))) { fabricated += 1; failures.push(testCase.id); }
+      if (actual.length !== expected.length || !expected.every((id: string) => actual.includes(id))) { fabricated += 1; failures.push(testCase.id); }
     } else {
       failures.push(`${testCase.id}:false_decline`);
     }
