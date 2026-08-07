@@ -200,6 +200,10 @@ public struct VoicePackBuilder {
         case .warm: return .warm
         case .terse: return .terse
         case .formal: return .formal
+        // Below the evidence threshold. Carried across the wire as itself rather than
+        // folded into `mixed`, so a consumer can tell "not enough writing to read" from
+        // "read, and it did not settle".
+        case .unknown: return .unknown
         }
     }
 
