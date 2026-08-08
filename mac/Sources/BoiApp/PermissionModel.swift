@@ -523,15 +523,26 @@ final class PermissionModel: ObservableObject {
 enum PairingHandles {
 
     static let assignedLineVariable = "BOI_ASSIGNED_LINE"
+    static let spectrumLineVariable = "SPECTRUM_LINE_E164"
     static let pairingTokenVariable = "BOI_PAIRING_TOKEN"
 
-    static func assignedLine() -> String? { value(assignedLineVariable) }
+    static func assignedLine() -> String? {
+        value(assignedLineVariable) ?? value(spectrumLineVariable)
+    }
     static func pairingToken() -> String? { value(pairingTokenVariable) }
 
     private static func value(_ key: String) -> String? {
         if let value = ProcessInfo.processInfo.environment[key], !value.isEmpty {
             return value
         }
+        // Search from Application Support first — that's where a user drops
+        // configuration when the app is installed in /Applications.
+        let appSupport = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/Boi")
+        if let value = DotEnv.value(of: key, searchingFrom: appSupport.path), !value.isEmpty {
+            return value
+        }
+        // Then the current directory, for development/debugging.
         return DotEnv.value(of: key, searchingFrom: FileManager.default.currentDirectoryPath)
     }
 }
