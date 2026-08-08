@@ -162,7 +162,7 @@ export class SpectrumChannel implements Channel {
     });
     // ONE response for four reasons. `CONTRACTS.md` § 2 makes this `401 bad_signature` at
     // the route; distinguishing them to the caller would make the check an oracle.
-    if (!check.ok) throw new Error(`bad_signature(${check.reason})`);
+    if (!check.ok) throw new Error(`SIGV2_${check.reason}`);
 
     const message = (parsed["message"] ?? {}) as Record<string, unknown>;
     const sender = (parsed["sender"] ?? {}) as Record<string, unknown>;
