@@ -79,7 +79,7 @@ export function registerWebhookRoutes(
 
       // Diagnostic: log before signature verification using the app logger.
       logEvent(log, {
-        msg: "webhook.diag", provider: req.params.provider,
+        msg: "webhook.diag",
         signature_present: signature !== null,
         signature_preview: signature !== null ? signature.slice(0, 20) : null,
       });
