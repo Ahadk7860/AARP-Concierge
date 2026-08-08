@@ -65,6 +65,10 @@ public struct SyncRun {
         public var mirrorMessageCount = 0
         public var digestPath: String?
         public var voicePackPaths: [String] = []
+        /// Dual-written Phase 2 artefacts. V1 remains on disk while local consumers
+        /// migrate; v2 is the canonical upload for this run.
+        public var phase2DigestPath: String?
+        public var phase2VoicePackPaths: [String] = []
         public var health: CorpusHealth = .thin
         public var heartbeatPath: String?
         public var elapsed: TimeInterval = 0
@@ -148,8 +152,9 @@ public struct SyncRun {
         // LaunchAgent takes. Preferring the injection keeps a test from configuring the
         // same identity twice and disagreeing with itself.
         let identity = uploader?.identity ?? tokenStore.identity()
-        var digest: Digest?
         var packs: [VoicePack] = []
+        var phase2Digest: DigestV2?
+        var phase2Packs: [VoicePackV2] = []
 
         // DEGRADE, NEVER FABRICATE. A thin corpus gets no digest — handing somebody a
         // report built on 400 messages and calling it their year is the failure this
@@ -162,21 +167,33 @@ public struct SyncRun {
             // derived from stay on this machine.
             let signals = try FactExtractor.signalsByContact(
                 mirror: mirror, identities: metrics.relationships.map(\.identity))
-            let built = DigestBuilder(resolver: resolver,
-                                      options: .init(userID: identity?.user_id,
-                                                     generatedAt: now, system: system,
-                                                     signalsByContact: signals))
-                .build(from: metrics)
+            let redactor = Redactor(directory: contacts ?? .empty)
+            let builder = DigestBuilder(resolver: resolver,
+                                        options: .init(userID: identity?.user_id,
+                                                       generatedAt: now, system: system,
+                                                       signalsByContact: signals,
+                                                       understandingRedactor: redactor))
+            let built = builder.build(from: metrics)
+            let builtV2 = try builder.buildV2(from: metrics, mirror: mirror)
             let digestPath = URL(fileURLWithPath: paths.outputDirectory)
                 .appendingPathComponent("digest.json").path
+            let phase2DigestPath = URL(fileURLWithPath: paths.outputDirectory)
+                .appendingPathComponent("digest_v2.json").path
             try DigestBuilder.write(built, to: digestPath)
+            try DigestBuilder.write(builtV2, to: phase2DigestPath)
             outcome.digestPath = digestPath
-            digest = built
+            outcome.phase2DigestPath = phase2DigestPath
+            phase2Digest = builtV2
 
             packs = try VoicePackBuilder(options: .init(
-                now: now, redactor: Redactor(directory: contacts ?? .empty)))
+                now: now, redactor: redactor))
                 .build(mirror: mirror, identities: metrics.relationships.map(\.identity))
             outcome.voicePackPaths = try packs.map {
+                try VoicePackBuilder.write($0, toDirectory: paths.outputDirectory)
+            }
+            phase2Packs = try VoicePackBuilder(options: .init(now: now, redactor: redactor))
+                .buildV2(mirror: mirror, identities: metrics.relationships.map(\.identity))
+            outcome.phase2VoicePackPaths = try phase2Packs.map {
                 try VoicePackBuilder.write($0, toDirectory: paths.outputDirectory)
             }
         }
@@ -196,10 +213,10 @@ public struct SyncRun {
         // conversation can ask for, and it is also what the queue re-reads. Nothing above
         // this line depends on the network, so a Mac with no connectivity still produces
         // a complete local run.
-        outcome.upload = try upload(digest: digest,
-                                    digestPath: outcome.digestPath,
-                                    packs: packs,
-                                    packPaths: outcome.voicePackPaths,
+        outcome.upload = try upload(phase2Digest: phase2Digest,
+                                    phase2DigestPath: outcome.phase2DigestPath,
+                                    phase2Packs: phase2Packs,
+                                    phase2PackPaths: outcome.phase2VoicePackPaths,
                                     heartbeatPath: outcome.heartbeatPath,
                                     deviceID: resolver.localDeviceIdentifier(),
                                     identity: identity,
@@ -216,10 +233,10 @@ public struct SyncRun {
     /// its exit code — only an error can. Everything durable is already written when this
     /// runs, so the throw costs nothing but the process's exit status, which is exactly
     /// what it is for.
-    func upload(digest: Digest?,
-                digestPath: String?,
-                packs: [VoicePack],
-                packPaths: [String],
+    func upload(phase2Digest: DigestV2?,
+                phase2DigestPath: String?,
+                phase2Packs: [VoicePackV2],
+                phase2PackPaths: [String],
                 heartbeatPath: String?,
                 deviceID: String,
                 identity: DeviceIdentity?,
@@ -246,15 +263,16 @@ public struct SyncRun {
 
         var payloads: [Uploader.Payload] = []
 
-        // Read the bytes back off disk rather than re-encoding. `DigestBuilder.write`
-        // fills explicit nulls that a plain `JSONEncoder` omits, so re-encoding here
-        // would upload a document that differs from the one on disk — and the file is
-        // the artefact a support conversation asks for.
-        if let digest, let digestPath, let body = FileManager.default.contents(atPath: digestPath) {
+        // Both versions stay on disk during migration. Only v2 crosses this boundary:
+        // v1 and v2 share `generated_at`, the server's duplicate key, so posting both
+        // would silently leave whichever version arrived first as the only stored row.
+        // Read exact v2 bytes back from disk because the writer fills explicit nulls.
+        if let phase2Digest, let phase2DigestPath,
+           let body = FileManager.default.contents(atPath: phase2DigestPath) {
             payloads.append(.init(body: body, endpoint: .digest,
-                                  descriptor: .forDigest(digest)))
+                                  descriptor: .forDigest(phase2Digest)))
         }
-        for (pack, path) in zip(packs, packPaths) {
+        for (pack, path) in zip(phase2Packs, phase2PackPaths) {
             guard let body = FileManager.default.contents(atPath: path) else { continue }
             payloads.append(.init(body: body, endpoint: .voicePack,
                                   descriptor: .forVoicePack(pack)))
@@ -263,7 +281,7 @@ public struct SyncRun {
            let data = FileManager.default.contents(atPath: heartbeatPath),
            let beat = try? JSONDecoder().decode(Heartbeat.self, from: data) {
             let wire = HeartbeatUpload.from(beat, deviceID: deviceID,
-                                            digestGeneratedAt: digest?.generated_at)
+                                            digestGeneratedAt: phase2Digest?.generated_at)
             if let body = try? JSONEncoder().encode(wire) {
                 payloads.append(.init(body: body, endpoint: .heartbeat,
                                       descriptor: .forHeartbeat(wire)))

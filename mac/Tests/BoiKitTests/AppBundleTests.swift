@@ -129,16 +129,26 @@ final class LaunchAgentTests: XCTestCase {
     /// The plist invokes the **main app binary** with `--sync`. TCC is
     /// per-responsible-process and children do not inherit, so a helper would need its
     /// own grant that no screen asks for — and the sync would silently never run.
-    func testThePlistInvokesTheAppBinaryAndNotAHelper() {
+    func testThePlistInvokesTheRelocatableBundledAppBinaryAndNotAHelper() {
         let xml = LaunchAgentPlist.xml(binaryPath: binary)
-        XCTAssertTrue(xml.contains("<string>\(binary)</string>"))
+        XCTAssertTrue(xml.contains("<key>BundleProgram</key>"))
+        XCTAssertTrue(xml.contains("<string>Contents/MacOS/Boi</string>"))
         XCTAssertTrue(xml.contains("<string>--sync</string>"))
-        XCTAssertTrue(xml.contains("Contents/MacOS/"))
+        XCTAssertFalse(xml.contains(binary))
 
-        let helper = "/Users/x/Applications/Boi.app/Contents/Helpers/boi-sync"
-        XCTAssertFalse(LaunchAgentPlist.problems(inXML:
-            LaunchAgentPlist.xml(binaryPath: helper)).isEmpty,
+        let helper = xml.replacingOccurrences(of: "Contents/MacOS/Boi",
+                                              with: "Contents/Helpers/boi-sync")
+        XCTAssertFalse(LaunchAgentPlist.problems(inXML: helper).isEmpty,
             "a helper path must be rejected — it cannot hold the grant")
+    }
+
+    func testGeneratorIsByteIdenticalAcrossStagingAndInstallLocations() {
+        let staged = LaunchAgentPlist.xml(binaryPath: "/tmp/build/Boi.app/Contents/MacOS/Boi")
+        let installed = LaunchAgentPlist.xml(
+            binaryPath: "/Applications/Boi.app/Contents/MacOS/Boi")
+        XCTAssertEqual(staged, installed)
+        XCTAssertFalse(staged.contains("/tmp/"))
+        XCTAssertFalse(staged.contains("/Applications/"))
     }
 
     /// Agent, always. Root processes cannot hold TCC at all on macOS 13+, so the
@@ -151,26 +161,50 @@ final class LaunchAgentTests: XCTestCase {
             .contains { $0.contains("root") })
     }
 
-    /// `StartInterval`, not `StartCalendarInterval`. A calendar trigger assumes the
-    /// laptop is open at a particular moment; it is not.
-    func testACalendarIntervalIsRejected() {
-        let bad = LaunchAgentPlist.xml(binaryPath: binary)
-            .replacingOccurrences(of: "<key>StartInterval</key>",
-                                  of: "<key>StartCalendarInterval</key>")
-        let problems = LaunchAgentPlist.problems(inXML: bad)
-        XCTAssertTrue(problems.contains { $0.contains("StartCalendarInterval") })
-        XCTAssertTrue(problems.contains { $0.contains("no StartInterval") })
-
-        // And the check reads the KEY, not the word: the shipped plist explains in a
-        // comment why it does not use a calendar trigger, and that must stay legal.
-        XCTAssertTrue(LaunchAgentPlist.xml(binaryPath: binary)
-            .contains("StartCalendarInterval"), "the comment explaining the choice is gone")
-        XCTAssertEqual(LaunchAgentPlist.problems(inXML:
-            LaunchAgentPlist.xml(binaryPath: binary)), [])
+    /// Phase 1's half-hour polling is obsolete. The four RTC alarms wake the Mac at the
+    /// same wall-clock times represented here, so launchd now has four matching calendar
+    /// triggers and no periodic fallback.
+    func testTheCalendarIntervalsMatchTheFourWakePlannerTimes() {
+        let xml = LaunchAgentPlist.xml(binaryPath: binary)
+        XCTAssertTrue(xml.contains("<key>StartCalendarInterval</key>"))
+        XCTAssertFalse(xml.contains("<key>StartInterval</key>"))
+        for hour in [8, 12, 17, 21] {
+            XCTAssertTrue(xml.contains("<integer>\(hour)</integer>"),
+                          "missing local \(hour):00 trigger")
+        }
+        XCTAssertEqual(xml.components(separatedBy: "<key>Minute</key>").count - 1, 4)
     }
 
-    func testTheIntervalIsHalfAnHourAndTheAgentLivesInsideTheBundle() {
-        XCTAssertEqual(SyncRun.defaultIntervalSeconds, 1800)
+    func testTheObsoletePeriodicIntervalIsRejected() {
+        let bad = LaunchAgentPlist.xml(binaryPath: binary)
+            .replacingOccurrences(of: "<key>RunAtLoad</key>",
+                                  with: "<key>StartInterval</key><integer>1800</integer>"
+                                      + "<key>RunAtLoad</key>")
+        let problems = LaunchAgentPlist.problems(inXML: bad)
+        XCTAssertTrue(problems.contains { $0.contains("obsolete periodic StartInterval") })
+    }
+
+    func testTheLegacyIntervalArgumentCannotRestorePolling() {
+        let xml = LaunchAgentPlist.xml(binaryPath: binary, intervalSeconds: 60)
+        XCTAssertFalse(xml.contains("<key>StartInterval</key>"))
+        XCTAssertEqual(LaunchAgentPlist.problems(inXML: xml), [])
+    }
+
+    func testAMissingOrChangedWakeTimeIsRejected() {
+        let xml = LaunchAgentPlist.xml(binaryPath: binary)
+        let missing = xml.replacingOccurrences(
+            of: "<key>StartCalendarInterval</key>",
+            with: "<key>ObsoleteCalendarInterval</key>")
+        XCTAssertTrue(LaunchAgentPlist.problems(inXML: missing)
+            .contains { $0.contains("no valid StartCalendarInterval") })
+
+        let changed = xml.replacingOccurrences(of: "<integer>21</integer>",
+                                               with: "<integer>22</integer>")
+        XCTAssertTrue(LaunchAgentPlist.problems(inXML: changed)
+            .contains { $0.contains("expected exactly") })
+    }
+
+    func testTheAgentLivesInsideTheBundle() {
         XCTAssertEqual(LaunchAgentPlist.directoryInsideBundle, "Contents/Library/LaunchAgents")
         XCTAssertEqual(LaunchAgentPlist.fileName, "app.boi.mac.sync.plist")
     }
@@ -179,8 +213,10 @@ final class LaunchAgentTests: XCTestCase {
     /// one. Fails rather than skips when the bundle is absent: a green run that checked
     /// nothing is worse than a red one.
     func testTheBuiltBundlesPlistPassesTheSameRules() throws {
-        let candidates = [NSHomeDirectory() + "/Applications/Boi.app",
-                          "/tmp/boi-a/app/Boi.app"]
+        // Prefer the bundle this worktree's build command produces. A separately
+        // installed older Boi.app must not make a new bundle test inspect stale bytes.
+        let candidates = ["/tmp/boi-a/app/Boi.app",
+                          NSHomeDirectory() + "/Applications/Boi.app"]
         guard let bundle = candidates.first(where: {
             FileManager.default.fileExists(atPath: $0)
         }) else {
@@ -191,8 +227,65 @@ final class LaunchAgentTests: XCTestCase {
             + "/" + LaunchAgentPlist.fileName
         let xml = try String(contentsOfFile: plist, encoding: .utf8)
         XCTAssertEqual(LaunchAgentPlist.problems(inXML: xml), [])
-        XCTAssertTrue(xml.contains(bundle + "/Contents/MacOS/Boi"),
-                      "the plist must name this bundle's own binary")
+        XCTAssertTrue(xml.contains("<string>Contents/MacOS/Boi</string>"))
+        XCTAssertFalse(xml.contains(bundle), "plist must survive moving the app bundle")
+    }
+}
+
+// MARK: - The least-privilege wake helper bundle structure
+
+final class AppBundleWakeHelperTests: XCTestCase {
+    private var bundle: String { "/tmp/boi-a/app/Boi.app" }
+
+    func testBuiltBundleEmbedsTheSignedHelperAndDedicatedDaemonPlist() throws {
+        let helper = bundle + "/Contents/Resources/BoiWakeHelper"
+        let plist = bundle + "/Contents/Library/LaunchDaemons/"
+            + WakeHelperContract.plistName
+        guard FileManager.default.fileExists(atPath: helper),
+              FileManager.default.fileExists(atPath: plist) else {
+            throw Fixture.FixtureUnavailable(
+                detail: "no Prompt 03 bundle. Run: bash mac/scripts/build-app.sh")
+        }
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: helper))
+        let value = try XCTUnwrap(PropertyListSerialization.propertyList(
+            from: Data(contentsOf: URL(fileURLWithPath: plist)), format: nil) as? [String: Any])
+        XCTAssertEqual(value["BundleProgram"] as? String, WakeHelperContract.bundleProgram)
+        XCTAssertEqual(value["MachServices"] as? [String: Bool],
+                       [WakeHelperContract.serviceName: true])
+
+        try verifySignature(at: helper)
+        try verifySignature(at: bundle, deep: true)
+    }
+
+    func testBuildScriptSignsNestedHelperBeforeOuterApp() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let script = try String(contentsOf: root.appendingPathComponent("scripts/build-app.sh"))
+        let branchStart = try XCTUnwrap(script.range(of: "if [ \"$SIGN_IDENTITY\" = \"-\" ]"))
+        let branchEnd = try XCTUnwrap(script.range(of: "\nfi\n", range: branchStart.upperBound..<script.endIndex))
+        let signingBlock = String(script[branchStart.lowerBound..<branchEnd.upperBound])
+        let branches = signingBlock.components(separatedBy: "\nelse\n")
+        XCTAssertEqual(branches.count, 2)
+        for branch in branches {
+            let helper = try XCTUnwrap(branch.range(of: "--identifier \"$HELPER_ID\""))
+            let app = try XCTUnwrap(branch.range(of: "--identifier \"$BUNDLE_ID\""))
+            XCTAssertLessThan(helper.lowerBound, app.lowerBound,
+                              "nested helper must be signed before its containing app")
+        }
+        XCTAssertTrue(script.contains("codesign --verify --deep --strict \"$APP\""))
+    }
+
+    private func verifySignature(at path: String, deep: Bool = false) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
+        process.arguments = ["--verify", "--strict"] + (deep ? ["--deep"] : []) + [path]
+        let errors = Pipe()
+        process.standardError = errors
+        try process.run()
+        process.waitUntilExit()
+        let detail = String(decoding: errors.fileHandleForReading.readDataToEndOfFile(),
+                            as: UTF8.self)
+        XCTAssertEqual(process.terminationStatus, 0, detail)
     }
 }
 

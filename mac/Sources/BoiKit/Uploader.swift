@@ -618,7 +618,16 @@ public struct Uploader: Sendable {
             PayloadDescriptor(schemaVersion: digest.schema_version, asOf: digest.generated_at)
         }
 
+        public static func forDigest(_ digest: DigestV2) -> PayloadDescriptor {
+            PayloadDescriptor(schemaVersion: digest.schema_version, asOf: digest.generated_at)
+        }
+
         public static func forVoicePack(_ pack: VoicePack) -> PayloadDescriptor {
+            PayloadDescriptor(schemaVersion: pack.schema_version, asOf: pack.as_of,
+                              voicePackVersion: pack.voice_pack_version)
+        }
+
+        public static func forVoicePack(_ pack: VoicePackV2) -> PayloadDescriptor {
             PayloadDescriptor(schemaVersion: pack.schema_version, asOf: pack.as_of,
                               voicePackVersion: pack.voice_pack_version)
         }

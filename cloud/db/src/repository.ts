@@ -9,7 +9,15 @@
 // and it lives in `bootstrapLookups` at the bottom of this file, isolated and
 // returning nothing but an id.
 
-import type { Digest, Relationship, VoicePack, Brief, OutboundBlock } from "../../shared/src/index.js";
+import type {
+  Digest,
+  DigestV2,
+  Relationship,
+  VoicePack,
+  VoicePackV2,
+  Brief,
+  OutboundBlock,
+} from "../../shared/src/index.js";
 import { existsSync, readdirSync, rmSync } from "node:fs";
 import path from "node:path";
 
@@ -49,6 +57,10 @@ export interface Phase2PrivateRepository {
   purgeExpiredTurns(now: Date): Promise<number>;
 }
 
+// Implemented in Track I's owned module and re-exported here so existing repository
+// consumers receive the concrete ciphertext-only seam through `db/src/index.ts`.
+export { PostgresPhase2PrivateRepository } from "./encrypted.js";
+
 export type UserRow = {
   user_id: string;
   phone_e164: string;
@@ -81,7 +93,7 @@ export type DigestRow = {
   device_id: string;
   generated_at: Date;
   corpus_health: string;
-  payload: Digest;
+  payload: Digest | DigestV2;
   as_of: Date;
   received_at: Date;
 };
@@ -92,7 +104,7 @@ export type VoicePackRow = {
   scope: "contact" | "global";
   contact_id: string | null;
   n_exemplars: number | null;
-  payload: VoicePack;
+  payload: VoicePack | VoicePackV2;
   as_of: Date;
   received_at: Date;
 };
@@ -584,7 +596,7 @@ export class DuplicateDigestError extends Error {
  */
 export async function insertDigest(
   scope: UserScope,
-  input: { digest_id: string; digest: Digest },
+  input: { digest_id: string; digest: Digest | DigestV2 },
   pool = getPool(),
 ): Promise<{ digest_id: string; relationships: number }> {
   const d = input.digest;
@@ -645,7 +657,7 @@ export async function latestDigest(
  */
 export async function upsertVoicePack(
   scope: UserScope,
-  pack: VoicePack,
+  pack: VoicePack | VoicePackV2,
   db: Queryable = getPool(),
 ): Promise<void> {
   await scopedQuery(

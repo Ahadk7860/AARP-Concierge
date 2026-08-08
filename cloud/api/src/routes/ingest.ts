@@ -22,7 +22,7 @@ import {
   recordHeartbeat,
   upsertVoicePack,
 } from "../../../db/src/index.js";
-import type { Channel, Digest, VoicePack } from "../../../shared/src/index.js";
+import type { Channel, Digest, DigestV2, VoicePack, VoicePackV2 } from "../../../shared/src/index.js";
 import { authenticate, ownsUser } from "../auth.js";
 import { duplicate, redactionFailed, send, unauthorized, validation } from "../errors.js";
 import { bodyHash, logEvent } from "../logging.js";
@@ -75,7 +75,7 @@ export function registerIngestRoutes(
       logEvent(log, { msg: "digest.rejected", route: "/v1/digest", status: 400 });
       return send(reply, 400, validation(parsed.detail));
     }
-    const digest = parsed.value as Digest;
+    const digest = parsed.value as Digest | DigestV2;
 
     // The body's claim about who it belongs to, checked against the credential.
     if (!ownsUser(principal, digest.user_id)) {
@@ -162,7 +162,7 @@ export function registerIngestRoutes(
       });
       return send(reply, 400, validation(parsed.detail));
     }
-    const pack = parsed.value as VoicePack;
+    const pack = parsed.value as VoicePack | VoicePackV2;
 
     // THE SECOND is_from_me GUARD. Nothing below this point runs if it fires, and in
     // particular `upsertVoicePack` is never reached: a rejected pack is stored NOWHERE.

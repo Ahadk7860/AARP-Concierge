@@ -20,17 +20,21 @@ public enum LaunchAgentPlist {
     /// here.
     public static let directoryInsideBundle = "Contents/Library/LaunchAgents"
     public static var fileName: String { AppInfo.launchAgentLabel + ".plist" }
+    public static let bundleProgram = "Contents/MacOS/Boi"
 
-    /// `StartInterval`, deliberately.
+    /// The four `launchd` calendar triggers mirror the four RTC alarms exactly. The RTC
+    /// alarm makes the closed Mac wake at the trigger; the calendar event then launches
+    /// this app's `--sync` lifecycle, which queues the next RTC alarm.
     ///
-    /// `StartCalendarInterval` assumes the laptop is open at a particular moment. It is
-    /// not — that is the whole premise of CONTRACTS.md § 0, "the Mac is allowed to be
-    /// asleep". An interval fires on the next wake instead of missing the window, and the
-    /// idempotent guard in `SyncRun` absorbs the extra firings that produces.
+    /// `intervalSeconds` remains only as source compatibility for the developer CLI from
+    /// Phase 1. It is intentionally ignored: no caller can restore polling by changing
+    /// that value.
     public static func xml(binaryPath: String,
                            label: String = AppInfo.launchAgentLabel,
                            intervalSeconds: Int = SyncRun.defaultIntervalSeconds,
                            logDirectory: String? = nil) -> String {
+        _ = intervalSeconds
+        _ = binaryPath // Source-compatible CLI input; SMAppService requires relocation.
         let logs = logDirectory.map {
             """
             \n    <key>StandardOutPath</key>
@@ -39,6 +43,16 @@ public enum LaunchAgentPlist {
                 <string>\($0)/sync.err.log</string>
             """
         } ?? ""
+        let calendarIntervals = WakeScheduler.localWakeTimes.map { wakeTime in
+            """
+                <dict>
+                    <key>Hour</key>
+                    <integer>\(wakeTime.hour)</integer>
+                    <key>Minute</key>
+                    <integer>\(wakeTime.minute)</integer>
+                </dict>
+            """
+        }.joined(separator: "\n")
 
         return """
             <?xml version="1.0" encoding="UTF-8"?>
@@ -52,17 +66,20 @@ public enum LaunchAgentPlist {
                      per-responsible-process and children do not inherit the grant, so a
                      helper would need its own Full Disk Access that nothing ever asks
                      for and the sync would silently never run. -->
+                <key>BundleProgram</key>
+                <string>\(bundleProgram)</string>
                 <key>ProgramArguments</key>
                 <array>
-                    <string>\(binaryPath)</string>
+                    <string>Boi</string>
                     <string>--sync</string>
                 </array>
-                <!-- StartInterval, not StartCalendarInterval: a laptop is not open at a
-                     predictable moment, and an interval fires on the next wake rather
-                     than missing the window. SyncRun's idempotent guard absorbs the
-                     extra firings. -->
-                <key>StartInterval</key>
-                <integer>\(intervalSeconds)</integer>
+                <!-- These triggers coincide with WakeScheduler's RTC alarms. The alarm
+                     wakes the Mac; launchd starts --sync; that lifecycle schedules the
+                     next alarm. There is no periodic or always-on fallback. -->
+                <key>StartCalendarInterval</key>
+                <array>
+            \(calendarIntervals)
+                </array>
                 <key>RunAtLoad</key>
                 <false/>
                 <key>ProcessType</key>
@@ -92,21 +109,58 @@ public enum LaunchAgentPlist {
         if !xml.contains("<string>--sync</string>") {
             problems.append("does not invoke the binary with --sync")
         }
-        // The KEY, not the word. The generated plist explains in a comment why it does
-        // not use a calendar trigger, and a check that flagged that comment would be
-        // punishing the documentation of the decision — the same mistake the 3 Aug
-        // CONTRACTS § 6 amendment retired for the banned-metric grep.
-        if xml.contains("<key>StartCalendarInterval</key>") {
-            problems.append("uses StartCalendarInterval, which misses the window on a "
-                            + "laptop that was closed; use StartInterval")
+        if xml.contains("<key>StartInterval</key>") {
+            problems.append("uses obsolete periodic StartInterval instead of four RTC-aligned "
+                            + "calendar triggers")
         }
-        if !xml.contains("<key>StartInterval</key>") {
-            problems.append("has no StartInterval")
+        if let actual = calendarWakeTimes(inXML: xml) {
+            let expected = WakeScheduler.localWakeTimes.map { [$0.hour, $0.minute] }.sorted {
+                $0.lexicographicallyPrecedes($1)
+            }
+            if actual != expected {
+                problems.append("calendar triggers are \(actual); expected exactly \(expected)")
+            }
+        } else {
+            problems.append("has no valid StartCalendarInterval array")
         }
-        if !xml.contains("Contents/MacOS/") {
-            problems.append("does not point at a binary inside an app bundle's "
-                            + "Contents/MacOS — a bare helper cannot hold the grant")
+        guard let data = xml.data(using: .utf8),
+              let plist = try? PropertyListSerialization.propertyList(
+                from: data, options: [], format: nil),
+              let root = plist as? [String: Any] else {
+            problems.append("is not a valid property list")
+            return problems
+        }
+        if root["BundleProgram"] as? String != bundleProgram {
+            problems.append("BundleProgram must be the relocatable \(bundleProgram)")
+        }
+        if root["Program"] != nil {
+            problems.append("must not contain an absolute Program path")
+        }
+        if root["ProgramArguments"] as? [String] != ["Boi", "--sync"] {
+            problems.append("ProgramArguments must contain only Boi and --sync")
+        }
+        if xml.contains("/Boi.app/") {
+            problems.append("contains an absolute staging or installation path")
         }
         return problems
+    }
+
+    private static func calendarWakeTimes(inXML xml: String) -> [[Int]]? {
+        guard let data = xml.data(using: .utf8),
+              let plist = try? PropertyListSerialization.propertyList(
+                from: data, options: [], format: nil),
+              let root = plist as? [String: Any],
+              let intervals = root["StartCalendarInterval"] as? [[String: Any]] else {
+            return nil
+        }
+
+        let parsed: [[Int]] = intervals.compactMap { interval in
+            guard Set(interval.keys) == Set(["Hour", "Minute"]),
+                  let hour = interval["Hour"] as? Int,
+                  let minute = interval["Minute"] as? Int else { return nil }
+            return [hour, minute]
+        }
+        guard parsed.count == intervals.count else { return nil }
+        return parsed.sorted { $0.lexicographicallyPrecedes($1) }
     }
 }

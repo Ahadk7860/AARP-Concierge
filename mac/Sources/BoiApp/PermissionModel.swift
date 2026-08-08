@@ -1,5 +1,6 @@
 import BoiKit
 import Foundation
+import ServiceManagement
 import SwiftUI
 
 /// The onboarding state machine.
@@ -47,9 +48,14 @@ final class PermissionModel: ObservableObject {
     @Published private(set) var bundlePath: String?
     /// The way into the thread. Resolved once the scan completes.
     @Published private(set) var handoff: ThreadHandoff.State = .unreachable(signupLink: nil)
+    /// Visible even when the LaunchAgent itself is enabled: launchd registration and
+    /// permission to install a hardware wake are two different capabilities.
+    @Published private(set) var backgroundFreshnessDegradation: String?
+    @Published private(set) var backgroundRefreshRequiresApproval = false
 
     private var timer: Timer?
     private var relaunchWatchdog: Timer?
+    private var backgroundRefreshTask: Task<Void, Never>?
     /// Whether the user has actually left this app since we started waiting.
     private var leftWhileWaiting = false
     private var watcher = GrantWatcher()
@@ -109,6 +115,50 @@ final class PermissionModel: ObservableObject {
     func acceptConsent() {
         defaults.set(true, forKey: Self.consentKey)
         evaluateAccess()
+    }
+
+    /// Registers background work and separately records whether an RTC wake was really
+    /// installed. Failure never blocks foreground scans or the report handoff.
+    func enableBackgroundRefresh() {
+        backgroundRefreshTask?.cancel()
+        backgroundRefreshTask = Task { [weak self] in
+            guard let self else { return }
+            let result = await ScheduledSync.register(observe: { state in
+                guard !Task.isCancelled else { return }
+                self.observeBackgroundRegistration(state)
+            })
+            guard !Task.isCancelled else { return }
+            backgroundFreshnessDegradation = result.degradation
+            backgroundRefreshRequiresApproval = false
+            StructuredLog.emit("agent.register",
+                               level: result.degradation == nil ? .info : .warn,
+                               fields: [
+                "result": result.summary,
+                "status": ScheduledSync.statusDescription,
+                "freshness": result.degradation == nil ? "scheduled" : "degraded",
+            ])
+        }
+    }
+
+    func openBackgroundApprovalSettings() {
+        SMAppService.openSystemSettingsLoginItems()
+    }
+
+    private func observeBackgroundRegistration(_ state: WakeRegistrationState) {
+        switch state {
+        case .requiresApproval(let service):
+            backgroundRefreshRequiresApproval = true
+            backgroundFreshnessDegradation = "Approve \(service) in System Settings. "
+                + "Boi will notice the approval and continue automatically."
+        case .ready:
+            backgroundRefreshRequiresApproval = false
+            backgroundFreshnessDegradation = nil
+        case .degraded(let detail):
+            backgroundRefreshRequiresApproval = false
+            backgroundFreshnessDegradation = detail
+        case .registeringDaemon, .registeringAgent, .schedulingWake:
+            break
+        }
     }
 
     /// **Detects the already-granted case and skips the screen entirely**, which is the
@@ -449,6 +499,11 @@ final class PermissionModel: ObservableObject {
             // better. Ending on two things that are wrong is the wrong reward for having
             // just granted full disk access.
             handoff = resolveHandoff()
+            // This is the first eligible onboarding point: terms are accepted, Full Disk
+            // Access is effective in this process, and a scan completed. Registration
+            // schedules the first RTC wake; failure is logged and rendered as degraded
+            // background freshness, but never blocks the report or handoff.
+            enableBackgroundRefresh()
             enter(handoff.link == nil ? .ready : .handoff)
         } catch {
             failureDetail = "\(error)"

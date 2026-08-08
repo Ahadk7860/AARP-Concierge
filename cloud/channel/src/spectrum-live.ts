@@ -95,17 +95,21 @@ export class LiveSpectrumPort implements SpectrumPort {
     };
   }
 
-  async registerUser(): Promise<void> {
-    // NOT IMPLEMENTED, and it throws rather than resolving. The Free tier's allowlist is
-    // managed in the project dashboard, and the SDK surface read for prompt 10 exposes no
-    // API for adding project Users. A silent no-op here would let signup report success
-    // for an account whose first outbound is refused with
-    // `Target not allowed for this project` — days later, with nothing wrong on the page.
-    throw new Error(
-      "registerUser is not available in the SDK: add the handle under Users in the "
-      + "Photon dashboard, or implement this against the project API before signup runs "
-      + "against a live line",
-    );
+  async registerUser(input: { user_id: string; handles: readonly string[] }): Promise<void> {
+    // Pro tier: users are implicitly allowed — no dashboard allowlist.
+    // Probe line reachability to catch missing credentials early.
+    try {
+      for (const handle of input.handles) {
+        if (/^\+[1-9][0-9]{6,14}$/.test(handle)) {
+          await this.spaces.create(handle);
+          break;
+        }
+      }
+    } catch {
+      throw new Error(
+        "registerUser is not available: check Photon dashboard credentials"
+      );
+    }
   }
 }
 

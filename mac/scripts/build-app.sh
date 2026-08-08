@@ -5,9 +5,8 @@
 #
 # WHY A SCRIPT AND NOT AN XCODE PROJECT: SwiftPM cannot emit a .app, and a hand-written
 # project.pbxproj is a large generated file nobody can review in a diff. This does the
-# three things the bundle actually needs -- a binary in Contents/MacOS, an Info.plist,
-# and the LaunchAgent plist inside Contents/Library/LaunchAgents -- in twenty lines that
-# can be read.
+# reviewable bundle structure directly, including the main binary, LaunchAgent, and the
+# separately signed least-privilege wake helper plus LaunchDaemon plist.
 #
 # WHY THE BUNDLE AT ALL: all privileged I/O must happen inside one, because CLI
 # executables dropped off the Full Disk Access list in macOS 26.1-26.2. `boi-cli` stays
@@ -15,8 +14,8 @@
 #
 # NOT DONE HERE, DELIBERATELY: Developer ID signing, notarization and Sparkle. They need
 # a paid Apple Developer account and cannot be verified against the foundation, so this
-# ad-hoc signs instead. The result runs on this machine and is not distributable. See
-# prompts/track-a-mac/NOTES.md.
+# ad-hoc signs unless BOI_CODESIGN_IDENTITY names a Developer ID Application identity.
+# Ad-hoc output proves structure only: same-team XPC authorization deliberately rejects it.
 set -euo pipefail
 
 CONFIGURATION=debug
@@ -36,18 +35,29 @@ BUNDLE_ID="app.boi.mac"
 AGENT_LABEL="app.boi.mac.sync"
 VERSION="0.1.0"
 APP="$OUT_DIR/Boi.app"
+HELPER_ID="app.boi.mac.wake-helper"
+HELPER_PLIST="app.boi.mac.wake-helper.plist"
+SIGN_IDENTITY="${BOI_CODESIGN_IDENTITY:--}"
 
 echo "building BoiApp ($CONFIGURATION)…"
 swift build --package-path mac --configuration "$CONFIGURATION" --product BoiApp
-BINARY="$(swift build --package-path mac --configuration "$CONFIGURATION" --show-bin-path)/BoiApp"
+swift build --package-path mac --configuration "$CONFIGURATION" --product BoiWakeHelper
+BIN_DIR="$(swift build --package-path mac --configuration "$CONFIGURATION" --show-bin-path)"
+BINARY="$BIN_DIR/BoiApp"
+HELPER_BINARY="$BIN_DIR/BoiWakeHelper"
 [ -x "$BINARY" ] || { echo "no binary at $BINARY" >&2; exit 1; }
+[ -x "$HELPER_BINARY" ] || { echo "no helper at $HELPER_BINARY" >&2; exit 1; }
 
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Library/LaunchAgents"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" \
+  "$APP/Contents/Library/LaunchAgents" "$APP/Contents/Library/LaunchDaemons"
 
 # The executable is named Boi so the process, the bundle and the entry in the Full Disk
 # Access list all read the same way. A user scanning that list for "Boi" must find it.
 cp "$BINARY" "$APP/Contents/MacOS/Boi"
+cp "$HELPER_BINARY" "$APP/Contents/Resources/BoiWakeHelper"
+cp "mac/Sources/BoiWakeHelper/$HELPER_PLIST" \
+  "$APP/Contents/Library/LaunchDaemons/$HELPER_PLIST"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -81,19 +91,76 @@ PLIST
 # grant. A helper binary would not, and its failure mode is silence.
 swift run --package-path mac boi-cli agent-plist \
   --binary "$APP/Contents/MacOS/Boi" \
-  --log-directory /tmp/boi-a \
   > "$APP/Contents/Library/LaunchAgents/$AGENT_LABEL.plist"
 
-# Ad-hoc signature. Enough for TCC to identify the bundle on this machine; NOT enough to
-# distribute. Developer ID and notarization are the round after this one.
-codesign --force --sign - --identifier "$BUNDLE_ID" "$APP" >/dev/null 2>&1 \
-  || echo "warning: ad-hoc codesign failed; TCC may not track this bundle reliably" >&2
+# Nested code must be signed before the outer app. A real Developer ID identity supplies
+# the Team ID used by the helper's same-team caller check; ad-hoc signing has no Team ID
+# and is intentionally rejected by the production authorization path.
+if [ "$SIGN_IDENTITY" = "-" ]; then
+  codesign --force --sign - --identifier "$HELPER_ID" \
+    "$APP/Contents/Resources/BoiWakeHelper"
+  codesign --force --sign - --identifier "$BUNDLE_ID" "$APP"
+else
+  echo "codesigning with Developer ID: $SIGN_IDENTITY"
+  codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" \
+    --identifier "$HELPER_ID" "$APP/Contents/Resources/BoiWakeHelper"
+  codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" \
+    --identifier "$BUNDLE_ID" "$APP"
+
+  # Package for notarization. The .app inside is already Developer ID signed.
+  # An unsigned pkg wrapper around a signed .app is what the notary expects.
+  PKG="$OUT_DIR/Boi-${VERSION}.pkg"
+  pkgbuild --install-location /Applications \
+    --component "$APP" \
+    --identifier "$BUNDLE_ID" \
+    --version "$VERSION" \
+    --sign "Developer ID Installer: Skyler Luk (DRP7FWTPFN)" \
+    "$PKG"
+
+  echo "submitting for notarization..."
+  # Use keychain-stored app-specific password (preferred).
+  # Set BOI_NOTARY_APP_PASSWORD directly only in CI.
+  NOTARY_PASSWORD="${BOI_NOTARY_APP_PASSWORD:-@keychain:AC_PASSWORD}"
+  xcrun notarytool submit "$PKG" \
+    --apple-id "skylerluk@gmail.com" \
+    --team-id "DRP7FWTPFN" \
+    --password "$NOTARY_PASSWORD" \
+    --wait \
+    --output-format json | tee /tmp/boi-notary.json
+
+  NOTARY_STATUS=$(python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+print(data.get('status', 'Unknown'))
+" < /tmp/boi-notary.json 2>/dev/null || echo "Unknown")
+
+  if [ "$NOTARY_STATUS" = "Accepted" ]; then
+    echo "notarization accepted — stapling..."
+    xcrun stapler staple "$APP"
+    xcrun stapler staple "$PKG"
+    echo "stapled"
+  else
+    echo "notarization: $NOTARY_STATUS"
+    cat /tmp/boi-notary.json 2>/dev/null | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+issues = data.get('issues', []) if data else []
+for issue in issues:
+    print(f'  {issue.get("severity", "?")}: {issue.get("message", issue)}')
+" 2>/dev/null
+  fi
+fi
 
 plutil -lint "$APP/Contents/Info.plist" >/dev/null
 plutil -lint "$APP/Contents/Library/LaunchAgents/$AGENT_LABEL.plist" >/dev/null
+plutil -lint "$APP/Contents/Library/LaunchDaemons/$HELPER_PLIST" >/dev/null
+codesign --verify --strict "$APP/Contents/Resources/BoiWakeHelper"
+codesign --verify --deep --strict "$APP"
 
 echo "built $APP"
 echo "  binary:     $APP/Contents/MacOS/Boi"
 echo "  agent plist: $APP/Contents/Library/LaunchAgents/$AGENT_LABEL.plist"
+echo "  wake helper: $APP/Contents/Resources/BoiWakeHelper"
+echo "  daemon plist: $APP/Contents/Library/LaunchDaemons/$HELPER_PLIST"
 echo "  bundle id:  $BUNDLE_ID   version: $VERSION"
 codesign -dv "$APP" 2>&1 | sed 's/^/  /' || true
