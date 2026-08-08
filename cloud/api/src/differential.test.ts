@@ -36,6 +36,19 @@ const ajv = new Ajv2020({ strict: false, allErrors: true });
 // manufacture a disagreement that is not real.
 ajv.addFormat("date-time", /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/);
 
+// `digest.v2.json` reaches into `digest.v1.json` for `corpus` and `whole_life`. Register
+// it under its relative name so those `$ref`s resolve; `compile()` strips `$id` from the
+// copy it hands to ajv, so this registration cannot clash with compiling v1 directly.
+{
+  const v1 = JSON.parse(readFileSync(join(SCHEMA_DIR, "digest.v1.json"), "utf8")) as Record<
+    string,
+    unknown
+  >;
+  delete v1["$id"];
+  delete v1["$schema"];
+  ajv.addSchema(v1, "digest.v1.json");
+}
+
 function compile(name: string): ValidateFunction {
   const schema = JSON.parse(readFileSync(join(SCHEMA_DIR, name), "utf8")) as Record<
     string,
@@ -174,6 +187,74 @@ function digestCases(): Array<{ label: string; doc: unknown }> {
   return cases;
 }
 
+/**
+ * digest.v2 was never differentially tested — `compile()` was only ever handed
+ * `digest.v1.json`. That is how the v2 mirror came to omit `unknown` from both
+ * `understanding.register` and `understanding.relationship_kind` while the frozen
+ * schema listed it, and how a real 420-relationship digest earned 554 validation
+ * errors for values the arbiter calls valid.
+ *
+ * The enum probe below is driven BY the frozen schema rather than by a hand-written
+ * list, so a member added to `digest.v2.json` is covered without editing this file.
+ */
+function digestV2Cases(): Array<{ label: string; doc: unknown }> {
+  const full = load("digest_v2", "understood.json");
+  const cases: Array<{ label: string; doc: unknown }> = [{ label: "fixture:understood", doc: full }];
+
+  const schema = JSON.parse(
+    readFileSync(join(SCHEMA_DIR, "digest.v2.json"), "utf8"),
+  ) as Record<string, any>;
+  const understanding = schema["$defs"]["understanding"]["properties"] as Record<string, any>;
+  const exemplar = schema["$defs"]["contextual_exemplar"]["properties"] as Record<string, any>;
+
+  // Every member the frozen schema permits, plus one it does not, in every enum field.
+  // A member the mirror is missing shows up as ajv VALID / zod invalid.
+  for (const [field, spec] of Object.entries(understanding)) {
+    if (!Array.isArray(spec["enum"])) continue;
+    for (const member of [...spec["enum"], "not_a_member"]) {
+      const doc = clone(full);
+      const rel = (doc["relationships"] as Array<Record<string, any>>)[0]!;
+      rel["understanding"][field] = member;
+      cases.push({ label: `understanding.${field} = ${member}`, doc });
+    }
+  }
+  for (const [field, spec] of Object.entries(exemplar)) {
+    if (!Array.isArray(spec["enum"])) continue;
+    for (const member of [...spec["enum"], "not_a_member"]) {
+      const doc = clone(full);
+      const rel = (doc["relationships"] as Array<Record<string, any>>)[0]!;
+      const exemplars = rel["understanding"]["voice_exemplars"] as Array<Record<string, unknown>>;
+      if (exemplars.length === 0) continue;
+      exemplars[0]![field] = member;
+      cases.push({ label: `voice_exemplars[0].${field} = ${member}`, doc });
+    }
+  }
+
+  // Required/optional and junk-key axes, the two the v1 differential already covers.
+  const rel0 = (full["relationships"] as Array<Record<string, unknown>>)[0] ?? {};
+  for (const key of Object.keys(rel0)) {
+    const doc = clone(full);
+    delete (doc["relationships"] as Array<Record<string, unknown>>)[0]![key];
+    cases.push({ label: `relationship without ${key}`, doc });
+  }
+  for (const key of Object.keys((rel0["understanding"] as Record<string, unknown>) ?? {})) {
+    const doc = clone(full);
+    delete ((doc["relationships"] as Array<Record<string, any>>)[0]!["understanding"] as Record<string, unknown>)[key];
+    cases.push({ label: `understanding without ${key}`, doc });
+  }
+  for (const key of Object.keys(full)) {
+    const doc = clone(full);
+    delete doc[key];
+    cases.push({ label: `without ${key}`, doc });
+  }
+  {
+    const doc = clone(full);
+    (doc["relationships"] as Array<Record<string, any>>)[0]!["understanding"]["totally_unexpected"] = 1;
+    cases.push({ label: "junk key in understanding", doc });
+  }
+  return cases;
+}
+
 function voicePackCases(): Array<{ label: string; doc: unknown }> {
   const full = load("voice_pack", "maya.json");
   const cases: Array<{ label: string; doc: unknown }> = [
@@ -228,11 +309,16 @@ describe("the zod mirror agrees with the frozen JSON Schema, decision for decisi
   it("covers a meaningful number of boundary documents", () => {
     // Guards against the differential passing because the case list is empty.
     expect(digestCases().length).toBeGreaterThan(30);
+    expect(digestV2Cases().length).toBeGreaterThan(30);
     expect(voicePackCases().length).toBeGreaterThan(15);
   });
 
   it("agrees on every digest case", () => {
     differential("digest", digestSchema, compile("digest.v1.json"), digestCases());
+  });
+
+  it("agrees on every digest v2 case", () => {
+    differential("digest.v2", digestSchema, compile("digest.v2.json"), digestV2Cases());
   });
 
   it("agrees on every voice pack case", () => {

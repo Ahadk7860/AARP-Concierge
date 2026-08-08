@@ -247,7 +247,9 @@ public struct DigestBuilder {
         case .work: return .work
         case .family: return .family
         case .dormantClose: return .dormantClose
-        // Below the evidence threshold — see the note on `wireRegister`.
+        // Below the evidence threshold. Carried across the wire as itself rather than
+        // folded into `other`: `other` is a relationship that was classified and fits no
+        // named kind, `unknown` is one there was not enough evidence to classify.
         case .unknown: return .unknown
         }
     }

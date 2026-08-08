@@ -176,14 +176,17 @@ const contextualExemplarSchema = z
   .object({
     text: z.string().min(1).max(200),
     answered: z.enum(["question_from_them", "statement_from_them", "plan_unresolved", "none"]),
-    register: z.enum(["casual", "warm", "terse", "formal", "mixed"]),
+    register: z.enum(["casual", "warm", "terse", "formal", "mixed", "unknown"]),
   })
   .strict();
 
 const understandingSchema = z
   .object({
-    register: z.enum(["casual", "warm", "terse", "formal", "mixed"]),
-    relationship_kind: z.enum(["close_friend", "logistics", "work", "family", "dormant_close", "other"]),
+    // `unknown` is the below-threshold answer, and the frozen `digest.v2.json` lists it
+    // in both enums. Omitting it here made this mirror reject documents the arbiter
+    // calls valid — 554 of them on a real 420-relationship digest.
+    register: z.enum(["casual", "warm", "terse", "formal", "mixed", "unknown"]),
+    relationship_kind: z.enum(["close_friend", "logistics", "work", "family", "dormant_close", "other", "unknown"]),
     open_thread: z.string().max(140).nullable(),
     last_exchange_shape: z.enum(["question_from_them", "statement_from_them", "statement_from_you", "plan_unresolved", "none"]),
     topics: z.array(factToken).max(8),

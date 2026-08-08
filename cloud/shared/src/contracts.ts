@@ -41,11 +41,11 @@ export type Digest = {
 /** Phase 2's bounded understanding block. Derived on-device from both sides; never a quote. */
 export type ContextualExemplar = {
   text: string; answered: "question_from_them" | "statement_from_them" | "plan_unresolved" | "none";
-  register: "casual" | "warm" | "terse" | "formal" | "mixed";
+  register: "casual" | "warm" | "terse" | "formal" | "mixed" | "unknown";
 };
 export type RelationshipUnderstanding = {
   register: ContextualExemplar["register"];
-  relationship_kind: "close_friend" | "logistics" | "work" | "family" | "dormant_close" | "other";
+  relationship_kind: "close_friend" | "logistics" | "work" | "family" | "dormant_close" | "other" | "unknown";
   open_thread: string | null;
   last_exchange_shape: "question_from_them" | "statement_from_them" | "statement_from_you" | "plan_unresolved" | "none";
   topics: string[]; cadence_norm: string | null; voice_exemplars: ContextualExemplar[];
