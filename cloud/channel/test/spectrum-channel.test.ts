@@ -266,7 +266,7 @@ describe("the signature", () => {
     // part of their forgery was wrong turns the check into an oracle.
     const { port } = replayPort();
     const { channel } = channelWith(port);
-    expect(() => channel.normalizeInbound(body, "v0=deadbeef")).toThrow("bad_signature");
+    expect(() => channel.normalizeInbound(body, "v0=deadbeef")).toThrow("bad_signature(");
   });
 });
 
