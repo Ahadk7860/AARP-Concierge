@@ -9,7 +9,7 @@ import type {
   OutboundMessage,
   Channel,
 } from "../shared/src/index.js";
-import { findUserIdByHandle, type UserScope } from "../db/src/index.js";
+import { createUser, findUserIdByHandle, type UserScope } from "../db/src/index.js";
 import type { Queryable } from "../db/src/pool.js";
 import { latestDigest } from "../db/src/repository.js";
 import { runClosedChat } from "../chat/src/pipeline.js";
@@ -137,6 +137,28 @@ export class DeterministicIntentAdapter implements DeterministicIntentPort {
 // ---------------------------------------------------------------------------
 // Closed chat port — delegates to J's runClosedChat with a digest.v2 lookup.
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Auto-setup — creates a user on-the-fly when an unknown handle sends boi-setup.
+// Skipping the web signup entirely: the phone number is the identity, and the
+// setup token proves intent. On Photon Pro there is no allowlist to register.
+// ---------------------------------------------------------------------------
+
+export class AutoSetupUserCreator {
+  constructor(private readonly db: Queryable) {}
+
+  async createFromSetup(message: InboundMessage): Promise<UserScope | null> {
+    const phone = message.from_handle;
+    if (!phone || !/^\+[1-9][0-9]{6,14}$/.test(phone)) return null;
+    try {
+      const result = await createUser({ phone_e164: phone }, this.db);
+      return result.scope;
+    } catch {
+      // If user already exists (race), resolve by handle instead.
+      return findUserIdByHandle(phone, this.db);
+    }
+  }
+}
 
 export class ClosedChatAdapter implements ClosedChatPort {
   constructor(

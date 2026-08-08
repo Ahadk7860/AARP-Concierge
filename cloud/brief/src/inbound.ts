@@ -23,6 +23,7 @@ import { localDayKey } from "./scheduler.js";
 import type { Brief, Candidate, Channel, InboundMessage, OutboundMessage } from "../../shared/src/index.js";
 import {
   consumePairingCode,
+  createUser,
   findOutboundByProviderMessageId,
   findUserIdByHandle,
   liveCodeFor,
@@ -40,6 +41,15 @@ export function parsePairingCode(text: string | null): string | null {
   if (text === null) return null;
   const match = /^\s*([0-9]{6})\s*[.!]?\s*$/.exec(text);
   return match?.[1] ?? null;
+}
+
+/** Setup token — creates an account without a web signup. */
+function isSetupToken(text: string | null): boolean {
+  if (text === null) return false;
+  const trimmed = text.trim().toLowerCase();
+  return trimmed === "boi-setup"
+    || trimmed.startsWith("boi-setup ") || trimmed.endsWith(" boi-setup")
+    || trimmed.includes(" boi-setup ");
 }
 
 /**
@@ -671,6 +681,37 @@ export async function handleInbound(input: {
   }
 
   if (resolution.kind === "unknown_handle") {
+    // Auto-setup: when an unknown handle texts the setup token, create their account
+    // on the fly. Skips the web signup — the phone number is the identity, and the
+    // token proves intent. On Photon Pro there is no allowlist to register.
+    if (isSetupToken(input.inbound.text)) {
+      const phone = input.inbound.from_handle;
+      if (phone && /^\+[1-9][0-9]{6,14}$/.test(phone)) {
+        try {
+          const created = await createUser({ phone_e164: phone });
+          log({ msg: "inbound.auto_setup_created", provider: input.inbound.provider });
+          // Re-resolve and proceed with the created scope.
+          const scope = created.scope;
+          const setupReply: OutboundMessage = {
+            schema_version: "outbound.v1",
+            user_id: scope.user_id,
+            idempotency_key: `setup-${scope.user_id}`,
+            blocks: [{
+              type: "text" as const,
+              text: "all set — i haven't read your messages yet. download the Mac app to get started, then tap 'Start the conversation' when it's installed. you can also ask me things like 'who should i follow up with' once your history is synced.",
+            }],
+            reply_to_message_id: null,
+          };
+          await input.channel.send(setupReply);
+          log({ msg: "inbound.auto_setup_welcomed", user_id: scope.user_id });
+          return { selection: { kind: "paired" as const, token: "boi-setup" }, sent: [setupReply] };
+        } catch (err) {
+          log({ msg: "inbound.auto_setup_failed",
+            provider: input.inbound.provider,
+            error: err instanceof Error ? err.message : "unknown" });
+        }
+      }
+    }
     // An inbound from a handle with no account. Nothing to say and nobody to say it to;
     // replying would confirm to a stranger that this number is a service.
     log({ msg: "inbound.unknown_user", provider: input.inbound.provider });

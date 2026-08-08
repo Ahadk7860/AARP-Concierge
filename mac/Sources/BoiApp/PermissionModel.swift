@@ -413,8 +413,7 @@ final class PermissionModel: ObservableObject {
             handle: assignedLine(),
             pairingToken: pairingToken(),
             isPaired: EnvironmentTokenStore().identity() != nil,
-            signupURL: ThreadHandoff.signupURL(
-                apiBase: Uploader.Configuration.fromEnvironment()?.baseURL))
+            setupToken: "boi-setup")
 
         // Logged apart, because they are different problems with different owners. A
         // paired user missing the line is a display gap on this Mac; an unreachable user

@@ -519,21 +519,15 @@ public enum ThreadHandoff {
                         button: nil)
 
         case .unreachable:
-            // **The one genuinely broken state, and it gets a remedy rather than
-            // reassurance.**
+            // **Unreachable and genuinely broken.**
             //
-            // There is no thread, so the handle is not on the transport's allowlist, so
-            // nothing will arrive however long they wait. Track E's live send made the
-            // stakes concrete: the transport gates a new conversation until the recipient
-            // replies, so the user opening the thread is what makes every later message
-            // deliverable at all. Telling this user to sit tight is the worst available
-            // answer — it costs them the one action that would fix it.
+            // There is no thread and no assigned line — Boi cannot text them and they
+            // cannot text Boi. This needs a configured line (SPECTRUM_LINE_E164) to resolve.
             return Copy(headline: "Boi cannot reach you yet.",
-                        detail: "There is no thread between you and Boi, and this Mac has "
-                            + "not been told which number to use — so Boi cannot text you "
-                            + "and you cannot text Boi. Finishing signup opens the thread, "
-                            + "and everything else follows from there.",
-                        button: "Finish signing up")
+                        detail: "This Mac does not know which number Boi texts from. "
+                            + "Once configured, a single tap opens the conversation and "
+                            + "everything follows from there.",
+                        button: nil)
         }
     }
 
@@ -550,7 +544,7 @@ public enum ThreadHandoff {
     public static func resolve(handle: String?,
                                pairingToken: String?,
                                isPaired: Bool,
-                               signupURL: String? = nil) -> State {
+                               setupToken: String? = nil) -> State {
         let lineKnown = handle.map(isUsable) ?? false
 
         // Paired: the thread exists either way. Only whether this window can open it
@@ -560,22 +554,21 @@ public enum ThreadHandoff {
             return .paired(link: "sms:\(handle)")
         }
 
-        // Unpaired: a link needs both the line and the token. Without the token the link
-        // would open a thread and send nothing that pairs anything — it looks like it
-        // worked and does not — so that is the unreachable case too, and it has the same
-        // remedy.
-        guard let handle, lineKnown, let pairingToken, !pairingToken.isEmpty else {
-            return .unreachable(signupLink: signupURL)
+        // Unpaired without a usable handle: truly unreachable, no link to offer.
+        guard let handle, lineKnown else {
+            return .unreachable(signupLink: nil)
+        }
+
+        // Auto-setup: when we have a setup token, generate the sms link directly.
+        // No web signup needed — the token creates the user's account on first text.
+        if let setupToken, !setupToken.isEmpty {
+            return .unpaired(link: link(handle: handle, token: setupToken))
+        }
+
+        guard let pairingToken, !pairingToken.isEmpty else {
+            return .unreachable(signupLink: nil)
         }
         return .unpaired(link: link(handle: handle, token: pairingToken))
-    }
-
-    /// The signup page for a Mac that knows its API host. `GET /signup` — see
-    /// `cloud/api/src/routes/signup.ts`.
-    public static func signupURL(apiBase: URL?) -> String? {
-        guard let apiBase else { return nil }
-        let base = apiBase.absoluteString
-        return (base.hasSuffix("/") ? String(base.dropLast()) : base) + "/signup"
     }
 
     /// `sms:<handle>&body=<percent-encoded token>` — byte-for-byte the cloud's shape.

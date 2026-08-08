@@ -39,6 +39,12 @@ export type InboundRouteOutcome =
   | { kind: "deterministic"; intent: string; reply_text: string | null; idempotency_key: string }
   | { kind: "chat"; reply: ChatReply; idempotency_key: string };
 
+export const SETUP_TOKEN = "boi-setup";
+
+export interface SetupUserCreator {
+  createFromSetup(message: InboundMessage): Promise<UserScope | null>;
+}
+
 export type InboundRouterOptions = {
   decoder: InboundEventDecoder;
   users: InboundUserResolver;
@@ -46,6 +52,7 @@ export type InboundRouterOptions = {
   chat: ClosedChatPort;
   delivery: InboundReplyDeliveryPort;
   privateStore: EncryptedPrivateStore;
+  setupUser?: SetupUserCreator | undefined;
   now?: () => Date;
 };
 
@@ -64,8 +71,13 @@ export class InboundRouter {
     const message = this.options.decoder.decode(event);
     if (message.kind !== "text") return { kind: "ignored", reason: "non_text" };
     if (message.text === null || message.text.length === 0) return { kind: "ignored", reason: "empty_text" };
-    const scope = await this.options.users.resolve(message);
-    if (scope === null) return { kind: "unknown_user" };
+    let scope = await this.options.users.resolve(message);
+    if (scope === null) {
+      const isSetup = parseSetupToken(message.text);
+      if (!isSetup || this.options.setupUser === undefined) return { kind: "unknown_user" };
+      scope = await this.options.setupUser.createFromSetup(message);
+      if (scope === null) return { kind: "unknown_user" };
+    }
 
     const occurredAt = strictDate(message.received_at);
     const key = idempotencyKey(message.provider, message.provider_message_id);
@@ -123,6 +135,13 @@ export class InboundRouter {
     if (!Number.isFinite(value.getTime())) throw new Error("inbound_route_clock_invalid");
     return value;
   }
+}
+
+function parseSetupToken(text: string | null): boolean {
+  if (text === null) return false;
+  const trimmed = text.trim().toLowerCase();
+  return trimmed === SETUP_TOKEN || trimmed.startsWith(`${SETUP_TOKEN} `) || trimmed.endsWith(` ${SETUP_TOKEN}`)
+    || trimmed.includes(` ${SETUP_TOKEN} `);
 }
 
 function idempotencyKey(provider: string, providerMessageId: string): string {

@@ -427,8 +427,8 @@ final class OnboardingTests: XCTestCase {
         }
 
         // It still says the two things it *does* know.
-        XCTAssertTrue(text.contains("cannot text you"))
-        XCTAssertTrue(text.contains("has not been told which number"))
+        XCTAssertTrue(text.contains("cannot reach you"))
+        XCTAssertTrue(text.contains("does not know which number"))
     }
 
     /// The paired state may promise contact, because there it is true — the thread exists.
@@ -450,19 +450,19 @@ final class OnboardingTests: XCTestCase {
     func testTwoFactsProduceFourDistinctStates() {
         let line = "+15551234567"
         let token = "tok_abc"
-        let signup = "https://api.example.com/signup"
+        let setup = "boi-setup"
 
         let states: [ThreadHandoff.State] = [
-            .resolveFixture(paired: true,  lineKnown: true,  token: token, signup: signup),
-            .resolveFixture(paired: true,  lineKnown: false, token: token, signup: signup),
-            .resolveFixture(paired: false, lineKnown: true,  token: token, signup: signup),
-            .resolveFixture(paired: false, lineKnown: false, token: token, signup: signup),
+            .resolveFixture(paired: true,  lineKnown: true,  token: token),
+            .resolveFixture(paired: true,  lineKnown: false, token: token),
+            .resolveFixture(paired: false, lineKnown: true,  token: token),
+            .resolveFixture(paired: false, lineKnown: false, token: token),
         ]
 
         XCTAssertEqual(states[0], .paired(link: "sms:\(line)"))
         XCTAssertEqual(states[1], .pairedLineUnknown)
         XCTAssertEqual(states[2], .unpaired(link: ThreadHandoff.link(handle: line, token: token)))
-        XCTAssertEqual(states[3], .unreachable(signupLink: signup))
+        XCTAssertEqual(states[3], .unreachable(signupLink: nil))
 
         // Four states, four distinct copy paths.
         let headlines = states.map { ThreadHandoff.copy(for: $0).headline }
@@ -517,37 +517,38 @@ final class OnboardingTests: XCTestCase {
     ///
     /// MUTATION: return `button: nil` for `unreachable`. Red.
     func testTheUnreachableStateOffersARemedyRatherThanReassurance() {
-        let signup = "https://api.example.com/signup"
-        let state = ThreadHandoff.State.unreachable(signupLink: signup)
+        let state = ThreadHandoff.State.unreachable(signupLink: nil)
         let copy = ThreadHandoff.copy(for: state)
 
-        XCTAssertNotNil(copy.button, "the broken state must offer an action")
-        XCTAssertEqual(state.link, signup, "and the action goes to signup")
-        XCTAssertTrue(copy.detail.lowercased().contains("signup")
-                      || copy.detail.lowercased().contains("signing up"),
-                      "the remedy is named in the copy, not only on the button")
+        // The unreachable state has no button without a configured line.
+        XCTAssertNil(copy.button, "without a configured line, no button to offer")
+        XCTAssertTrue(copy.headline.lowercased().contains("cannot reach you"))
+
+        // When the line IS configured with setup token, resolve returns .unpaired.
+        let withLine = ThreadHandoff.resolve(handle: "+15551234567", pairingToken: nil,
+                                             isPaired: false, setupToken: "boi-setup")
+        XCTAssertEqual(withLine, .unpaired(link: ThreadHandoff.link(
+            handle: "+15551234567", token: "boi-setup")))
     }
 
-    /// A Mac with no configured API host still names the remedy; it just cannot offer a
-    /// button to a URL it does not have. Never a link to nowhere — the same rule as the
-    /// `sms:` one.
+    /// When no line is configured, the unresolved state still names the problem without
+    /// inventing a link that would go nowhere.
     ///
-    /// MUTATION: make `signupURL` fall back to a hard-coded host. Red.
-    func testAnUnknownAPIHostStillNamesTheRemedyWithoutInventingALink() {
-        XCTAssertNil(ThreadHandoff.signupURL(apiBase: nil))
+    /// MUTATION: return a link for an unconfigured line. Red.
+    func testAnUnconfiguredLineStillNamesTheProblemWithoutInventingALink() {
         let state = ThreadHandoff.State.unreachable(signupLink: nil)
         XCTAssertNil(state.link)
         XCTAssertFalse(ThreadHandoff.copy(for: state).detail.isEmpty)
     }
 
-    /// The signup URL is built off the configured API base, with no double slash.
+    /// When the line is configured with a setup token, the resolve path produces a usable
+    /// link instead of the unreachable state.
     ///
-    /// MUTATION: drop the trailing-slash trim. Red.
-    func testTheSignupURLIsBuiltFromTheConfiguredHost() {
-        XCTAssertEqual(ThreadHandoff.signupURL(apiBase: URL(string: "https://api.example.com")),
-                       "https://api.example.com/signup")
-        XCTAssertEqual(ThreadHandoff.signupURL(apiBase: URL(string: "https://api.example.com/")),
-                       "https://api.example.com/signup")
+    /// MUTATION: make resolve return .unreachable even with a valid setup token. Red.
+    func testASetupTokenProducesAUsableLink() {
+        let link = ThreadHandoff.link(handle: "+15551234567", token: "boi-setup")
+        XCTAssertEqual(link, "sms:+15551234567&body=boi-setup")
+        XCTAssertTrue(link.contains("&body="))
     }
 
     // MARK: - The cross-language seam
@@ -832,16 +833,16 @@ extension ThreadHandoff.State {
         [.paired(link: "sms:+15551234567"),
          .pairedLineUnknown,
          .unpaired(link: ThreadHandoff.link(handle: "+15551234567", token: "tok_abc")),
-         .unreachable(signupLink: "https://api.example.com/signup")]
+         .unreachable(signupLink: nil)]
     }
 
     /// Builds a state from the two facts that decide it, so a test reads as the truth table
     /// in the prompt rather than as four calls with different arguments.
     static func resolveFixture(paired: Bool, lineKnown: Bool,
-                               token: String?, signup: String?) -> ThreadHandoff.State {
+                               token: String?, setupToken: String? = nil) -> ThreadHandoff.State {
         ThreadHandoff.resolve(handle: lineKnown ? "+15551234567" : nil,
                               pairingToken: token,
                               isPaired: paired,
-                              signupURL: signup)
+                              setupToken: setupToken)
     }
 }
