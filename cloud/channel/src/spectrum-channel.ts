@@ -148,6 +148,22 @@ export class SpectrumChannel implements Channel {
     const body = typeof rawBody === "string" ? rawBody : rawBody.toString("utf8");
     const parsed = JSON.parse(body) as Record<string, unknown>;
 
+    // Diagnostic: log the top-level keys Photon sent and the sub-keys of
+    // message/sender so we can spot field-name drift when upgrading to Pro.
+    (() => {
+      const sample: Record<string, unknown> = {};
+      for (const key of ["message", "sender", "line", "timestamp"]) {
+        if (parsed[key] !== undefined) {
+          const val = parsed[key];
+          sample[key] = typeof val === "object" && val !== null
+            ? Object.keys(val as object) : typeof val;
+        }
+      }
+      console.error(JSON.stringify({
+        msg: "spectrum.webhook.shape", keys: Object.keys(parsed), sample,
+      }));
+    })();
+
     // The timestamp rides in the body's own field when the caller passes only a
     // signature — Fastify hands both headers to the route, which is where the real one
     // comes from; this keeps the frozen two-argument shape honest either way.
