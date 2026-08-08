@@ -254,11 +254,11 @@ class WebhookSecretChannel implements Channel {
   send(message: OutboundMessage): Promise<SendResult> { return this.delegate.send(message); }
   capabilities(): Promise<Capabilities> { return this.delegate.capabilities(); }
   health(): Promise<ChannelHealth> { return this.delegate.health(); }
-  normalizeInbound(rawBody: Buffer | string, signature: string): InboundMessage {
+  normalizeInbound(rawBody: Buffer | string, signature: string, timestamp?: string): InboundMessage {
     const previous = process.env["SPECTRUM_WEBHOOK_SECRET"];
     process.env["SPECTRUM_WEBHOOK_SECRET"] = this.webhookSecret;
     try {
-      return this.delegate.normalizeInbound(rawBody, signature);
+      return this.delegate.normalizeInbound(rawBody, signature, timestamp);
     } finally {
       if (previous === undefined) delete process.env["SPECTRUM_WEBHOOK_SECRET"];
       else process.env["SPECTRUM_WEBHOOK_SECRET"] = previous;
