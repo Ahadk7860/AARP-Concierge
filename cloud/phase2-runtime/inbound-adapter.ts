@@ -130,8 +130,25 @@ export class DeterministicIntentAdapter implements DeterministicIntentPort {
     if (pairingCode !== null) {
       return { kind: "handled", intent: "pairing_code", reply_text: null };
     }
+    // Auto-setup welcome: when a new user texts boi-setup (or variants),
+    // respond with a welcome instead of falling through to the chat selector.
+    if (isSetupToken(text)) {
+      return {
+        kind: "handled",
+        intent: "auto_setup",
+        reply_text: "all set — i haven't read your messages yet. "
+          + "open the Mac app, grant Full Disk Access, and i'll text you "
+          + "when your history is ready. you can also ask me things like "
+          + "\"who should i follow up with\" once your digest syncs.",
+      };
+    }
     return { kind: "unhandled" };
   }
+}
+
+function isSetupToken(text: string): boolean {
+  const t = text.trim().toLowerCase();
+  return t === "boi-setup" || t.startsWith("boi-setup ");
 }
 
 // ---------------------------------------------------------------------------
