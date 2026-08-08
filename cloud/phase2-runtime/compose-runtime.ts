@@ -18,6 +18,7 @@ import { PostgresStreamCheckpoint } from "./checkpoint-adapter.js";
 import {
   SpectrumEventDecoder,
   HandleUserResolver,
+  AutoSetupUserCreator,
   SpectrumReplyDeliveryPort,
   DeterministicIntentAdapter,
   ClosedChatAdapter,
@@ -59,6 +60,7 @@ export async function startPhase2Runtime(deps: Phase2Dependencies): Promise<Phas
   const router = new InboundRouter({
     decoder: new SpectrumEventDecoder(),
     users: new HandleUserResolver(deps.db),
+    setupUser: new AutoSetupUserCreator(deps.db),
     deterministic: new DeterministicIntentAdapter(),
     chat: new ClosedChatAdapter(deps.db, deps.selectorProvider),
     delivery: new SpectrumReplyDeliveryPort(deps.channel),
