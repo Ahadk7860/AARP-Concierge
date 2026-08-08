@@ -77,14 +77,13 @@ export function registerWebhookRoutes(
         return reply.code(500).send({ error: "internal" });
       }
 
-      // Diagnostic: log the timestamp header presence and body keys.
-      const timestampHeader = signatureHeader(req.headers["x-spectrum-timestamp"]);
-      let bodyKeys: string[] = [];
-      try { bodyKeys = Object.keys(JSON.parse(raw) as object).slice(0, 10); } catch { /* not JSON */ }
-      logEvent(log, {
-        msg: "webhook.diag", route: "/v1/webhooks/:provider",
-        violations: `ts_header:${timestampHeader !== null ? "yes" : "no"} keys:[${bodyKeys.join(",")}] sig_hdr:${signature !== null ? "yes" : "no"}`,
-      });
+      // URGENT DIAGNOSTIC — log raw header presence to stderr.
+      const tsHdr = req.headers["x-spectrum-timestamp"] ?? null;
+      process.stderr.write(JSON.stringify({
+        msg: "WEBHOOK_DIAG",
+        has_ts_header: tsHdr !== null,
+        ts_header: tsHdr !== null ? (Array.isArray(tsHdr) ? "array" : String(tsHdr).slice(0, 14)) : "missing",
+      }) + "\n");
 
       let inbound;
       try {
