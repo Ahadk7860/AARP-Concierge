@@ -70,7 +70,14 @@ export async function startPhase2Runtime(deps: Phase2Dependencies): Promise<Phas
   const stream = new SpectrumStream({
     port: deps.streamPort,
     checkpoint,
-    onEvent: async (event) => { await router.route(event); },
+    onEvent: async (event) => {
+      try { await router.route(event); } catch (err) {
+        process.stderr.write(JSON.stringify({
+          component: "spectrum.stream", msg: "route_error",
+          error: err instanceof Error ? err.message : "unknown",
+        }) + "\n");
+      }
+    },
     log: (event) => {
       // Operational metadata only — no payload, no provider error strings.
       process.stderr.write(JSON.stringify({ component: "spectrum.stream", ...event }) + "\n");

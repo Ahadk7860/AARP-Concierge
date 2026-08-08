@@ -4,7 +4,7 @@ ARG CACHE_BUST=1
 COPY package.json package-lock.json ./
 RUN npm ci
 COPY . .
-# cache bust 1786165611
+# cache bust 1786166490
 RUN npm run typecheck && ./node_modules/.bin/tsc -p tsconfig.json
 
 FROM node:22-bookworm-slim AS runtime
