@@ -231,6 +231,10 @@ public struct DigestBuilder {
         case .warm: return .warm
         case .terse: return .terse
         case .formal: return .formal
+        // Below the evidence threshold. Carried across the wire as itself rather than
+        // folded into `mixed`, so a consumer can tell "not enough writing to read" from
+        // "read, and it did not settle".
+        case .unknown: return .unknown
         }
     }
 
@@ -243,6 +247,8 @@ public struct DigestBuilder {
         case .work: return .work
         case .family: return .family
         case .dormantClose: return .dormantClose
+        // Below the evidence threshold — see the note on `wireRegister`.
+        case .unknown: return .unknown
         }
     }
 

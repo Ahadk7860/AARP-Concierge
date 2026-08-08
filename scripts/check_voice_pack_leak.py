@@ -38,6 +38,214 @@ import sys
 NULL_TEXT_REFUSAL_THRESHOLD = 0.05
 
 
+# ---------------------------------------------------------------------------
+# AMENDMENT-002: the `understanding.open_thread` closed grammar
+# ---------------------------------------------------------------------------
+#
+# SOURCE OF TRUTH: mac/Sources/BoiKit/UnderstandingBuilder.swift -- the four literal
+# descriptions returned by `outstandingThread`, and the `topicMarkers` token column.
+# The constants below are a COPY of that vocabulary, and the copy is deliberate:
+# this script has to know the closed set to be able to reject anything outside it.
+#
+# DRIFT BETWEEN THE TWO IS ITSELF A BUG, AND THIS CHECK IS HOW IT SURFACES. If somebody
+# adds a seventh topic token to the Swift and not to this file, every digest carrying it
+# FAILS here. That is the designed behaviour, not an accident to be papered over: the
+# alternative is a checker that silently accepts whatever the builder feels like emitting,
+# which is the same as having no checker. A legitimate new token costs one line here and
+# a moment's thought about whether it is really a closed-vocabulary token; an illegitimate
+# one costs a privacy incident. Fail loudly, never pass silently.
+#
+# WHY A WHITELIST AND NOT A BLACKLIST. `open_thread` used to be one of four frozen
+# strings, so the verbatim / >=12-char-span checks further down were adequate: nothing
+# variable could enter the field at all. Once a token is interpolated, those checks stop
+# being sufficient. `apartment` is nine characters, below the 12-character span floor that
+# exists so ordinary short words like "friday" are not flagged. A builder that was buggy
+# -- or hostile -- could therefore smuggle a short inbound fragment through the field and
+# both existing checks would shrug. The only thing that closes that hole is refusing to
+# reason about what a bad token looks like and instead enumerating every good one.
+# An unrecognised token IS the finding.
+
+OPEN_THREAD_TOPIC_VOCABULARY = frozenset({
+    "apartment", "climbing", "family", "plans", "school", "work",
+})
+
+# Independent of membership above. `topicMarkers` tokens are short by construction, so
+# these caps should never bind -- which is exactly why they are worth asserting. If one
+# ever does bind, the thing in the slot is not a token, it is somebody's clause.
+MAX_OPEN_THREAD_TOPIC_WORDS = 3
+MAX_OPEN_THREAD_TOPIC_CHARS = 40
+
+# The four descriptions, each with `{about}` marking the ONE position the optional
+# `about the <token>` clause may occupy. The marker is in the template string rather than
+# in a comment so the documented position and the enforced position cannot disagree.
+#
+#   "asked more than once, unanswered"
+#     -> "asked more than once about the apartment, unanswered"
+#
+# The slot for the two templates without a published example is fixed here by the same
+# rule -- immediately after the noun the clause modifies -- and must be reconciled against
+# the Swift when the interpolation lands.
+OPEN_THREAD_TEMPLATES = (
+    "asked more than once{about}, unanswered",
+    "unanswered question from them{about}",
+    "raised the plan more than once{about}, unresolved",
+    "plan{about} appears unresolved",
+)
+
+OPEN_THREAD_CLAUSE_PREFIX = " about the "
+
+# One anchored pattern per template. The slot capture is deliberately PERMISSIVE (`.+?`):
+# we want whatever a builder actually put there to be captured and then judged against the
+# vocabulary, rather than silently failing to match and losing the ability to say what was
+# wrong. Matching is case-sensitive against the whitespace-collapsed string; the templates
+# are literals in Swift, so there is no legitimate casing or spacing variance to tolerate.
+_OPEN_THREAD_PATTERNS = tuple(
+    re.compile(
+        "^"
+        + re.escape(head)
+        + "(?:" + re.escape(OPEN_THREAD_CLAUSE_PREFIX) + "(?P<topic>.+?))?"
+        + re.escape(tail)
+        + "$"
+    )
+    for head, tail in (t.split("{about}") for t in OPEN_THREAD_TEMPLATES)
+)
+
+
+def open_thread_violations(open_thread: object) -> list[str]:
+    """Every way a non-null `open_thread` can fall outside the closed grammar.
+
+    Returns [] for `None`: no outstanding turn is a legitimate reading, and absence is
+    never reported as a finding. Anything else must be a string that matches one of the
+    four templates, optionally carrying an `about the <token>` clause whose token is a
+    member of the closed topic vocabulary and within the per-token cap.
+
+    This does not replace the verbatim / span checks against the inbound corpus -- it sits
+    alongside them. Those catch a long quote; this catches a short one, and also catches
+    the case where the corpus this script happens to be pointed at does not contain the
+    leaked text at all.
+    """
+    if open_thread is None:
+        return []
+    if not isinstance(open_thread, str):
+        return [f"understanding.open_thread is {type(open_thread).__name__}, "
+                f"not a string or null"]
+
+    candidate = re.sub(r"\s+", " ", open_thread).strip()
+    if not candidate:
+        return ["understanding.open_thread is present but empty -- emit null for "
+                "'no outstanding turn', never a blank string"]
+
+    for pattern in _OPEN_THREAD_PATTERNS:
+        match = pattern.match(candidate)
+        if match is None:
+            continue
+        topic = match.group("topic")
+        if topic is None:
+            return []  # a bare template, the pre-interpolation shape. Fine.
+
+        problems: list[str] = []
+        # Cap first, and independently of membership: a token over the cap is a clause
+        # regardless of whether somebody also added it to the vocabulary above.
+        if len(topic) > MAX_OPEN_THREAD_TOPIC_CHARS:
+            problems.append(
+                f"understanding.open_thread topic is {len(topic)} chars > "
+                f"{MAX_OPEN_THREAD_TOPIC_CHARS} -- {topic[:40]!r}"
+            )
+        if len(topic.split()) > MAX_OPEN_THREAD_TOPIC_WORDS:
+            problems.append(
+                f"understanding.open_thread topic is {len(topic.split())} words > "
+                f"{MAX_OPEN_THREAD_TOPIC_WORDS} -- a topic is a token, not a clause "
+                f"-- {topic[:40]!r}"
+            )
+        if topic not in OPEN_THREAD_TOPIC_VOCABULARY:
+            problems.append(
+                f"understanding.open_thread topic {topic[:40]!r} is not in the closed "
+                f"topic vocabulary -- either the counterpart's words reached the field, "
+                f"or UnderstandingBuilder.topicMarkers gained a token this script was "
+                f"not told about. Both are bugs; neither is allowed to pass quietly."
+            )
+        return problems
+
+    return [
+        f"understanding.open_thread does not match the closed grammar -- "
+        f"{open_thread[:60]!r}. Only the four UnderstandingBuilder descriptions are "
+        f"permitted, with at most an `about the <token>` clause at the documented slot."
+    ]
+
+
+# ---------------------------------------------------------------------------
+# AMENDMENT-003: a finding nobody can read is not a finding
+# ---------------------------------------------------------------------------
+#
+# Found on 7 Aug by running this guard against the real corpus rather than a fixture.
+# A real inbound sentence was planted into `understanding.open_thread`, `--digest` was
+# run, and the output was INDISTINGUISHABLE from a clean run. The check was working
+# perfectly. Two things downstream of it hid the result, and neither is a bug in the
+# check itself:
+#
+#   1. The exit code was ALREADY 1. `relationship.facts` carries 825 standing violations
+#      on this corpus -- short allowlist tokens like 'today' that are also, verbatim,
+#      somebody's entire message. So "did it exit non-zero" answers a question nobody
+#      was asking, and cannot answer the one they were.
+#   2. The report printed `problems[:10]`, and all ten were facts. The open_thread
+#      finding was number 826.
+#
+# The operator saw the same ten lines either way. The only tell that a privacy leak had
+# entered the boundary was a total ticking 825 -> 826, in a number nobody memorises.
+#
+# Raising the cap is not the fix; 826 lines is not a report either. Findings are now
+# CATEGORISED BY FIELD, every field present is named with its own count, and every field
+# gets its own examples. A noisy field can no longer bury a quiet one -- which is the
+# property that actually matters here, because the rare finding is the dangerous one.
+# The common one is a known tuning problem in the fact extractor; the rare one is
+# somebody's prose crossing the boundary.
+#
+# This is a frozen anchor for the same reason the rest of the file is. If a future change
+# makes violations print as a flat list again, this failure comes straight back.
+
+FIELD_FACTS = "relationship.facts"
+FIELD_GIST_FACTS = "gist.facts"
+FIELD_OPEN_THREAD = "understanding.open_thread"
+FIELD_CADENCE = "understanding.cadence_norm"
+FIELD_EXEMPLAR = "understanding.voice_exemplars[].text"
+
+# Per FIELD, not per run. Five is enough to see a pattern; the count tells you the size.
+EXAMPLES_PER_FIELD = 5
+
+
+class Findings:
+    """Violations grouped by the field they were found in, so none can be crowded out."""
+
+    def __init__(self) -> None:
+        self._by_field: dict[str, list[str]] = {}
+
+    def add(self, field: str, message: str) -> None:
+        self._by_field.setdefault(field, []).append(message)
+
+    def extend(self, field: str, messages: list[str]) -> None:
+        for message in messages:
+            self.add(field, message)
+
+    def __len__(self) -> int:
+        return sum(len(v) for v in self._by_field.values())
+
+    def report(self) -> None:
+        print(f"FAIL -- {len(self)} violation(s) across {len(self._by_field)} field(s).")
+        # Sorted so the same corpus always reports in the same order and two runs can be
+        # diffed against each other.
+        for field in sorted(self._by_field):
+            messages = self._by_field[field]
+            print(f"\n  {field} -- {len(messages)} violation(s)")
+            for message in messages[:EXAMPLES_PER_FIELD]:
+                print(f"    {message}")
+            remaining = len(messages) - EXAMPLES_PER_FIELD
+            if remaining > 0:
+                print(f"    ... and {remaining} more in this field")
+        print("\nThe allowlist is what the fabrication gate trusts. A token that is "
+              "somebody's\nsentence makes the gate license their prose in the user's "
+              "own name.")
+
+
 def norm(s: str) -> str:
     return re.sub(r"\s+", " ", s or "").strip().lower()
 
@@ -191,8 +399,11 @@ def main() -> None:
     if a.digest or a.gist:
         doc = json.loads(pathlib.Path(a.digest or a.gist).read_text())
         _, received = load_corpus(a.mirror or a.db, flag_says_mirror=bool(a.mirror))
-        problems = (check_digest_facts(doc, received) if a.digest
-                    else check_gist_facts(doc, received))
+        findings = Findings()
+        if a.digest:
+            findings.extend(FIELD_FACTS, check_digest_facts(doc, received))
+        else:
+            findings.extend(FIELD_GIST_FACTS, check_gist_facts(doc, received))
 
         # digest.v2 carries understanding fields that may contain derived prose.
         # Scan open_thread and voice_exemplars[].text against the received corpus.
@@ -200,15 +411,24 @@ def main() -> None:
             for rel in doc.get("relationships", []):
                 understanding = rel.get("understanding", {})
                 open_thread = understanding.get("open_thread")
+
+                # AMENDMENT-002. Structural first, and unconditionally: the corpus checks
+                # below can only see text they can find in the mirror, and a nine-letter
+                # token is under the 12-char span floor anyway. The grammar does not need
+                # the corpus to say no.
+                for problem in open_thread_violations(open_thread):
+                    findings.add(FIELD_OPEN_THREAD,
+                                 f"{rel.get('contact_id', '?')}: {problem}")
+
                 if isinstance(open_thread, str) and open_thread.strip():
                     n = norm(open_thread)
                     if n in received:
-                        problems.append(
+                        findings.add(FIELD_OPEN_THREAD,
                             f"{rel.get('contact_id', '?')}: "
                             f"understanding.open_thread is verbatim inbound prose — {open_thread[:60]!r}"
                         )
                     elif len(n) >= 12 and any(n in r for r in received):
-                        problems.append(
+                        findings.add(FIELD_OPEN_THREAD,
                             f"{rel.get('contact_id', '?')}: "
                             f"understanding.open_thread contains verbatim span — {open_thread[:60]!r}"
                         )
@@ -216,7 +436,7 @@ def main() -> None:
                 if isinstance(cadence, str) and cadence.strip():
                     n = norm(cadence)
                     if n in received:
-                        problems.append(
+                        findings.add(FIELD_CADENCE,
                             f"{rel.get('contact_id', '?')}: "
                             f"understanding.cadence_norm is verbatim inbound prose — {cadence[:60]!r}"
                         )
@@ -224,20 +444,18 @@ def main() -> None:
                     if isinstance(vex, dict) and "text" in vex:
                         n = norm(vex["text"])
                         if n in received:
-                            problems.append(
+                            findings.add(FIELD_EXEMPLAR,
                                 f"{rel.get('contact_id', '?')}: "
                                 f"understanding.voice_exemplar text is verbatim inbound — {vex['text'][:60]!r}"
                             )
 
-        if problems:
-            print(f"FAIL -- {len(problems)} violation(s).")
-            for p in problems[:10]:
-                print(f"  {p}")
-            print("\nThe allowlist is what the fabrication gate trusts. A token that is "
-                  "somebody's\nsentence makes the gate license their prose in the user's "
-                  "own name.")
+        if len(findings):
+            findings.report()
             sys.exit(1)
         print("OK -- facts within the 3-word / 40-char cap, none verbatim from inbound")
+        if a.digest and doc.get("schema_version") == "digest.v2":
+            print("OK -- every open_thread matches the closed grammar; any topic token "
+                  "is in the closed vocabulary and within the cap")
         return
 
     pack = json.loads(pathlib.Path(a.pack).read_text())

@@ -21,8 +21,8 @@
       "type": "object", "additionalProperties": false,
       "required": ["register", "relationship_kind", "open_thread", "last_exchange_shape", "topics", "cadence_norm", "voice_exemplars"],
       "properties": {
-        "register": {"enum": ["casual", "warm", "terse", "formal", "mixed"]},
-        "relationship_kind": {"enum": ["close_friend", "logistics", "work", "family", "dormant_close", "other"]},
+        "register": {"enum": ["casual", "warm", "terse", "formal", "mixed", "unknown"], "description": "`unknown` is the honest answer when evidence is below threshold; absence is never reported as a finding."},
+        "relationship_kind": {"enum": ["close_friend", "logistics", "work", "family", "dormant_close", "other", "unknown"], "description": "`unknown` is the honest answer when evidence is below threshold; absence is never reported as a finding."},
         "open_thread": {"type": ["string", "null"], "maxLength": 140, "description": "Derived description, never a quote."},
         "last_exchange_shape": {"enum": ["question_from_them", "statement_from_them", "statement_from_you", "plan_unresolved", "none"]},
         "topics": {"type": "array", "maxItems": 8, "items": {"$ref": "#/$defs/token"}},
@@ -30,7 +30,7 @@
         "voice_exemplars": {"type": "array", "maxItems": 40, "items": {"$ref": "#/$defs/contextual_exemplar"}}
       }
     },
-    "contextual_exemplar": {"type": "object", "additionalProperties": false, "required": ["text", "answered", "register"], "properties": {"text": {"type": "string", "minLength": 1, "maxLength": 200, "description": "Redacted USER-authored text only."}, "answered": {"enum": ["question_from_them", "statement_from_them", "plan_unresolved", "none"]}, "register": {"enum": ["casual", "warm", "terse", "formal", "mixed"]}}},
+    "contextual_exemplar": {"type": "object", "additionalProperties": false, "required": ["text", "answered", "register"], "properties": {"text": {"type": "string", "minLength": 1, "maxLength": 200, "description": "Redacted USER-authored text only."}, "answered": {"enum": ["question_from_them", "statement_from_them", "plan_unresolved", "none"]}, "register": {"enum": ["casual", "warm", "terse", "formal", "mixed", "unknown"], "description": "Same closed vocabulary as understanding.register: DigestBuilder.wireRegister maps the one UnderstandingRegister into both fields, so `unknown` reaches this one too."}}},
     "relationship": {"type": "object", "additionalProperties": false, "required": ["contact_id", "display", "is_group", "message_count", "sent_count", "received_count", "days_since_last_contact", "momentum_90d", "initiation_ratio", "last_from_me", "max_gap_days", "unanswered_question", "facts", "as_of", "understanding"], "properties": {"contact_id": {"type": "string", "pattern": "^h_[0-9a-f]{8,32}$"}, "display": {"type": "string", "minLength": 1, "maxLength": 64}, "is_group": {"type": "boolean"}, "message_count": {"type": "integer", "minimum": 0}, "sent_count": {"type": "integer", "minimum": 0}, "received_count": {"type": "integer", "minimum": 0}, "days_since_last_contact": {"type": "integer", "minimum": 0}, "momentum_90d": {"type": "number", "minimum": 0}, "initiation_ratio": {"type": "number", "minimum": 0, "maximum": 1}, "last_from_me": {"type": "boolean"}, "max_gap_days": {"type": "integer", "minimum": 0}, "unanswered_question": {"type": "boolean"}, "facts": {"type": "object"}, "as_of": {"type": "string", "format": "date-time"}, "understanding": {"$ref": "#/$defs/understanding"}}}
   }
 }

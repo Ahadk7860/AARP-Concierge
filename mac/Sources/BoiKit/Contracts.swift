@@ -209,15 +209,23 @@ public struct VoicePack: Codable, Sendable {
 
 /// Closed vocabularies are separate from the v1 metric types so v1 documents keep
 /// decoding byte-for-byte while the Phase 2 producer adopts the wider contract.
+///
+/// `unknown` is the below-threshold answer, and is deliberately distinct from `mixed`:
+/// `mixed` says the evidence was read and did not settle on one register, `unknown` says
+/// there was not enough of the user's own writing in the thread to read at all.
+/// Reporting absence as a finding is what made `terse` a 205-relationship bucket whose
+/// median member had one message.
 public enum UnderstandingRegisterV2: String, Codable, Sendable {
-    case casual, warm, terse, formal, mixed
+    case casual, warm, terse, formal, mixed, unknown
 }
 
+/// `unknown` is likewise below-threshold, and distinct from `other` — `other` is a
+/// relationship that was classified and fits no named kind.
 public enum RelationshipKindV2: String, Codable, Sendable {
     case closeFriend = "close_friend"
     case logistics, work, family
     case dormantClose = "dormant_close"
-    case other
+    case other, unknown
 }
 
 public enum LastExchangeShapeV2: String, Codable, Sendable {
