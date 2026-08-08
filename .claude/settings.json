@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(/Users/skylerluk/Dev/boi-imessage-understanding/**)",
+      "Read(/Users/skylerluk/Dev/boi-imessage-understanding/**)",
+      "Glob(/Users/skylerluk/Dev/boi-imessage-understanding/**)",
+      "Grep(/Users/skylerluk/Dev/boi-imessage-understanding/**)",
+      "Edit(/Users/skylerluk/Dev/boi-imessage-understanding/**)",
+      "Write(/Users/skylerluk/Dev/boi-imessage-understanding/**)"
+    ]
+  }
+}
