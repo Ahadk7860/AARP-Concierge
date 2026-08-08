@@ -77,11 +77,10 @@ export function registerWebhookRoutes(
         return reply.code(500).send({ error: "internal" });
       }
 
-      // Diagnostic: log before signature verification using the app logger.
+      // Diagnostic: log before signature verification.
       logEvent(log, {
-        msg: "webhook.diag",
-        signature_present: signature !== null,
-        signature_preview: signature !== null ? signature.slice(0, 20) : null,
+        msg: "webhook.diag", route: "/v1/webhooks/:provider",
+        violations: signature !== null ? `sig_present:${signature.slice(0, 16)}` : "sig_missing",
       });
 
       let inbound;
