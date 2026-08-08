@@ -22,6 +22,7 @@ import type { FastifyInstance } from "fastify";
 import type { Logger } from "pino";
 import type { Channel } from "../../../shared/src/index.js";
 import { handleInbound } from "../../../brief/src/inbound.js";
+import { SpectrumChannel } from "../../../channel/src/spectrum-channel.js";
 import { badSignature, send, validation } from "../errors.js";
 import { logEvent } from "../logging.js";
 
@@ -77,19 +78,14 @@ export function registerWebhookRoutes(
         return reply.code(500).send({ error: "internal" });
       }
 
-      // URGENT DIAGNOSTIC — log raw header presence to stderr.
-      const tsHdr = req.headers["x-spectrum-timestamp"] ?? null;
-      process.stderr.write(JSON.stringify({
-        msg: "WEBHOOK_DIAG",
-        has_ts_header: tsHdr !== null,
-        ts_header: tsHdr !== null ? (Array.isArray(tsHdr) ? "array" : String(tsHdr).slice(0, 14)) : "missing",
-      }) + "\n");
+      // Spectrum sends the timestamp in x-spectrum-timestamp header (Pro tier).
+      const timestampHdr = signatureHeader(req.headers["x-spectrum-timestamp"]);
 
       let inbound;
       try {
         // Verify-then-parse, inside the transport. Track D never validates the
         // signature itself and never sees the provider's wire format.
-        inbound = deps.channel.normalizeInbound(raw, signature);
+        inbound = (deps.channel as SpectrumChannel).normalizeInbound(raw, signature, timestampHdr ?? undefined);
       } catch (err) {
         logEvent(log, {
           msg: "webhook.rejected",

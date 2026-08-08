@@ -143,36 +143,22 @@ export class SpectrumChannel implements Channel {
     };
   }
 
-  normalizeInbound(rawBody: Buffer | string, signature: string): InboundMessage {
+  normalizeInbound(rawBody: Buffer | string, signature: string, timestamp?: string): InboundMessage {
     const secret = process.env["SPECTRUM_WEBHOOK_SECRET"] ?? "";
     const body = typeof rawBody === "string" ? rawBody : rawBody.toString("utf8");
     const parsed = JSON.parse(body) as Record<string, unknown>;
 
-    // Diagnostic: log the top-level keys Photon sent and the sub-keys of
-    // message/sender so we can spot field-name drift when upgrading to Pro.
-    (() => {
-      const sample: Record<string, unknown> = {};
-      for (const key of ["message", "sender", "line", "timestamp"]) {
-        if (parsed[key] !== undefined) {
-          const val = parsed[key];
-          sample[key] = typeof val === "object" && val !== null
-            ? Object.keys(val as object) : typeof val;
-        }
-      }
-      console.error(JSON.stringify({
-        msg: "spectrum.webhook.shape", keys: Object.keys(parsed), sample,
-      }));
-    })();
-
     // The timestamp rides in the body's own field when the caller passes only a
     // signature — Fastify hands both headers to the route, which is where the real one
     // comes from; this keeps the frozen two-argument shape honest either way.
-    const timestamp = String(parsed["timestamp"] ?? "");
+    // On Photon Pro the timestamp arrives as x-spectrum-timestamp header, not in the
+    // body. The 3rd optional parameter carries it from the webhook route.
+    const ts = timestamp ?? String(parsed["timestamp"] ?? "");
     const check = verifySignature({
       secret,
       rawBody: body,
       signatureHeader: signature,
-      timestampHeader: timestamp,
+      timestampHeader: ts,
     });
     // ONE response for four reasons. `CONTRACTS.md` § 2 makes this `401 bad_signature` at
     // the route; distinguishing them to the caller would make the check an oracle.
