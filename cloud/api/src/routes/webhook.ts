@@ -77,18 +77,12 @@ export function registerWebhookRoutes(
         return reply.code(500).send({ error: "internal" });
       }
 
-      // Diagnostic: log the raw signature header before verification so we can
-      // diagnose signature mismatches even when verification fails.
-      const spectrumSig = req.headers["x-spectrum-signature"] ?? null;
-      console.error(JSON.stringify({
+      // Diagnostic: log before signature verification using the app logger.
+      logEvent(log, {
         msg: "webhook.diag", provider: req.params.provider,
-        has_raw_body: typeof raw === "string",
         signature_present: signature !== null,
-        spectrum_header_present: spectrumSig !== null,
-        spectrum_header: spectrumSig !== null
-          ? (Array.isArray(spectrumSig) ? "array" : String(spectrumSig).slice(0, 12))
-          : null,
-      }));
+        signature_preview: signature !== null ? signature.slice(0, 20) : null,
+      });
 
       let inbound;
       try {
