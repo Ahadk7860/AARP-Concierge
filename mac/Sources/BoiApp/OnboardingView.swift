@@ -145,6 +145,12 @@ private struct StageScreen: View {
                     Button("Quit and reopen Boi") { model.relaunchManually() }
                 }
                 if stage == .failed {
+                    if let detail = model.failureDetail, !detail.isEmpty {
+                        Text(detail)
+                            .font(.caption).foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                            .padding(.top, 4)
+                    }
                     Button("Try again") { Task { await model.runScan(force: true) } }
                 }
                 Spacer()

@@ -106,7 +106,7 @@ public enum GrantStage: String, CaseIterable, Sendable, Equatable {
         case .syncing: return "Reading your messages"
         case .handoff: return "Boi is texting you"
         case .ready: return "You're all set"
-        case .failed: return "Boi hit an error it did not expect"
+        case .failed: return "Boi hit an error"
         }
     }
 

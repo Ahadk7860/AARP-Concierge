@@ -506,6 +506,7 @@ final class PermissionModel: ObservableObject {
             enter(handoff.link == nil ? .ready : .handoff)
         } catch {
             failureDetail = "\(error)"
+            StructuredLog.emit("scan.failed", level: .error, fields: ["detail": failureDetail!])
             enter(.failed)
         }
     }
