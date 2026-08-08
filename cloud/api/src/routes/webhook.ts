@@ -78,14 +78,36 @@ export function registerWebhookRoutes(
         return reply.code(500).send({ error: "internal" });
       }
 
-      // Spectrum sends the timestamp in x-spectrum-timestamp header (Pro tier).
-      const timestampHdr = signatureHeader(req.headers["x-spectrum-timestamp"]);
+      // TEMPORARY: skip signature check to see raw payload format.
+      // Will revert once we confirm the webhook shape.
+      let bodyPreview = "";
+      try { bodyPreview = raw.slice(0, 200); } catch { /* */ }
+      const tsHeader = req.headers["x-spectrum-timestamp"] ?? null;
+      const tsVal = tsHeader !== null && !Array.isArray(tsHeader) ? String(tsHeader) : "none";
+      logEvent(log, {
+        msg: "webhook.raw_inspect", route: "/v1/webhooks/:provider",
+        violations: `ts:${tsVal} sig:${signature.slice(0, 20)} body:${bodyPreview}`,
+      });
+
+      // Parse manually to test auto-setup without signature
+      let parsed: Record<string, unknown> | null = null;
+      try { parsed = JSON.parse(raw) as Record<string, unknown>; } catch { /* */ }
+      if (parsed !== null) {
+        const msg = parsed["message"] as Record<string, unknown> | undefined;
+        const sender = parsed["sender"] as Record<string, unknown> | undefined;
+        const text = typeof msg?.["text"] === "string" ? msg["text"] as string : null;
+        const fromHandle = typeof sender?.["address"] === "string" ? sender["address"] as string : null;
+        logEvent(log, {
+          msg: "webhook.parsed", route: "/v1/webhooks/:provider",
+          violations: `text:${text !== null ? text.slice(0, 50) : "null"} from:${fromHandle ?? "null"}`,
+        });
+      }
 
       let inbound;
       try {
         // Verify-then-parse, inside the transport. Track D never validates the
         // signature itself and never sees the provider's wire format.
-        inbound = (deps.channel as SpectrumChannel).normalizeInbound(raw, signature, timestampHdr ?? undefined);
+        inbound = (deps.channel as SpectrumChannel).normalizeInbound(raw, signature, tsVal !== "none" ? tsVal : undefined);
       } catch (err) {
         logEvent(log, {
           msg: "webhook.rejected",
