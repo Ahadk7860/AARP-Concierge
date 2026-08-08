@@ -77,10 +77,13 @@ export function registerWebhookRoutes(
         return reply.code(500).send({ error: "internal" });
       }
 
-      // Diagnostic: log before signature verification.
+      // Diagnostic: log the timestamp header presence and body keys.
+      const timestampHeader = signatureHeader(req.headers["x-spectrum-timestamp"]);
+      let bodyKeys: string[] = [];
+      try { bodyKeys = Object.keys(JSON.parse(raw) as object).slice(0, 10); } catch { /* not JSON */ }
       logEvent(log, {
         msg: "webhook.diag", route: "/v1/webhooks/:provider",
-        violations: signature !== null ? `sig_present:${signature.slice(0, 16)}` : "sig_missing",
+        violations: `ts_header:${timestampHeader !== null ? "yes" : "no"} keys:[${bodyKeys.join(",")}] sig_hdr:${signature !== null ? "yes" : "no"}`,
       });
 
       let inbound;
