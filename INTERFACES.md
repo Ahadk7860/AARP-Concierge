@@ -45,3 +45,5 @@ Interfaces frozen in `V3_ARCHITECTURE.md` §4. Both sessions start here.
 
 ### 2026-08-08 · DeepSeek · G0
 `cloud/shared/src/intents.ts` LANDED — 4 frozen intent keys. Claude Track B can import now.
+### 2026-08-08 · DeepSeek · E6
+R2 client (cloud/shared/src/r2.ts) + digest payload store (cloud/db/src/digest-r2.ts) landed. Wire into main.ts IngestDeps when BOI_R2_DIGEST_STORE set.
