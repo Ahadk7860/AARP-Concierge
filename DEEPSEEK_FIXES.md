@@ -196,3 +196,72 @@ Blocking 1 and 2 must be fixed before merge. 3–6 should land before this is co
 
 Please re-request review after 1 and 2 — a fix to a blocking defect is exactly where a new
 one hides, and the migration/`on conflict` rework is broad enough to deserve a second look.
+
+---
+
+# Review round 2 — `v3/deepseek` @ `b700f8d`
+
+Verified by reading the code, not the summary.
+
+## BLOCKING 1 — FIXED, verified
+
+All eight tables in 017/018/019 now carry `primary key (user_id, <col>)`, and every
+`on conflict` target in `repository-v3.ts` was updated to match: `(user_id, person_id)`,
+`(user_id, source, handle)`, `(user_id, interaction_id)`, `(user_id, loop_id)`,
+`(user_id, person_id, day)`, `(user_id, person_a, person_b)`, `(user_id, intent)`. That is a
+complete sweep, not a partial one. §4.1 amended. Good.
+
+## BLOCKING 2 — FIXED structurally, but UNPROVEN and with a residual leak
+
+`ingest-worker.ts` exists, `startIngestWorker` is genuinely wired into `main.ts:597` with a
+cleanup handler, and `dequeue` uses `for update skip locked` — so multiple API replicas can
+poll without double-processing. That is the right implementation and better than asked for.
+
+Two things remain:
+
+**(a) There is still no test proving an upload persists.** The only test file in the entire
+branch is `r2-deletion.test.ts`. The original brief asked specifically for "a test asserting
+that a successful upload results in a persisted digest — that single test would have caught
+this." It still would. Right now the fix for a silent-total-data-loss bug is verified by
+reading alone, which is exactly the state that produced the bug.
+
+**(b) A failed job is terminal, so data loss is now rarer rather than fixed.**
+`ingest-worker.ts:68` marks a job `failed` and stops. No retry, no backoff, no alert, no
+dead-letter handling. A transient Postgres blip during `insertDigest` permanently loses that
+digest, silently — the same failure as before, just narrower. At minimum emit a loud log/metric
+on `failed`; better, retry with backoff and an attempt counter before giving up.
+
+## 5, 7 — FIXED
+
+§4.4 now matches the shipped `openBubbleSink` signature including `channel`. The `jobs`
+partitioning exception is documented deliberately rather than left silent.
+
+---
+
+## Answer to "tackle 3/4/6 now, or re-request review?"
+
+Review first — that is this document. Then do them in **this order**, which is not the numeric
+order:
+
+1. **#6 first, narrowly scoped.** A schema/migration test (would have caught BLOCKING 1
+   instantly) and one ingest test: enqueue → worker runs → digest row exists. Plus 2(a) above.
+   Do this before anything else, because it is what validates the two blocking fixes you just
+   made. Full coverage of `repository-v3.ts` can follow later.
+2. **2(b)** — failed-job visibility. Small, and it closes the last silent-data-loss path.
+3. **#4** — the startup interlock (upload enabled + no R2 deletion store installed → fail
+   loudly at boot). Cheap, and it prevents the deletion lie from ever becoming reachable.
+4. **#3** — R2 envelope encryption. The largest piece, and the least urgent in wall-clock
+   terms because R2 is entirely unconfigured today (no Cloudflare account, no bucket, no
+   credentials, `BOI_R2_DIGEST_STORE` unset). It must land before R2 is ever enabled, not
+   before merge.
+
+**Merge posture**: with 1 and 2 fixed, the branch is no longer undeployable. I would still want
+item 1 above (the two tests) before merging, since both blocking fixes are currently unverified
+by anything executable. #3 and #4 can land after merge provided R2 stays disabled.
+
+## Item 8 (Track F, Sparkle) — unchanged and still open
+
+Security-scoped bookmarks bind to code-signing identity; a Sparkle update re-signs the binary.
+Track D's spike passed 7/7 on macOS 15.7.4, so Boi can likely drop Full Disk Access — but
+bookmark survival across an app update is untested and is the most likely production failure.
+Watch `access.bookmark_fallback_to_fda` as an update-health signal.
