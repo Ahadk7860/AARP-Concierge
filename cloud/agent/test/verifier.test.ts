@@ -66,6 +66,32 @@ describe("buildEvidencePool", () => {
     expect(pool.numbers.has("05")).toBe(true);
     expect(pool.numbers.has("5")).toBe(true);
   });
+
+  it("populates `names` ONLY from display-keyed leaves, not from every word in `words`", () => {
+    const pool = buildEvidencePool([relationshipCall(), openLoopCall()]);
+    expect(pool.names.has("maya")).toBe(true);
+    // "trip" and "august" are real words in this turn's evidence (openLoopCall's
+    // description) and DO land in `words` — but must NOT land in `names`. This is the
+    // exact distinction the BLOCKING fix depends on: `words` and `names` are not the
+    // same set, and a "name" claim is checked against `names` only.
+    expect(pool.words.has("trip")).toBe(true);
+    expect(pool.names.has("trip")).toBe(false);
+    // "loop" is not a person and must not enter `names`, regardless of where any
+    // similarly-spelled word came from (the id "loop_1" itself is excluded from every
+    // bucket — see the dedicated rawStrings test below; `words` may still contain
+    // "loop" via unrelated text such as the evidence ref's `source: "open_loop"` label,
+    // which is harmless since `words` no longer backs name-grounding at all).
+    expect(pool.names.has("loop")).toBe(false);
+  });
+
+  it("excludes identifier-keyed leaves from rawStrings entirely (SHOULD-FIX: no weak handle substring match off an opaque id)", () => {
+    const pool = buildEvidencePool([{
+      tool: "open_loops",
+      output: { loops: [{ loop_id: "loop_12", person_id: "p_maya01", display: "Maya", kind: "question", direction: "i_owe_them", description: "asked about the trip", age_days: 4 }], evidence: [] },
+    }]);
+    expect(pool.rawStrings.some((s) => s.includes("loop_12"))).toBe(false);
+    expect(pool.rawStrings.some((s) => s.includes("p_maya01"))).toBe(false);
+  });
 });
 
 describe("extractClaims", () => {
@@ -140,6 +166,77 @@ describe("verify — I2: every claim must trace to this turn's tool results", ()
     }]);
     const result = verify("Her number is +1 415 555 9999.", pool);
     expect(result.ok).toBe(false);
+  });
+
+  it("BLOCKING regression: an ordinary word in evidence prose must not ground a fabricated person name", () => {
+    // openLoopCall()'s description contains "trip" as an ordinary topic noun, not a
+    // person. Before the fix, `words` (populated from ALL prose) backed the name check,
+    // so "Trip" verified as a real person purely because the word "trip" appeared
+    // somewhere in this turn's evidence.
+    const pool = buildEvidencePool([openLoopCall()]);
+    expect(pool.words.has("trip")).toBe(true); // the word is legitimately in evidence...
+    const result = verify("Trip asked about the plan again.", pool);
+    expect(result.ok).toBe(false); // ...but "Trip" the PERSON is not.
+    if (!result.ok) {
+      expect(result.violations.some((v) => v.claim.kind === "name" && v.claim.value === "Trip")).toBe(true);
+    }
+  });
+
+  it("BLOCKING regression: an opaque id token must not ground a fabricated person name via underscore-tokenization", () => {
+    // "loop_12" as a loop_id tokenizes on `_` into "loop" and "12". Before the fix, the
+    // word "loop" leaked into `words` (ids were only excluded from `numbers`), so a
+    // fabricated "Loop" name claim verified as grounded.
+    const call: ToolCallRecord = {
+      tool: "open_loops",
+      output: {
+        loops: [{ loop_id: "loop_12", person_id: "p_maya01", display: "Maya", kind: "question", direction: "i_owe_them", description: "asked about the trip", age_days: 4 }],
+        evidence: [{ source: "open_loop", id: "loop_12" }],
+      },
+    };
+    const pool = buildEvidencePool([call]);
+    const result = verify("Loop asked about the trip.", pool);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.violations.some((v) => v.claim.kind === "name" && v.claim.value === "Loop")).toBe(true);
+    }
+  });
+
+  it("accepted tradeoff, pinned: a third party named only inside prose (not a display field) does not ground — forces a regenerate rather than shipping an ungrounded name", () => {
+    const call: ToolCallRecord = {
+      tool: "search_messages",
+      output: {
+        results: [{ person_id: "p_maya01", display: "Maya", when: "2026-08-05T10:00:00Z", snippet: "maya said jordan is coming too", thread_id: "t1" }],
+        source: "device",
+        evidence: [{ source: "message", id: "t1" }],
+      },
+    };
+    const pool = buildEvidencePool([call]);
+    // Maya is grounded (via `display`)...
+    expect(verify("Maya said something about who's coming.", pool).ok).toBe(true);
+    // ...but Jordan, named only inside the snippet text, is not — even though the exact
+    // word "jordan" is present in this turn's evidence.
+    expect(pool.words.has("jordan")).toBe(true);
+    const result = verify("Jordan is coming too.", pool);
+    expect(result.ok).toBe(false);
+  });
+
+  it("SHOULD-FIX regression: a short @mention must not verify off a weak substring match against an opaque id", () => {
+    // "@12" is a valid (if short) MENTION_RE match. Before the fix, `rawStrings` included
+    // id-derived strings like "loop_12", and the handle check was a bare substring test,
+    // so "@12" verified as grounded purely because "12" is a substring of "loop_12".
+    const call: ToolCallRecord = {
+      tool: "open_loops",
+      output: {
+        loops: [{ loop_id: "loop_12", person_id: "p_maya01", display: "Maya", kind: "question", direction: "i_owe_them", description: "asked about the trip", age_days: 4 }],
+        evidence: [],
+      },
+    };
+    const pool = buildEvidencePool([call]);
+    const result = verify("Reach out @12 about it.", pool);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.violations.some((v) => v.claim.kind === "handle")).toBe(true);
+    }
   });
 
   it("rejects a fabricated date even when the year and month are separately grounded", () => {

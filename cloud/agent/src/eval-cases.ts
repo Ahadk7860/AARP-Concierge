@@ -86,14 +86,19 @@ export const VERIFIER_EVAL_CASES: readonly VerifierEvalCase[] = [
     expectedOk: false,
   },
   {
+    // Realistic multi-tool turn: the agent also looked up relationship_state for Maya
+    // this turn (hence `display: "Maya"`), so the name is grounded via a name-carrying
+    // field — not merely because "Maya" appears inside the memory's free-text `text`.
+    // A memory's `text` alone does NOT ground a name claim (§4.2's memory tools have no
+    // `display` field) — see the BLOCKING fix note in verifier.ts.
     id: "v07",
-    toolFacts: { memories: [{ text: "Maya is allergic to shellfish" }] },
+    toolFacts: { display: "Maya", memories: [{ text: "Maya is allergic to shellfish" }] },
     draft: "Maya is allergic to shellfish.",
     expectedOk: true,
   },
   {
     id: "v08",
-    toolFacts: { memories: [{ text: "Maya is allergic to shellfish" }] },
+    toolFacts: { display: "Maya", memories: [{ text: "Maya is allergic to shellfish" }] },
     draft: "Maya is allergic to shellfish, which started 3 years ago.",
     expectedOk: false,
   },
@@ -113,6 +118,32 @@ export const VERIFIER_EVAL_CASES: readonly VerifierEvalCase[] = [
     id: "v11",
     toolFacts: { snippet: "call me at +14155550100" },
     draft: "You can reach her at +1 415 555 9999.",
+    expectedOk: false,
+  },
+  {
+    // The accepted tradeoff from the BLOCKING fix, pinned in the release-gate corpus: a
+    // person named only inside message prose (not a `display` field) does not ground a
+    // name claim, even though the word literally appears in this turn's evidence. Maya
+    // (display) is grounded; Jordan (mentioned only in the snippet) is not.
+    id: "v12",
+    toolFacts: { display: "Maya", snippet: "maya said jordan is coming too" },
+    draft: "Jordan is coming too.",
+    expectedOk: false,
+  },
+  {
+    id: "v13",
+    // Same evidence as v12, but the claim is only about Maya (display-grounded) — must
+    // still pass, proving the fix isn't over-broad.
+    toolFacts: { display: "Maya", snippet: "maya said jordan is coming too" },
+    draft: "Maya said something about who's coming.",
+    expectedOk: true,
+  },
+  {
+    // Second BLOCKING-fix symptom, pinned: an opaque id token must not ground a name
+    // claim via accidental underscore-tokenization ("loop_12" -> "loop").
+    id: "v14",
+    toolFacts: { loop_id: "loop_12", description: "asked about the trip" },
+    draft: "Loop asked about the trip.",
     expectedOk: false,
   },
 ] as const;

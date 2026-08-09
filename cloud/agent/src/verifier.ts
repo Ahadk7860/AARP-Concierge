@@ -38,23 +38,35 @@ export type ToolCallRecord = {
 };
 
 export type EvidencePool = {
-  /** Lowercased word tokens found anywhere in a tool output's string values. */
+  /** Lowercased word tokens found anywhere in a NON-IDENTIFIER tool output string value.
+   * Used only for the date claim's month-name check — NOT for name claims, see `names`. */
   words: ReadonlySet<string>;
-  /** Digit sequences found anywhere in a tool output's string or number values. */
+  /** Digit sequences found anywhere in a NON-IDENTIFIER tool output string or number value. */
   numbers: ReadonlySet<string>;
-  /** Lowercased, whitespace-collapsed full string values, for substring/handle checks. */
+  /** Word tokens found ONLY in leaves reached through a name-carrying key (`display`).
+   * This is the ONLY thing a "name" claim is checked against — see the BLOCKING fix note
+   * on `isNameKey` below for why free prose and identifiers are both excluded from it. */
+  names: ReadonlySet<string>;
+  /** Lowercased, whitespace-collapsed NON-IDENTIFIER string values, for substring/handle
+   * and date-substring checks. */
   rawStrings: readonly string[];
   /** Every {source,id} evidence ref returned this turn, for downstream provenance display. */
   refs: readonly EvidenceRef[];
 };
 
 type CollectedLeaves = {
-  /** Prose/data leaves — free to ground name/number/date claims. */
+  /** Prose/data leaves reached through an ordinary (non-id) key — free to ground
+   * number/date claims and the date check's month words. */
   text: string[];
+  /** Leaves reached through a name-carrying key (`display`) — the ONLY source a "name"
+   * claim may be grounded against. A strict subset of `text` (every name leaf is also
+   * pushed to `text`), not a replacement for it. */
+  names: string[];
   /** Leaves reached through an `id`-shaped key (`id`, `person_id`, `loop_id`, `thread_id`,
-   * ...). Opaque identifiers: legitimately quotable verbatim (rawStrings, for handle
-   * substring checks and possible literal echoing), but MUST NOT contribute to `numbers` —
-   * see the comment on `numbers` below for why. */
+   * ...). Opaque identifiers. Deliberately fed into NOTHING that grounds a claim — not
+   * `text`, not `names`, not even `rawStrings` — see the BLOCKING/SHOULD-FIX notes below
+   * for the two concrete exploits this closes. Their referential value is already tracked
+   * separately via `call.output.evidence`. */
   ids: string[];
 };
 
@@ -64,14 +76,41 @@ function isIdentifierKey(key: string | null): boolean {
   return k === "id" || k.endsWith("_id");
 }
 
-/** Walks a tool output, splitting string/number leaves into `text` or `ids` by the KEY they
- * were reached through — not by guessing from the value's shape. This is what makes the
- * split reliable: `person_id: "p_maya01"` and `age_days: 4` look nothing alike as values,
- * but the key tells you unambiguously which bucket each belongs in. */
+// BLOCKING fix (second adversarial pass): a "name" claim was checked against `words`,
+// which every string leaf populated — prose AND identifiers alike. Concretely:
+// `openLoopCall()`'s description "...on the trip on August 8, 2026" put "trip" in `words`;
+// the model writing "Trip asked about the plan again." then extracted a NAME claim "Trip"
+// that verified as grounded, purely because a topic noun happened to sit in a snippet. Same
+// root cause, second symptom: "loop_12" tokenized on `_` into "loop", so a fabricated
+// "Loop" name claim verified off an opaque id. Person names must ground against a
+// NAME-CARRYING FIELD, not "any word that appeared somewhere" — `display` is that field;
+// every §4.2 tool that returns a person returns one.
+//
+// Accepted, deliberate tradeoff: a third party mentioned only inside a snippet or
+// description ("Maya said Jordan is coming") now fails to ground "Jordan" and forces a
+// regenerate. That is correct under this file's own stated policy (false positive = wasted
+// regenerate, false negative = shipped fabrication) — "Jordan" appearing in message TEXT is
+// not the same claim as a §4.2 tool asserting Jordan is a person in this relationship
+// graph, and I2 does not get to treat prose mentions as equivalent to structured evidence
+// just because both are technically "in a tool result from this turn." Do not "fix" this
+// back to checking prose — that is reintroducing the exact defect this comment describes.
+function isNameKey(key: string | null): boolean {
+  return key !== null && key.toLowerCase() === "display";
+}
+
+/** Walks a tool output, splitting string/number leaves into `text`, `names`, or `ids` by
+ * the KEY they were reached through — not by guessing from the value's shape. This is what
+ * makes the split reliable: `person_id: "p_maya01"` and `age_days: 4` look nothing alike as
+ * values, but the key tells you unambiguously which bucket each belongs in. */
 function collectLeaves(value: unknown, key: string | null, into: CollectedLeaves): void {
   if (value === null || value === undefined) return;
   if (typeof value === "string" || typeof value === "number") {
-    (isIdentifierKey(key) ? into.ids : into.text).push(String(value));
+    if (isIdentifierKey(key)) {
+      into.ids.push(String(value));
+      return;
+    }
+    into.text.push(String(value));
+    if (isNameKey(key)) into.names.push(String(value));
     return;
   }
   if (Array.isArray(value)) {
@@ -92,35 +131,40 @@ const DIGIT_RUN_RE = /\d+/g;
 export function buildEvidencePool(calls: readonly ToolCallRecord[]): EvidencePool {
   const words = new Set<string>();
   const numbers = new Set<string>();
+  const names = new Set<string>();
   const rawStrings: string[] = [];
   const refs: EvidenceRef[] = [];
 
-  const addNormalized = (raw: string, target: "text" | "id"): void => {
+  const addWords = (raw: string, into: Set<string>): void => {
     const normalized = raw.toLowerCase().trim().replace(/\s+/g, " ");
     if (normalized === "") return;
-    rawStrings.push(normalized);
-    for (const match of normalized.matchAll(WORD_RE)) words.add(match[0]);
-    if (target === "id") return; // Opaque identifiers never ground a NUMBER claim (BLOCKING
-    // fix: a person_id like "p_8f3a12" or a loop_id like "loop_12" must not "ground" a bare
-    // claim of "12" — DIGIT_RUN_RE would otherwise treat every digit run inside a hash or
-    // suffix as a legitimate stated number, and small integers are near-universally
-    // "supported" once a handful of ids are in evidence. Restrict number extraction to
-    // leaves reached through a non-id key.
-    for (const match of normalized.matchAll(DIGIT_RUN_RE)) {
-      numbers.add(match[0]);
-      numbers.add(String(Number(match[0]))); // strips leading zeros, e.g. "08" -> "8"
-    }
+    for (const match of normalized.matchAll(WORD_RE)) into.add(match[0]);
   };
 
   for (const call of calls) {
-    const leaves: CollectedLeaves = { text: [], ids: [] };
+    const leaves: CollectedLeaves = { text: [], names: [], ids: [] };
     collectLeaves(call.output, null, leaves);
-    for (const s of leaves.text) addNormalized(s, "text");
-    for (const s of leaves.ids) addNormalized(s, "id");
+    // Opaque identifiers (`leaves.ids`) intentionally contribute to NOTHING below — no
+    // rawStrings, no words, no numbers. SHOULD-FIX (same pass): a handle claim like "@12"
+    // used to verify off "loop_12" via a bare `rawStrings.some(s => s.includes(...))`
+    // substring check, because id leaves fed rawStrings too. Excluding them here closes
+    // that the same way the name fix closes its exploit: at the source, not at each
+    // individual check.
+    for (const s of leaves.text) {
+      const normalized = s.toLowerCase().trim().replace(/\s+/g, " ");
+      if (normalized === "") continue;
+      rawStrings.push(normalized);
+      addWords(normalized, words);
+      for (const match of normalized.matchAll(DIGIT_RUN_RE)) {
+        numbers.add(match[0]);
+        numbers.add(String(Number(match[0]))); // strips leading zeros, e.g. "08" -> "8"
+      }
+    }
+    for (const s of leaves.names) addWords(s, names);
     if (Array.isArray(call.output.evidence)) refs.push(...call.output.evidence);
   }
 
-  return { words, numbers, rawStrings, refs };
+  return { words, numbers, names, rawStrings, refs };
 }
 
 // ---------------------------------------------------------------------------
@@ -220,7 +264,9 @@ function normalizeMonthDate(value: string): { month: string; day: string; year: 
 function isSupported(claim: Claim, pool: EvidencePool): boolean {
   switch (claim.kind) {
     case "name": {
-      return pool.words.has(claim.value.toLowerCase());
+      // Grounded against `names` (display-keyed leaves only), NOT `words` (every leaf) —
+      // see the BLOCKING fix note on `isNameKey` in buildEvidencePool for why.
+      return pool.names.has(claim.value.toLowerCase());
     }
     case "number": {
       return pool.numbers.has(claim.value) || pool.numbers.has(String(Number(claim.value)));
