@@ -40,8 +40,8 @@ HELPER_PLIST="app.boi.mac.wake-helper.plist"
 SIGN_IDENTITY="${BOI_CODESIGN_IDENTITY:--}"
 
 echo "building BoiApp ($CONFIGURATION)…"
-swift build --package-path mac --configuration "$CONFIGURATION" --product BoiApp
-swift build --package-path mac --configuration "$CONFIGURATION" --product BoiWakeHelper
+swift build --package-path mac --configuration "$CONFIGURATION" --arch arm64 --arch x86_64 --product BoiApp
+swift build --package-path mac --configuration "$CONFIGURATION" --arch arm64 --arch x86_64 --product BoiWakeHelper
 BIN_DIR="$(swift build --package-path mac --configuration "$CONFIGURATION" --show-bin-path)"
 BINARY="$BIN_DIR/BoiApp"
 HELPER_BINARY="$BIN_DIR/BoiWakeHelper"
@@ -73,8 +73,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleVersion</key>           <string>$VERSION</string>
     <key>LSMinimumSystemVersion</key>    <string>13.0</string>
     <key>NSHighResolutionCapable</key>   <true/>
-    <!-- Not LSUIElement: this app has an onboarding window, and the scheduled run goes
-         through --sync which never touches SwiftUI. -->
+    <key>LSUIElement</key>               <true/>
+    <!-- LSUIElement: menu-bar agent. Remove above to show Dock icon during onboarding. -->
     <key>NSHumanReadableCopyright</key>  <string>Boi</string>
 </dict>
 </plist>
