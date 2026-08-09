@@ -287,6 +287,24 @@ public struct AddressBookDirectory: Sendable {
         return candidates
     }
 
+    /// Every candidate AddressBook, and how many records each actually yielded.
+    ///
+    /// `discover()` takes the FIRST source with any records at all, so a Mac carrying both
+    /// a small local source and a large iCloud one binds to whichever sorts first. That is
+    /// invisible from the outside: the digest simply shows handles where names belong, and
+    /// a thin directory looks identical to a user who genuinely has few contacts saved.
+    ///
+    /// Diagnostic only — nothing reads this to make a decision. It exists so the log can
+    /// answer "was the directory thin, or did we bind to the wrong one" with a number
+    /// instead of an inference.
+    public static func survey(
+        home: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> [(path: String, recordCount: Int)] {
+        defaultPaths(home: home).map { path in
+            (path: path, recordCount: read(path: path)?.recordCount ?? 0)
+        }
+    }
+
     /// The first readable AddressBook among the default locations, or nil.
     public static func discover(
         home: URL = FileManager.default.homeDirectoryForCurrentUser

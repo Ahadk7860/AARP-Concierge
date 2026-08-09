@@ -16,12 +16,14 @@ import {
   DuplicateDigestError,
   deleteUser,
   deviceBelongsToUser,
+  getUser,
   insertDigest,
   latestDigest,
   newDigestId,
   recordHeartbeat,
   upsertVoicePack,
 } from "../../../db/src/index.js";
+import type { Queryable, UserScope } from "../../../db/src/index.js";
 import type { Channel, Digest, DigestV2, VoicePack, VoicePackV2 } from "../../../shared/src/index.js";
 import { authenticate, ownsUser } from "../auth.js";
 import { duplicate, redactionFailed, send, unauthorized, validation } from "../errors.js";
@@ -29,6 +31,29 @@ import { bodyHash, logEvent } from "../logging.js";
 import { firstSyncOffer } from "../welcome.js";
 import { digestSchema, heartbeatSchema, voicePackSchema } from "../schemas.js";
 import { describeViolations, findRedactionViolations } from "../redaction.js";
+
+/**
+ * The NANP ranges that can never reach a real handset: area code 555, and the
+ * 555-0100..555-0199 block reserved for fiction. Placeholders live here, and a digest
+ * ingested for one of them is a corpus nobody can be told about.
+ *
+ * Returns the offending number so the log can name it, or null when the handle is fine.
+ * Deliberately narrow — a false positive here would slander a real user's number.
+ */
+export async function unroutableHandle(
+  scope: UserScope,
+  db?: Queryable,
+): Promise<string | null> {
+  const user = await getUser(scope, db);
+  const phone = user?.phone_e164;
+  if (phone === undefined || phone === null) return null;
+  const nanp = /^\+1(\d{3})(\d{3})(\d{4})$/.exec(phone);
+  if (nanp === null) return null;
+  const [, area, exchange, line] = nanp;
+  if (area === "555") return phone;
+  if (exchange === "555" && Number(line) >= 100 && Number(line) <= 199) return phone;
+  return null;
+}
 
 /**
  * zod's message, flattened to the one-line `detail` string the OpenAPI document
@@ -91,6 +116,29 @@ export function registerIngestRoutes(
         400,
         validation(`device_id ${digest.device_id} is not registered to this user`),
       );
+    }
+
+    // THE USER NOBODY CAN TEXT.
+    //
+    // A digest can be perfectly valid and still land on a user whose handle no one will
+    // ever message. That happened: a user seeded by hand carried `+15550009998`, so the
+    // corpus ingested cleanly, the Mac saw 202, and the failure only surfaced at the first
+    // inbound text — where `findUserIdByHandle` matched the REAL number to a different,
+    // empty user and the reply was "I don't have a recent digest."
+    //
+    // Warned, not rejected, and the distinction is deliberate. `phone_e164` is `not null`
+    // with a shape check, so this can only ever be a well-formed-but-unroutable number;
+    // and the fixtures throughout this suite legitimately use the reserved 555 ranges.
+    // Rejecting would refuse real uploads to defend against a seeding mistake.
+    const unreachable = await unroutableHandle(principal.scope);
+    if (unreachable !== null) {
+      logEvent(log, {
+        msg: "digest.unreachable_user",
+        route: "/v1/digest",
+        user_id: principal.scope.user_id,
+        violations: `phone_e164 ${unreachable} is not a routable number — `
+          + "inbound texts from the real handle will resolve to a different user",
+      });
     }
 
     const digest_id = newDigestId();

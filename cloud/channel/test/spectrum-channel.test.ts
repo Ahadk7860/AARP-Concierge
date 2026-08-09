@@ -186,6 +186,57 @@ describe("capabilities and health", () => {
     expect((await channel.health()).status).toBe("banned");
   });
 
+  it("does not remember a space whose first send failed", async () => {
+    // THE BUG THIS PINS. The space id was persisted BEFORE the send, so a first send that
+    // failed left a durable space bound to a handle that never accepted it. In production
+    // a seeded placeholder number outlived its own correction that way: `phone_e164` was
+    // fixed, `channel_space_id` still read `any;-;+15550009998`, and every later send took
+    // the `getSpace` branch and was refused — with the user receiving silence.
+    const { port } = replayPort({
+      send: async () => { throw new Error("transport had a bad minute"); },
+    });
+    const { channel, remembered } = channelWith(port, null);
+    await expect(channel.send(outbound([{ type: "text", text: "hi" }]))).rejects.toThrow();
+    expect(remembered).toEqual([]);
+  });
+
+  it("remembers the space once the send actually lands", async () => {
+    const { port } = replayPort();
+    const { channel, remembered } = channelWith(port, null);
+    await channel.send(outbound([{ type: "text", text: "hi" }]));
+    expect(remembered.length).toBe(1);
+  });
+
+  it("forgets a stored space the transport refuses, so a corrected handle can recover", async () => {
+    // `Target not allowed` against a stored space means the space encodes a handle that is
+    // no longer right. Keeping it makes the user permanently unreachable no matter how the
+    // handle is corrected, because every send rehydrates the same refused conversation.
+    const t = transcript<{ error: { message: string } }>("target_not_allowed");
+    const { port } = replayPort({
+      send: async () => { throw new Error(t.error.message); },
+    });
+    const forgotten: string[] = [];
+    const { channel } = channelWith(port, "any;-;+15550009998", {
+      forgetSpace: async (user: string) => { forgotten.push(user); },
+    });
+    await expect(channel.send(outbound([{ type: "text", text: "hi" }]))).rejects.toThrow();
+    expect(forgotten).toEqual(["usr_spectrum00001"]);
+  });
+
+  it("keeps a stored space when the failure is merely transient", async () => {
+    // Only the permanent no clears state. Forgetting on a timeout would re-key a
+    // conversation the user can see, every time the transport hiccups.
+    const { port } = replayPort({
+      send: async () => { throw new Error("socket hang up"); },
+    });
+    const forgotten: string[] = [];
+    const { channel } = channelWith(port, "any;-;+16465792868", {
+      forgetSpace: async (user: string) => { forgotten.push(user); },
+    });
+    await expect(channel.send(outbound([{ type: "text", text: "hi" }]))).rejects.toThrow();
+    expect(forgotten).toEqual([]);
+  });
+
   it("reports line_id null before the first send, and that is normal", async () => {
     // On a shared pool the line is per conversation and picked at send time, so there is
     // no single correct value. Null is "we have not sent yet", not an error.

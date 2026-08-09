@@ -134,6 +134,30 @@ public struct SyncRun {
                                         options: .init(now: now, callHistory: calls))
             .compute(mirror: mirror)
 
+        // WHY THE RANKING SHOWS PHONE NUMBERS, ANSWERED WITH A COUNT.
+        //
+        // `Identity.display` falls back to the handle by design — a digest that says
+        // "unknown" for half the ranking is worse than one that says a phone number. So a
+        // reply naming `+1920…` is not evidence of a bug on its own, and cannot be told
+        // apart from a genuinely unsaved contact by looking at the digest.
+        //
+        // What IS diagnostic is the shape of the directory we bound to: `discover()` takes
+        // the first source with any records, so several sources with one thin winner would
+        // produce exactly this symptom. Logged per source, once per run.
+        for candidate in AddressBookDirectory.survey() {
+            StructuredLog.emit("contacts.source", fields: [
+                "path": (candidate.path as NSString).lastPathComponent,
+                "record_count": candidate.recordCount,
+            ])
+        }
+        let unresolved = metrics.relationships
+            .filter { $0.identity.addressBookRecordID == nil }.count
+        StructuredLog.emit("contacts.resolution", fields: [
+            "directory_records": contacts?.recordCount ?? 0,
+            "relationships": metrics.relationships.count,
+            "unresolved": unresolved,
+        ])
+
         var system = HealthCheck.SystemState.read()
         system.hasNonIMessageContacts = contacts.map { $0.recordCount > 0 }
         let health = HealthCheck.evaluate(corpus: metrics.corpus, system: system)

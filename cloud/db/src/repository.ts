@@ -636,8 +636,15 @@ export async function latestDigest(
   const res = await scopedQuery<DigestRow>(
     db,
     scope,
+    // ORDERED BY WHEN WE RECEIVED IT, NOT WHEN THE CLIENT SAYS IT WAS MADE.
+    //
+    // `generated_at` is a claim in the request body. Nothing rejects one set in the
+    // future, and this ordering used it, so a single digest dated 2027 shadowed every
+    // real sync that followed — permanently, and silently: the chat answered from the
+    // stale document and disclosed its `synced_through` as if it were current.
+    // `received_at` is server-assigned and cannot be moved by a caller.
     `select user_id, digest_id, device_id, generated_at, corpus_health, payload, as_of, received_at
-       from digests where user_id = $1 order by generated_at desc limit 1`,
+       from digests where user_id = $1 order by received_at desc, generated_at desc limit 1`,
     [scope.user_id],
   );
   return res.rows[0] ?? null;

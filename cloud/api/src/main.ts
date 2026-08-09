@@ -281,6 +281,10 @@ async function rememberSpectrumSpace(db: Queryable, userId: string, spaceId: str
   await db.query("update users set channel_space_id = $2 where user_id = $1", [userId, spaceId]);
 }
 
+async function forgetSpectrumSpace(db: Queryable, userId: string) {
+  await db.query("update users set channel_space_id = null where user_id = $1", [userId]);
+}
+
 export const defaultRuntimeFactories: RuntimeFactories = {
   async openDatabase(url) {
     return new pg.Pool({ connectionString: url, max: 8 });
@@ -299,6 +303,7 @@ export const defaultRuntimeFactories: RuntimeFactories = {
       port,
       spaceFor: (userId) => spectrumSpaceFor(db, userId),
       rememberSpace: (userId, spaceId) => rememberSpectrumSpace(db, userId, spaceId),
+      forgetSpace: (userId) => forgetSpectrumSpace(db, userId),
     });
     return new WebhookSecretChannel(channel, webhookSecret);
   },

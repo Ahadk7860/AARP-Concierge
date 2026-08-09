@@ -54,6 +54,15 @@ export type SpectrumChannelOptions = {
   spaceFor: (userId: string) => Promise<{ handle: string; spaceId: string | null }>;
   /** Persist the space id the first time it is resolved. */
   rememberSpace?: (userId: string, spaceId: string) => Promise<void>;
+  /**
+   * Drop a stored space that the transport has refused.
+   *
+   * A space id encodes the handle it was created against. When the recipient's handle is
+   * corrected, a space created against the old one keeps re-targeting it forever, and no
+   * amount of fixing `phone_e164` helps. Forgetting on a permanent rejection is what lets
+   * the next send create a fresh space against the current handle.
+   */
+  forgetSpace?: (userId: string) => Promise<void>;
   /** Free tier: groups are not available. Config, never probed. */
   groups?: boolean;
   /** 5,000 sends a day on the Free plan. */
@@ -85,12 +94,8 @@ export class SpectrumChannel implements Channel {
     const space: SpectrumSpaceRef = spaceId === null
       ? await this.options.port.createSpace(handle)
       : await this.options.port.getSpace(spaceId);
-    if (spaceId === null && this.options.rememberSpace !== undefined) {
-      await this.options.rememberSpace(msg.user_id, space.id);
-    }
-
     const parts = blocksToParts(msg);
-    const result = await this.options.port.send(space, parts).catch((err: unknown) => {
+    const result = await this.options.port.send(space, parts).catch(async (err: unknown) => {
       const message = err instanceof Error ? err.message : String(err);
       // The allowlist rejection, named. It is the one failure that means "this account
       // was never registered" rather than "the transport is having a bad minute", and
@@ -98,9 +103,26 @@ export class SpectrumChannel implements Channel {
       if (message.includes("Target not allowed for this project")) {
         this.rejections += 1;
         log({ msg: "spectrum.target_not_allowed", user_id: msg.user_id, rejections: this.rejections });
+        // A refused space is not a space. Keeping it turns a corrected handle into a
+        // permanently unreachable user: the stored id re-targets the old handle on every
+        // later send, and the correction can never take effect.
+        if (this.options.forgetSpace !== undefined) {
+          await this.options.forgetSpace(msg.user_id);
+        }
       }
       throw err;
     });
+
+    // PERSIST ONLY WHAT WAS DELIVERED.
+    //
+    // This ran BEFORE the send and stored the space id unconditionally, so a first send
+    // that failed left a durable space bound to a handle that never accepted it. That is
+    // exactly how a seeded placeholder number outlived its own correction in production:
+    // `users.phone_e164` was fixed, `users.channel_space_id` still read
+    // `any;-;+15550009998`, and every reply was refused with nothing sent to the user.
+    if (spaceId === null && this.options.rememberSpace !== undefined) {
+      await this.options.rememberSpace(msg.user_id, space.id);
+    }
 
     this.sentToday += 1;
     this.rejections = 0;
