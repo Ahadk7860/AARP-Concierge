@@ -25,7 +25,7 @@ import { join } from "node:path";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import type { ValidateFunction } from "ajv";
 import type { ZodType } from "zod";
-import { digestSchema, voicePackSchema } from "./schemas.js";
+import { digestSchema, voicePackSchema, chatReplyV2Schema, chatRouteV1Schema } from "./schemas.js";
 
 const SCHEMA_DIR = join(process.cwd(), "contracts", "schema");
 const FIXTURE_DIR = join(process.cwd(), "contracts", "fixtures");
@@ -47,6 +47,19 @@ ajv.addFormat("date-time", /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/);
   delete v1["$id"];
   delete v1["$schema"];
   ajv.addSchema(v1, "digest.v1.json");
+}
+
+// `chat_reply.v2.json` (like `chat_reply.v1.json` before it) reaches into
+// `draft_delivery.v1.json` for `follow_up_draft`. Same registration move as digest.v1
+// above — compiling chat_reply.v2.json directly would otherwise throw "can't resolve
+// reference draft_delivery.v1.json" the first time a case exercises that field.
+{
+  const draftDelivery = JSON.parse(
+    readFileSync(join(SCHEMA_DIR, "draft_delivery.v1.json"), "utf8"),
+  ) as Record<string, unknown>;
+  delete draftDelivery["$id"];
+  delete draftDelivery["$schema"];
+  ajv.addSchema(draftDelivery, "draft_delivery.v1.json");
 }
 
 function compile(name: string): ValidateFunction {
@@ -285,6 +298,145 @@ function voicePackCases(): Array<{ label: string; doc: unknown }> {
   return cases;
 }
 
+/**
+ * chat_reply.v2's new axis versus v1: `kind = "open"` requires `evidence` and forbids
+ * non-empty `licenses`; `answer`/`decline` forbid `evidence` entirely. This is exactly the
+ * kind of conditional (if/then/else on a sibling field) that a hand-written zod `.refine()`
+ * can silently diverge from the frozen schema's `allOf`/`if`/`then`/`else` — the enum-drift
+ * bug this whole file exists to catch, on a different axis (a conditional requirement
+ * instead of a missing enum member).
+ */
+function chatReplyV2Cases(): Array<{ label: string; doc: unknown }> {
+  const answer = load("chat_reply_v2", "answer.json");
+  const open = load("chat_reply_v2", "open.json");
+  const decline = load("chat_reply_v2", "decline.json");
+  const cases: Array<{ label: string; doc: unknown }> = [
+    { label: "fixture:answer", doc: answer },
+    { label: "fixture:open", doc: open },
+    { label: "fixture:decline", doc: decline },
+  ];
+
+  for (const key of Object.keys(answer)) {
+    const doc = clone(answer);
+    delete (doc as Record<string, unknown>)[key];
+    cases.push({ label: `answer without ${key}`, doc });
+  }
+  for (const key of Object.keys(open)) {
+    const doc = clone(open);
+    delete (doc as Record<string, unknown>)[key];
+    cases.push({ label: `open without ${key}`, doc });
+  }
+
+  // The kind=open conditional, both directions.
+  {
+    const doc = clone(open) as Record<string, unknown>;
+    delete doc["evidence"];
+    cases.push({ label: "open without evidence (should be invalid: evidence required)", doc });
+  }
+  {
+    const doc = clone(open) as Record<string, unknown>;
+    doc["licenses"] = [{ contact_id: "h_8f21a4c0", display: "Maya", reason: "x" }];
+    cases.push({ label: "open with non-empty licenses (should be invalid)", doc });
+  }
+  {
+    const doc = clone(open) as Record<string, unknown>;
+    doc["evidence"] = [];
+    cases.push({ label: "open with empty evidence array (should be valid — key present)", doc });
+  }
+  {
+    const doc = clone(answer) as Record<string, unknown>;
+    doc["evidence"] = [{ source: "relationship", id: "p_maya01" }];
+    cases.push({ label: "answer with evidence present (should be invalid: evidence forbidden)", doc });
+  }
+  {
+    const doc = clone(decline) as Record<string, unknown>;
+    doc["evidence"] = [];
+    cases.push({ label: "decline with empty evidence array (should be invalid: key must be absent)", doc });
+  }
+  {
+    const doc = clone(answer) as Record<string, unknown>;
+    doc["kind"] = "maybe";
+    cases.push({ label: "unrecognized kind", doc });
+  }
+  {
+    const doc = clone(open) as Record<string, unknown>;
+    (doc["evidence"] as Array<Record<string, unknown>>).push({ source: "open_loop" }); // missing id
+    cases.push({ label: "evidence ref missing id", doc });
+  }
+  {
+    const doc = clone(answer) as Record<string, unknown>;
+    doc["totally_unexpected"] = 1;
+    cases.push({ label: "junk key in root", doc });
+  }
+  {
+    const doc = clone(answer) as Record<string, unknown>;
+    doc["follow_up_draft"] = { schema_version: "draft_delivery.v1", contact_id: "h_8f21a4c0", text: "sounds good", recipient: { kind: "resolved", handle: "+15550001234" } };
+    cases.push({ label: "answer with resolved follow_up_draft", doc });
+  }
+  {
+    const doc = clone(answer) as Record<string, unknown>;
+    doc["follow_up_draft"] = { schema_version: "draft_delivery.v1", contact_id: "h_8f21a4c0", text: "sounds good", recipient: { kind: "resolved" } }; // missing handle
+    cases.push({ label: "follow_up_draft resolved recipient missing handle", doc });
+  }
+  return cases;
+}
+
+/** chat_route.v1's ONLY conditional: `intent` present iff `lane = cache_hit`. `lane` and
+ * `intent` are deliberately distinct concepts (router outcome vs. §4.2a cache key) — these
+ * cases probe that they cannot be swapped or conflated without the frozen schema noticing. */
+function chatRouteCases(): Array<{ label: string; doc: unknown }> {
+  const cacheHit = load("chat_route", "cache_hit.json");
+  const agent = load("chat_route", "agent.json");
+  const refuse = load("chat_route", "refuse.json");
+  const cases: Array<{ label: string; doc: unknown }> = [
+    { label: "fixture:cache_hit", doc: cacheHit },
+    { label: "fixture:agent", doc: agent },
+    { label: "fixture:refuse", doc: refuse },
+  ];
+
+  for (const intent of ["waiting_on_me", "drifting", "overdue", "morning_brief"]) {
+    const doc = clone(cacheHit) as Record<string, unknown>;
+    doc["intent"] = intent;
+    cases.push({ label: `cache_hit with intent=${intent}`, doc });
+  }
+  {
+    const doc = clone(cacheHit) as Record<string, unknown>;
+    doc["intent"] = "not_a_real_intent";
+    cases.push({ label: "cache_hit with unrecognized intent (should be invalid)", doc });
+  }
+  {
+    const doc = clone(cacheHit) as Record<string, unknown>;
+    delete doc["intent"];
+    cases.push({ label: "cache_hit without intent (should be invalid: intent required)", doc });
+  }
+  {
+    const doc = clone(agent) as Record<string, unknown>;
+    doc["intent"] = "waiting_on_me";
+    cases.push({ label: "agent with intent present (should be invalid: intent forbidden)", doc });
+  }
+  {
+    const doc = clone(refuse) as Record<string, unknown>;
+    doc["intent"] = "waiting_on_me";
+    cases.push({ label: "refuse with intent present (should be invalid: intent forbidden)", doc });
+  }
+  {
+    const doc = clone(agent) as Record<string, unknown>;
+    doc["lane"] = "not_a_real_lane";
+    cases.push({ label: "unrecognized lane", doc });
+  }
+  {
+    const doc = clone(agent) as Record<string, unknown>;
+    delete doc["lane"];
+    cases.push({ label: "missing lane", doc });
+  }
+  {
+    const doc = clone(agent) as Record<string, unknown>;
+    doc["totally_unexpected"] = 1;
+    cases.push({ label: "junk key", doc });
+  }
+  return cases;
+}
+
 function differential(
   name: string,
   zod: ZodType<unknown>,
@@ -311,6 +463,8 @@ describe("the zod mirror agrees with the frozen JSON Schema, decision for decisi
     expect(digestCases().length).toBeGreaterThan(30);
     expect(digestV2Cases().length).toBeGreaterThan(30);
     expect(voicePackCases().length).toBeGreaterThan(15);
+    expect(chatReplyV2Cases().length).toBeGreaterThan(10);
+    expect(chatRouteCases().length).toBeGreaterThan(8);
   });
 
   it("agrees on every digest case", () => {
@@ -323,6 +477,14 @@ describe("the zod mirror agrees with the frozen JSON Schema, decision for decisi
 
   it("agrees on every voice pack case", () => {
     differential("voice_pack", voicePackSchema, compile("voice_pack.v1.json"), voicePackCases());
+  });
+
+  it("agrees on every chat_reply.v2 case, including the kind=open conditional", () => {
+    differential("chat_reply.v2", chatReplyV2Schema, compile("chat_reply.v2.json"), chatReplyV2Cases());
+  });
+
+  it("agrees on every chat_route.v1 case, including the lane/intent conditional", () => {
+    differential("chat_route.v1", chatRouteV1Schema, compile("chat_route.v1.json"), chatRouteCases());
   });
 
   it("would notice a disagreement — the differential is not vacuous", () => {

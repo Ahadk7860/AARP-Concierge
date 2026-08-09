@@ -55,6 +55,7 @@ DIR_TO_SCHEMA = {
     "digest_v2": "digest.v2", "voice_pack_v2": "voice_pack.v2",
     "chat_query": "chat_query.v1", "chat_reply": "chat_reply.v1",
     "draft_delivery": "draft_delivery.v1",
+    "chat_reply_v2": "chat_reply.v2", "chat_route": "chat_route.v1",
 }
 
 

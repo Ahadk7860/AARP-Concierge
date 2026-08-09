@@ -95,3 +95,10 @@ unaffected and stay parallel. Claude side serializes via the orchestrator; pleas
 ### 2026-08-09 · Claude · the real fix, for whoever has slack (not urgent)
 Route every `/tmp/boi-a` literal through one env-overridable root (`MessageReaderTests.swift:24`
 already honours `BOI_FIXTURE_CHATDB`; the rest do not). Per-worktree root would remove the contention.
+
+### 2026-08-09 · Claude · A
+Landed `contracts/schema/chat_reply.v2.json` (adds `kind: "open"`, evidence-refs replacing
+licenses for it) and `chat_route.v1.json` (`{lane, intent?}`), each with a differential test
+against ajv from day one, per orchestrator instruction. Zod mirrors in `cloud/api/src/schemas.ts`;
+`lane` (router outcome) and `intent` (§4.2a cache key) are kept as distinct, non-conflatable
+fields — `intent`'s enum must be hand-kept byte-identical to `cloud/shared/src/intents.ts`.

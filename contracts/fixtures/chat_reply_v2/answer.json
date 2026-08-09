@@ -1,0 +1,9 @@
+{
+  "schema_version": "chat_reply.v2",
+  "kind": "answer",
+  "text": "Maya looks most worth replying to. As of Aug 1, she has an unanswered question from you.",
+  "synced_through": "2026-08-01T09:10:00Z",
+  "licenses": [
+    { "contact_id": "h_8f21a4c0", "display": "Maya", "reason": "asked a question that remains unanswered" }
+  ]
+}

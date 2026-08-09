@@ -300,6 +300,87 @@ export const voicePackV2Schema = z
 /** Union rather than coercion: v1 and v2 remain independently strict. */
 export const voicePackSchema = z.union([voicePackV1Schema, voicePackV2Schema]);
 
+// ---------------------------------------------------------------------------
+// chat_reply.v2 / chat_route.v1 (Track B/A, V3_ARCHITECTURE.md §2, §4.2, §4.2a)
+// ---------------------------------------------------------------------------
+
+const draftRecipientSchema = z.union([
+  z.object({ kind: z.literal("resolved"), handle: z.string().min(1).max(320) }).strict(),
+  z.object({ kind: z.literal("unavailable") }).strict(),
+]);
+
+export const draftDeliveryV1Schema = z
+  .object({
+    schema_version: z.literal("draft_delivery.v1"),
+    contact_id: z.string().regex(ID_PATTERNS.contact),
+    text: z.string().min(1).max(1000),
+    recipient: draftRecipientSchema,
+  })
+  .strict();
+
+const chatReplyLicenseSchema = z
+  .object({
+    contact_id: z.string().regex(ID_PATTERNS.contact),
+    display: z.string().max(64),
+    reason: z.string().max(140),
+  })
+  .strict();
+
+/** §4.2's universal tool-evidence ref, {source,id} — see cloud/agent/src/types.ts. Kept
+ * as a plain hand-mirror here (not imported from cloud/agent) because contracts/ is the
+ * arbiter and cloud/agent must not depend on cloud/api for its own types. */
+const evidenceRefSchema = z
+  .object({
+    source: z.string().min(1).max(40),
+    id: z.string().min(1).max(80),
+  })
+  .strict();
+
+/**
+ * chat_reply.v2 adds `kind: "open"` — the v3 agent path's verified free-form prose,
+ * additive to v1's `answer`/`decline`. An `open` reply carries `evidence` (§4.2 tool
+ * refs) instead of the closed-vocabulary `licenses`; `answer`/`decline` keep v1's exact
+ * licenses-only shape untouched. The two are mutually exclusive by construction — see the
+ * `.refine()` below, which differential.test.ts pins against the frozen schema's
+ * `if`/`then`/`else` on `kind`.
+ */
+export const chatReplyV2Schema = z
+  .object({
+    schema_version: z.literal("chat_reply.v2"),
+    kind: z.enum(["answer", "decline", "open"]),
+    text: z.string().min(1).max(1000),
+    synced_through: isoUtc,
+    licenses: z.array(chatReplyLicenseSchema).max(5),
+    evidence: z.array(evidenceRefSchema).max(50).optional(),
+    follow_up_draft: draftDeliveryV1Schema.optional(),
+  })
+  .strict()
+  .refine(
+    (v) => (v.kind === "open" ? v.evidence !== undefined && v.licenses.length === 0 : v.evidence === undefined),
+    { message: "evidence required and licenses empty iff kind = open" },
+  );
+
+/**
+ * chat_route.v1 — the router's ONLY output (V3_ARCHITECTURE.md §2/§3), built from
+ * question text alone. `lane` is a ROUTER OUTCOME (cache_hit/agent/refuse); `intent` is a
+ * §4.2a CACHE KEY, present iff lane = cache_hit. These are deliberately separate fields —
+ * see the schema file's own description for why conflating them is the exact failure mode
+ * (a renamed intent is a silent permanent cache miss) this split guards against. The
+ * intent enum below must stay byte-identical to `cloud/shared/src/intents.ts`'s INTENTS;
+ * there is no codegen link, so a change there requires a matching change here AND in
+ * contracts/schema/chat_route.v1.json, logged in INTERFACES.md.
+ */
+export const chatRouteV1Schema = z
+  .object({
+    schema_version: z.literal("chat_route.v1"),
+    lane: z.enum(["cache_hit", "agent", "refuse"]),
+    intent: z.enum(["waiting_on_me", "drifting", "overdue", "morning_brief"]).optional(),
+  })
+  .strict()
+  .refine((v) => (v.lane === "cache_hit" ? v.intent !== undefined : v.intent === undefined), {
+    message: "intent required iff lane = cache_hit",
+  });
+
 export const heartbeatSchema = z
   .object({
     device_id: z.string().regex(ID_PATTERNS.device),
