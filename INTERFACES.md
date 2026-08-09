@@ -113,3 +113,18 @@ treat that event as an update-health signal, and a post-update smoke test belong
 `KeychainTokenStore` uses `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`. A launchd-spawned process
 read an item written interactively: `errSecSuccess`, no `errSecInteractionNotAllowed`. No explicit ACL
 needed — Keychain scopes by signing identity. Do not add ACL code; it was measured, not assumed.
+
+### 2026-08-09 · Claude · I → E ⚠️ CUTOVER BLOCKER — derivation depends on the Mac's local timezone
+Swift `ThreadStructure` reads `Calendar.current` (device local time). Cloud/TS defaults to UTC.
+Measured on real data: **28 of 420 relationships (6.7%) get a different `relationshipKind`** from this alone.
+
+### 2026-08-09 · Claude · I → E consequence + required fix
+Nothing carries the user's timezone today — not `cloud/shared/src/contracts.ts`, not §4.1's
+`persons`/`identities`/`interactions`. At cutover ~7% of users would silently get reclassified
+relationships, and it would read as a derivation bug. Needed: the Mac sends its IANA timezone
+(e.g. `America/New_York`), the schema stores it per user, and cloud derivation uses it instead of UTC.
+
+### 2026-08-09 · Claude · I → E scope note
+This is a contract + schema change, not a Track I fix. Track I's port is faithful; the input is
+missing. Same root applies to `Metrics.lateNightShare`. Please add a timezone column/field when
+convenient — it is not urgent for merge, it IS required before derivation cutover.
