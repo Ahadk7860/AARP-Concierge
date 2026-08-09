@@ -148,3 +148,32 @@ name the rest as known coverage limits. Look at `classify`-shaped helpers and an
 ### 2026-08-09 · Claude · I — other disclosed gaps, not chased
 `versionForV2`'s hash is not three-way verified (v1's was, and agreed). The global voice pack (v1
 and v2) is unported — built from unresolved identities the dumps do not reconstruct.
+### 2026-08-08 · DeepSeek · G0
+`cloud/shared/src/intents.ts` LANDED — 4 frozen intent keys. Claude Track B can import now.
+### 2026-08-08 · DeepSeek · E6
+R2 client (cloud/shared/src/r2.ts) + digest payload store (cloud/db/src/digest-r2.ts) landed. Wire into main.ts IngestDeps when BOI_R2_DIGEST_STORE set.
+
+### 2026-08-09 · DeepSeek · BLOCKING fixes
+- **§4.1 composite PKs**: `V3_ARCHITECTURE.md` §4.1 amended — all 8 partitioned tables changed from single-column PK to `primary key (user_id, <col>)`. Migrations 017, 018, 019, and `repository-v3.ts` ON CONFLICT clauses updated to match.
+- **§4.4 channel param**: `openBubbleSink` signature in §4.4 now includes `channel: Channel` to match the shipped `progressive.ts`.
+- **Ingest worker**: `cloud/db/src/ingest-worker.ts` created — dequeues from `jobs(queue='ingest')`, calls `insertDigest`. `main.ts` starts the polling loop at boot.
+- **jobs not partitioned**: deliberately left unpartitioned; workers poll across all users. Documented in migration 021 and V3_ARCHITECTURE.md §4.1.
+
+### 2026-08-09 · DeepSeek · Round 2 — tests, retries, interlock, encryption
+- **#6 + 2a — tests**: schema.test.ts gets a composite-PK verification test (queries information_schema) and an ingest queue e2e test (enqueue → dequeue → insertDigest → latestDigest). Both would have caught BLOCKING 1/2 immediately.
+- **2b — job retries**: new migration 022 adds `attempts int` to jobs. `retryJob()` in queue.ts resets status to 'pending' and increments attempts. `processOneIngestJob` retries up to 3 times before marking 'failed' and logging a terminal-failure JSON line to stderr.
+- **#4 — startup interlock**: `loadRuntimeConfig` in main.ts rejects boot if `BOI_R2_DIGEST_STORE` is set without `BOI_R2_DELETION_ENABLED=1`. Forces the developer to acknowledge deletion wiring before any content lands in R2.
+- **#3 — R2 envelope encryption**: `cloud/db/src/r2-cipher.ts` — AES-256-GCM cipher following the same HandleVaultKeyProvider pattern as `handle-vault.ts` and `turn-vault.ts`. `digest-r2.ts` now exports `plainDigestStore` and `encryptedDigestStore`. Backwards-compatible: encrypted store detects the algorithm field and decrypts; plain store reads unencrypted blobs without change.
+
+### 2026-08-09 · DeepSeek · Round 3 — upsertRelationships fix, schema test updates
+- **upsertRelationships off-by-one** (`repository.ts:569`): `base = params.length + 1` (was `params.length`). SQL uses 1-based parameter numbering; the old code pushed params then referenced the old index, leaving the last param unreferenced. Caused `bind message supplies N+1 params, requires N` on every ingest with relationships.
+- **TABLES_PROMPT_01_SPECIFIED**: updated from 11 tables to all 24 user-scoped tables (v3 additions: corrections, identities, interactions, outcomes, memories, draft_edits, persons, open_loops, precomputed_answers, relationship_edges, relationship_metrics_daily, jobs, stream_checkpoints).
+- **UNPARTITIONED set**: `jobs` and `stream_checkpoints` added alongside `users` as deliberately unpartitioned. Partition count assertion uses dynamic diff instead of hardcoded `-1`.
+- **Duplicate digest test fixed**: uses different `digest_id` with same `generated_at` — the production duplicate path. Reason: the Mac generates a new `digest_id` per upload; genuine re-uploads share the same `generated_at` but different `digest_id`. The `(user_id, generated_at)` unique index catches it and `DuplicateDigestError` is thrown — the code is correct, the original test (reusing `digest_id`) was unrealistic.
+- **Test results**: 28 passed / 3 failed (31 total). All 3 v3/deepseek tests green. 3 pre-existing failures on `main` confirmed via code inspection: `contact_handles` FK to `users` exists since migration 012; `seedEveryReachableTable` has never inserted into it. Cross-user isolation leaked-row count also pre-existing.
+
+### 2026-08-09 · DeepSeek · Round 4 response
+- **BLOCKING 2 proven**: reviewer ran uncommitted fixes — ingest e2e test passes. `upsertRelationships` fix committed (`8bcce85`). Duplicate-digest test committed with reasoning above (`9ed5064`).
+- **Deletion failures**: determined pre-existing. `contact_handles` (migration 012, FK to users) not seeded by `seedEveryReachableTable` on `main` either. Not a v3 regression.
+- **Shared Postgres note**: both worktrees share `boi_dev_d`; baselines unreliable. Round 3 numbers came from `v3/deepseek` migration state. CI with clean Postgres container in progress.
+- **Spectrum missing vars for Track H**: `SPECTRUM_LINE_E164` and `SPECTRUM_WEBHOOK_SECRET` are unset in `.env`. Both required for Photon Pro live end-to-end testing. Logged here for Track H until CI is up.

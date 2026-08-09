@@ -236,13 +236,16 @@ export async function deleteUser(
     return { deleted: (res.rowCount ?? 0) > 0, verified_tables: Object.keys(residue).sort() };
   }, pool);
 
-  // AFTER the transaction commits, deliberately. A file removed inside a transaction
-  // that then rolls back is a card deleted for a user who still exists — and the
-  // filesystem has no rollback. The rows are gone first; if this throws, it throws
-  // loudly with the user already deleted, which is the safe direction to fail in.
+  // AFTER the transaction commits, deliberately. External stores have no rollback.
+  // The rows are gone first; if this throws, it throws loudly with the user already
+  // deleted, which is the safe direction to fail in.
   const verifiedCardStore = await deleteExternalCards(scope.user_id);
+  const verifiedR2Store = await deleteR2Objects(scope.user_id);
 
-  return { ...result, verified_external: [verifiedCardStore] };
+  return {
+    ...result,
+    verified_external: [verifiedCardStore, verifiedR2Store].filter((s): s is string => s !== null),
+  };
 }
 
 /** The one external store, named so the residue error says which one leaked. */
@@ -254,6 +257,43 @@ export type ExternalCardStore = {
   /** Delete this user's artifacts and return the residue count after deletion. */
   deleteAndCount(userId: string): Promise<number> | number;
 };
+
+// ── R2 content store — same pattern, separate installation point ──
+
+let r2Store: ExternalCardStore | null = null;
+
+/**
+ * Install the R2 content boundary. `null` means "no R2 configured" —
+ * deletion succeeds without it (content-only, not a correctness regression).
+ */
+export function installR2Store(store: ExternalCardStore | null): () => void {
+  if (store !== null && !/^[a-z][a-z0-9()_-]{2,63}$/i.test(store.name)) {
+    throw new Error("R2 store name must be a bounded diagnostic token");
+  }
+  const previous = r2Store;
+  r2Store = store;
+  return () => {
+    if (r2Store !== store) throw new Error("R2 store changed before restore");
+    r2Store = previous;
+  };
+}
+
+/** Delete R2 objects and verify residue. Returns the store name, or null if unconfigured. */
+export async function deleteR2Objects(userId: string): Promise<string | null> {
+  const store = r2Store;
+  if (store === null) return null;
+  if (!/^usr_[0-9A-Za-z]{8,32}$/.test(userId)) {
+    throw new Error("refusing R2 deletion for invalid user id");
+  }
+  const remaining = await store.deleteAndCount(userId);
+  if (!Number.isSafeInteger(remaining) || remaining < 0) {
+    throw new Error(`${store.name} returned an invalid residue count`);
+  }
+  if (remaining > 0) {
+    throw new ResidualUserDataError({ [store.name]: remaining });
+  }
+  return store.name;
+}
 
 const localCardStore: ExternalCardStore = {
   name: CARD_STORE,
@@ -515,29 +555,34 @@ export async function listDevices(
 // Relationships
 // ---------------------------------------------------------------------------
 
-/** Upsert the relationships from one digest. `contact_id` arrives from the Mac. */
+/** Upsert the relationships from one digest in a single multi-row insert. */
 export async function upsertRelationships(
   scope: UserScope,
   rows: readonly Relationship[],
   db: Queryable = getPool(),
 ): Promise<number> {
-  let n = 0;
-  for (const r of rows) {
-    const res = await scopedQuery(
-      db,
-      scope,
-      `insert into relationships (user_id, contact_id, display, payload, as_of)
-       values ($1, $2, $3, $4, $5)
-       on conflict (user_id, contact_id) do update
-         set display = excluded.display,
-             payload = excluded.payload,
-             as_of   = excluded.as_of
-       where relationships.as_of <= excluded.as_of`,
-      [scope.user_id, r.contact_id, r.display, JSON.stringify(r), r.as_of],
-    );
-    n += res.rowCount ?? 0;
+  if (rows.length === 0) return 0;
+  const params: unknown[] = [scope.user_id];
+  const placeholders: string[] = [];
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i]!;
+    const base = params.length + 1; // +1 for SQL 1-based param numbering
+    params.push(r.contact_id, r.display, JSON.stringify(r), r.as_of);
+    placeholders.push(`($1, $${base}, $${base + 1}, $${base + 2}, $${base + 3})`);
   }
-  return n;
+  const res = await scopedQuery(
+    db,
+    scope,
+    `insert into relationships (user_id, contact_id, display, payload, as_of)
+     values ${placeholders.join(", ")}
+     on conflict (user_id, contact_id) do update
+       set display = excluded.display,
+           payload = excluded.payload,
+           as_of   = excluded.as_of
+       where relationships.as_of <= excluded.as_of`,
+    params,
+  );
+  return res.rowCount ?? rows.length;
 }
 
 export async function listRelationships(
@@ -575,6 +620,61 @@ export async function findRelationshipsByDisplay(
     [scope.user_id, display],
   );
   return res.rows;
+}
+
+// ── v3 SQL-native relationship reads (no JSONB parsing) ──
+
+export async function relationshipsWaitingOnMe(
+  scope: UserScope,
+  limit: number = 5,
+  db: Queryable = getPool(),
+): Promise<Array<{ contact_id: string; display: string; days_since_last_contact: number }>> {
+  const res = await scopedQuery<{ contact_id: string; display: string; days_since_last_contact: number }>(
+    db, scope,
+    `select contact_id, display,
+            coalesce((payload->>'days_since_last_contact')::int, 0) as days_since_last_contact
+     from relationships
+     where user_id = $1
+       and payload->>'last_exchange_shape' = 'question_from_them'
+       and payload->>'open_thread' is not null
+     order by (payload->>'days_since_last_contact')::int desc nulls last
+     limit $2`,
+    [scope.user_id, limit],
+  );
+  return res.rows;
+}
+
+export async function relationshipsDrifting(
+  scope: UserScope,
+  limit: number = 5,
+  db: Queryable = getPool(),
+): Promise<Array<{ contact_id: string; display: string; overdue_by_days: number }>> {
+  const res = await scopedQuery<{ contact_id: string; display: string; overdue_by_days: number }>(
+    db, scope,
+    `select contact_id, display,
+            coalesce(overdue_by_days, 0) as overdue_by_days
+     from relationships
+     where user_id = $1
+       and overdue_by_days is not null
+     order by overdue_by_days desc nulls last
+     limit $2`,
+    [scope.user_id, limit],
+  );
+  return res.rows;
+}
+
+export async function relationshipByContactId(
+  scope: UserScope,
+  contact_id: string,
+  db: Queryable = getPool(),
+): Promise<RelationshipRow | null> {
+  const res = await scopedQuery<RelationshipRow>(
+    db, scope,
+    `select user_id, contact_id, display, payload, as_of
+     from relationships where user_id = $1 and contact_id = $2`,
+    [scope.user_id, contact_id],
+  );
+  return res.rows[0] ?? null;
 }
 
 // ---------------------------------------------------------------------------

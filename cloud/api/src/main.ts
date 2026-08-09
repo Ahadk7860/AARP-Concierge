@@ -24,6 +24,7 @@ import {
   isInstalledPool,
   type Queryable,
 } from "../../db/src/index.js";
+import { startIngestWorker } from "../../db/src/ingest-worker.js";
 import { SpectrumChannel } from "../../channel/src/spectrum-channel.js";
 import { LiveSpectrumPort } from "../../channel/src/spectrum-live.js";
 import { SpectrumRegistrar } from "../../channel/src/spectrum-registrar.js";
@@ -184,6 +185,17 @@ export function loadRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Runtime
         invalid.push(`${name} (must be a URL origin)`);
       }
     }
+  }
+  if (missing.length > 0 || invalid.length > 0) throw new RuntimeConfigError(missing, invalid);
+
+  // §4 interlock — R2 content upload without R2 deletion means deleteUser lies.
+  // If digest payloads move to R2, the delete cascade must reach them too.
+  // Both use the same R2Store client; the env check forces the developer to
+  // acknowledge the deletion wiring before any content ever lands in R2.
+  const r2DigestStore = nonEmpty(env, "BOI_R2_DIGEST_STORE");
+  const r2Deletion = nonEmpty(env, "BOI_R2_DELETION_ENABLED") === "1";
+  if (r2DigestStore !== null && !r2Deletion) {
+    invalid.push("BOI_R2_DIGEST_STORE (set without BOI_R2_DELETION_ENABLED=1 — content in R2 but no deletion store; deleteUser would leave orphaned objects)");
   }
   if (missing.length > 0 || invalid.length > 0) throw new RuntimeConfigError(missing, invalid);
 
@@ -591,6 +603,10 @@ export async function startRuntime(
       dependencies: statusDeps,
     });
     if (!(await status.ready()).ready) throw new Error("runtime_dependencies_unready");
+
+    // Start the ingest worker — dequeues jobs written by the ingest route.
+    const stopIngestWorker = startIngestWorker({ channel, pollIntervalMs: 5_000 });
+    cleanups.unshift(stopIngestWorker);
 
     const app = buildServer({ channel, registrar });
     if (config.card !== null) registerCardProxy(app, config.card, factories.fetch);

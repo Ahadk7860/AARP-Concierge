@@ -5,7 +5,7 @@
 // true, and it is deliberately the smallest surface in the track: four methods, no
 // branching on message content, no retries of its own.
 
-import { Spectrum, attachment, text, type Space } from "@spectrum-ts/core";
+import { Spectrum, attachment, text, typing, type Space } from "@spectrum-ts/core";
 import { imessage, nativeContactCard } from "@spectrum-ts/imessage";
 
 import type {
@@ -67,6 +67,7 @@ export class LiveSpectrumPort implements SpectrumPort {
     const contents = parts.map((part) => {
       if (part.kind === "text") return text(part.text);
       if (part.kind === "contact_card") return nativeContactCard();
+      if (part.kind === "typing") return typing();
       // Explicit mime type, always: the card's URL ends in a signature, so there is no
       // extension for a receiver to infer from.
       return attachment(new URL(part.url), { mimeType: part.mimeType, name: part.name });

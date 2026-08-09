@@ -34,3 +34,9 @@ let package = Package(
         .testTarget(name: "BoiKitTests", dependencies: ["BoiKit"]),
     ]
 )
+
+// Sparkle auto-update framework — Track F3
+// Add to your Xcode project:
+//   .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.6.0")
+// Then add .product(name: "Sparkle", package: "Sparkle") to BoiApp dependencies.
+// The appcast URL goes in Info.plist as SUFeedURL.
