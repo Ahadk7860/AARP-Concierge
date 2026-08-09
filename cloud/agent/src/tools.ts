@@ -89,6 +89,38 @@ function requireNonEmptyString(tool: string, field: string, value: unknown): str
   return value;
 }
 
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * SHOULD-FIX (adversarial review): §4.2's `search_messages({ when? })` is documented to
+ * the model as a "time hint" (tool-specs.ts), but the tool used to hardcode
+ * `when_from`/`when_to` to `undefined` and never read `input.when` at all — silently
+ * accepting and discarding a parameter the model was told would work. Date-scoped search
+ * has never functioned, and nothing caught it because no test exercised `when`.
+ *
+ * This does not attempt general natural-language date parsing (out of scope, and a false
+ * "understood your hint" is worse than an honest "didn't parse it"). It parses exactly two
+ * shapes: a single ISO date (`2026-08-08`, expanded to that whole day) and an ISO date
+ * range (`2026-08-01..2026-08-08`, inclusive of both endpoints). Anything else returns
+ * `null` and the caller surfaces that honestly via `degraded: "when_unparsed"` rather than
+ * silently running the search unfiltered as if the hint had been honored.
+ */
+export function parseWhenHint(when: string): { when_from: string; when_to: string } | null {
+  const trimmed = when.trim();
+  const single = ISO_DATE_RE.exec(trimmed);
+  if (single !== null) {
+    return { when_from: `${trimmed}T00:00:00Z`, when_to: `${trimmed}T23:59:59Z` };
+  }
+  const range = /^(\d{4}-\d{2}-\d{2})\.\.(\d{4}-\d{2}-\d{2})$/.exec(trimmed);
+  if (range !== null) {
+    const [, from, to] = range;
+    if (from !== undefined && to !== undefined && from <= to) {
+      return { when_from: `${from}T00:00:00Z`, when_to: `${to}T23:59:59Z` };
+    }
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // search_messages — storage-agnostic (§4.2/§4.3). Device first, honest degradation
 // when the Mac is asleep or not wired; never fabricates results.
@@ -103,14 +135,19 @@ export async function searchMessages(
   const port = ctx.deviceSearch ?? new DegradedDeviceSearchPort();
   const requestId = ctx.requestId?.() ?? `req_${Math.random().toString(36).slice(2, 10)}`;
 
+  // See parseWhenHint's doc comment: a hint that doesn't parse runs the search unfiltered
+  // by date rather than silently pretending it was honored, and says so via `degraded`.
+  const whenRange = input.when !== undefined ? parseWhenHint(input.when) : null;
+  const whenUnparsed = input.when !== undefined && whenRange === null;
+
   const response = await port.search({
     v: 1,
     id: requestId,
     op: "search",
     query,
     who: input.who,
-    when_from: undefined,
-    when_to: undefined,
+    when_from: whenRange?.when_from,
+    when_to: whenRange?.when_to,
     limit,
   });
 
@@ -128,22 +165,25 @@ export async function searchMessages(
 
   // §4.3's wire shape has no `display` (it returns `person_id` + `score`, nothing else);
   // §4.2's contract requires one. That mapping is this tool's job, not the device search
-  // port's — look each row's person_id up against the relationship store rather than
-  // asking the device to know about display names it was never given.
-  const results = await Promise.all(response.results.map(async (row) => {
-    const state = await ctx.store.relationshipState(ctx.scope, { person_id: row.person_id });
-    return {
-      person_id: row.person_id,
-      display: state?.display ?? row.person_id,
-      when: row.when,
-      snippet: row.snippet,
-      thread_id: row.thread_id,
-    };
+  // port's. Batched (one relationshipStateBatch call, not one relationshipState call per
+  // row) — this is the hot path, every search hits it, and the N+1 was flagged in review.
+  const personIds = [...new Set(response.results.map((row) => row.person_id))];
+  const states = await ctx.store.relationshipStateBatch(ctx.scope, personIds);
+  const results = response.results.map((row) => ({
+    person_id: row.person_id,
+    display: states.get(row.person_id)?.display ?? row.person_id,
+    when: row.when,
+    snippet: row.snippet,
+    thread_id: row.thread_id,
   }));
 
   return {
     results,
     source: "device",
+    // whenUnparsed is reported even on an otherwise-successful search: the query ran, but
+    // not scoped the way the caller asked, which the caller needs to know to trust (or
+    // not) that an empty/broad result set reflects the date range they meant.
+    degraded: whenUnparsed ? "when_unparsed" : undefined,
     evidence: results.map((row): EvidenceRef => ({ source: "message", id: `${row.thread_id}:${row.when}` })),
   };
 }

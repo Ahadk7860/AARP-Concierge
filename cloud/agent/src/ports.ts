@@ -22,6 +22,19 @@ export interface AgentStore {
     input: RelationshipStateInput,
   ): Promise<RelationshipStateOutput | null>;
 
+  /**
+   * Batched lookup — one `WHERE person_id IN (...)` instead of N round-trips. Added for
+   * `search_messages` (§4.2), which used to call `relationshipState` once per result row
+   * to resolve `display`; that's the hot path (every search hits it) and the N+1 was
+   * flagged in review. Returns a map keyed by the input person_ids that actually resolved
+   * — a person_id with no matching row is simply absent, not an error, matching the
+   * single-lookup method's "null means no match" contract.
+   */
+  relationshipStateBatch(
+    scope: UserScope,
+    personIds: readonly string[],
+  ): Promise<ReadonlyMap<string, RelationshipStateOutput>>;
+
   openLoops(
     scope: UserScope,
     input: { direction?: "i_owe_them" | "they_owe_me"; kind?: string; limit: number },
@@ -122,6 +135,18 @@ export class InMemoryAgentStore implements AgentStore {
       return matches.length === 1 ? matches[0]! : null;
     }
     return null;
+  }
+
+  async relationshipStateBatch(
+    _scope: UserScope,
+    personIds: readonly string[],
+  ): Promise<ReadonlyMap<string, RelationshipStateOutput>> {
+    const out = new Map<string, RelationshipStateOutput>();
+    for (const id of personIds) {
+      const row = this.relationships.get(id);
+      if (row !== undefined) out.set(id, row);
+    }
+    return out;
   }
 
   async openLoops(

@@ -15,7 +15,15 @@ export const AGENT_TOOL_SPECS: ToolSpec[] = [
         properties: {
           query: { type: "string" },
           who: { type: "string", description: "Optional person_id or display name filter" },
-          when: { type: "string", description: "Optional natural-language time hint" },
+          // SHOULD-FIX (adversarial review): this used to advertise "natural-language time
+          // hint" while the tool silently ignored the field entirely. Advertise only what
+          // parseWhenHint (tools.ts) actually parses — an unparseable value still runs the
+          // search (unfiltered by date) and reports `degraded: "when_unparsed"` rather than
+          // erroring, but the model should not expect free-form phrasing to work.
+          when: {
+            type: "string",
+            description: "Optional date filter. Only two shapes are understood: a single ISO date (\"2026-08-08\", the whole day) or an inclusive ISO date range (\"2026-08-01..2026-08-08\"). Anything else is not parsed.",
+          },
           limit: { type: "integer", minimum: 1, maximum: 20 },
         },
         required: ["query"],

@@ -8,6 +8,7 @@ import {
   memorySearch,
   memoryWrite,
   openLoops,
+  parseWhenHint,
   relationshipState,
   searchMessages,
   sendMessage,
@@ -213,5 +214,102 @@ describe("search_messages — §4.2/§4.3 mapping and honest degradation", () =>
     };
     const result = await searchMessages(ctx({ deviceSearch: port }), { query: "hi" });
     expect(result.results[0]!.display).toBe("p_unknown");
+  });
+
+  it("resolves display for multiple result rows with a SINGLE batched store call, not one per row (N+1 fix)", async () => {
+    let batchCalls = 0;
+    const store = makeStore();
+    const batchingStore: import("../src/ports.js").AgentStore = {
+      relationshipState: (s, i) => store.relationshipState(s, i),
+      openLoops: (s, i) => store.openLoops(s, i),
+      drifting: (s, i) => store.drifting(s, i),
+      circle: (s, i) => store.circle(s, i),
+      memoryWrite: (s, i) => store.memoryWrite(s, i),
+      memorySearch: (s, q) => store.memorySearch(s, q),
+      resolvePerson: (s, d) => store.resolvePerson(s, d),
+      relationshipStateBatch: async (s, ids) => {
+        batchCalls += 1;
+        return store.relationshipStateBatch(s, ids);
+      },
+    };
+    const port = {
+      search: async (): Promise<AskDeviceSearchResponse> => ({
+        v: 1,
+        id: "r1",
+        ok: true,
+        results: [
+          { person_id: "p_maya01", when: "2026-08-05T10:00:00Z", snippet: "a", thread_id: "t1", score: 0.9 },
+          { person_id: "p_maya01", when: "2026-08-06T10:00:00Z", snippet: "b", thread_id: "t2", score: 0.8 },
+        ],
+      }),
+    };
+    const result = await searchMessages(ctx({ deviceSearch: port, store: batchingStore }), { query: "trip" });
+    expect(batchCalls).toBe(1);
+    expect(result.results.map((r) => r.display)).toEqual(["Maya", "Maya"]);
+  });
+
+  it("passes a parsed single-date `when` hint through as when_from/when_to", async () => {
+    let received: { when_from?: string; when_to?: string } | null = null;
+    const port = {
+      search: async (req: { when_from?: string; when_to?: string }): Promise<AskDeviceSearchResponse> => {
+        received = { when_from: req.when_from, when_to: req.when_to };
+        return { v: 1, id: "r1", ok: true, results: [] };
+      },
+    };
+    const result = await searchMessages(ctx({ deviceSearch: port }), { query: "trip", when: "2026-08-08" });
+    expect(received).toEqual({ when_from: "2026-08-08T00:00:00Z", when_to: "2026-08-08T23:59:59Z" });
+    expect(result.degraded).toBeUndefined();
+  });
+
+  it("passes a parsed date RANGE `when` hint through as when_from/when_to", async () => {
+    let received: { when_from?: string; when_to?: string } | null = null;
+    const port = {
+      search: async (req: { when_from?: string; when_to?: string }): Promise<AskDeviceSearchResponse> => {
+        received = { when_from: req.when_from, when_to: req.when_to };
+        return { v: 1, id: "r1", ok: true, results: [] };
+      },
+    };
+    await searchMessages(ctx({ deviceSearch: port }), { query: "trip", when: "2026-08-01..2026-08-08" });
+    expect(received).toEqual({ when_from: "2026-08-01T00:00:00Z", when_to: "2026-08-08T23:59:59Z" });
+  });
+
+  it("SHOULD-FIX regression: an unparseable `when` hint runs the search unfiltered and reports degraded: when_unparsed, rather than silently ignoring it", async () => {
+    let received: { when_from?: string; when_to?: string } | null = null;
+    const port = {
+      search: async (req: { when_from?: string; when_to?: string }): Promise<AskDeviceSearchResponse> => {
+        received = { when_from: req.when_from, when_to: req.when_to };
+        return { v: 1, id: "r1", ok: true, results: [] };
+      },
+    };
+    const result = await searchMessages(ctx({ deviceSearch: port }), { query: "trip", when: "last week" });
+    expect(received).toEqual({ when_from: undefined, when_to: undefined });
+    expect(result.degraded).toBe("when_unparsed");
+    expect(result.source).toBe("device"); // the search still ran — just unfiltered by date.
+  });
+
+  it("does not set degraded at all when no `when` hint was given", async () => {
+    const port = { search: async (): Promise<AskDeviceSearchResponse> => ({ v: 1, id: "r1", ok: true, results: [] }) };
+    const result = await searchMessages(ctx({ deviceSearch: port }), { query: "trip" });
+    expect(result.degraded).toBeUndefined();
+  });
+});
+
+describe("parseWhenHint", () => {
+  it("parses a single ISO date into that whole day's range", () => {
+    expect(parseWhenHint("2026-08-08")).toEqual({ when_from: "2026-08-08T00:00:00Z", when_to: "2026-08-08T23:59:59Z" });
+  });
+
+  it("parses an inclusive ISO date range", () => {
+    expect(parseWhenHint("2026-08-01..2026-08-08")).toEqual({ when_from: "2026-08-01T00:00:00Z", when_to: "2026-08-08T23:59:59Z" });
+  });
+
+  it("rejects a reversed range (from after to)", () => {
+    expect(parseWhenHint("2026-08-08..2026-08-01")).toBeNull();
+  });
+
+  it("does not attempt natural-language phrasing", () => {
+    expect(parseWhenHint("last week")).toBeNull();
+    expect(parseWhenHint("around March 3rd")).toBeNull();
+    expect(parseWhenHint("")).toBeNull();
   });
 });
