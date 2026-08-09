@@ -775,15 +775,23 @@ final class HeartbeatUploadTests: XCTestCase {
 
 final class TokenStoreTests: XCTestCase {
 
+    // Neither directory exists, so neither the walking `.env` lookup nor the Application
+    // Support lookup can accidentally pick up the developer's real config or credentials —
+    // that is exactly what broke these tests before `applicationSupportDirectory` was made
+    // injectable (it used to unconditionally read `~/Library/Application Support/Boi/.env`).
+    private let noDirectory = "/nonexistent"
+    private let noAppSupport = "/nonexistent-app-support"
+
     func testAMissingIdentityMeansNoUploadRatherThanAnAnonymousOne() {
-        let store = EnvironmentTokenStore(environment: [:], searchingFrom: "/nonexistent")
+        let store = EnvironmentTokenStore(environment: [:], searchingFrom: noDirectory,
+                                          applicationSupportDirectory: noAppSupport)
         XCTAssertNil(store.identity())
     }
 
     func testTheProcessEnvironmentSupplesTheIdentity() {
         let store = EnvironmentTokenStore(
             environment: ["BOI_USER_ID": "usr_123", "BOI_DEVICE_TOKEN": "tok"],
-            searchingFrom: "/nonexistent")
+            searchingFrom: noDirectory, applicationSupportDirectory: noAppSupport)
         XCTAssertEqual(store.identity(),
                        DeviceIdentity(user_id: "usr_123", device_token: "tok"))
     }
@@ -792,14 +800,16 @@ final class TokenStoreTests: XCTestCase {
         // A token with no user id would post a digest whose `user_id` is the locally
         // derived HMAC, which the server answers with 401. Better to not send.
         let store = EnvironmentTokenStore(environment: ["BOI_DEVICE_TOKEN": "tok"],
-                                          searchingFrom: "/nonexistent")
+                                          searchingFrom: noDirectory,
+                                          applicationSupportDirectory: noAppSupport)
         XCTAssertNil(store.identity())
     }
 
     func testConfigurationReadsTheVariableThatAlreadyExists() {
         let configuration = Uploader.Configuration.fromEnvironment(
             ["BOI_API_BASE": "http://localhost:3041"],
-            searchingFrom: "/nonexistent", arguments: ["boi-cli"])
+            searchingFrom: noDirectory, applicationSupportDirectory: noAppSupport,
+            arguments: ["boi-cli"])
         XCTAssertEqual(configuration?.baseURL.absoluteString, "http://localhost:3041")
         XCTAssertEqual(configuration?.dryRun, false)
     }
@@ -809,13 +819,15 @@ final class TokenStoreTests: XCTestCase {
         // a flag through, so the configuration reads argv directly.
         let configuration = Uploader.Configuration.fromEnvironment(
             ["BOI_API_BASE": "http://localhost:3041"],
-            searchingFrom: "/nonexistent", arguments: ["Boi", "--sync", "--dry-run"])
+            searchingFrom: noDirectory, applicationSupportDirectory: noAppSupport,
+            arguments: ["Boi", "--sync", "--dry-run"])
         XCTAssertEqual(configuration?.dryRun, true)
     }
 
     func testNoBaseURLMeansNoUploadRatherThanADefaultPort() {
-        XCTAssertNil(Uploader.Configuration.fromEnvironment([:], searchingFrom: "/nonexistent",
-                                                            arguments: []))
+        XCTAssertNil(Uploader.Configuration.fromEnvironment(
+            [:], searchingFrom: noDirectory, applicationSupportDirectory: noAppSupport,
+            arguments: []))
     }
 }
 
@@ -974,8 +986,10 @@ final class SyncRunUploadTests: XCTestCase {
                                                outputDirectory: state + "/out",
                                                stateDirectory: state),
                                   salt: Self.salt,
-                                  tokenStore: EnvironmentTokenStore(environment: [:],
-                                                                    searchingFrom: "/nonexistent"))
+                                  tokenStore: EnvironmentTokenStore(
+                                      environment: [:],
+                                      searchingFrom: "/nonexistent",
+                                      applicationSupportDirectory: "/nonexistent-app-support"))
             .run()
         XCTAssertTrue(outcome.ran)
         XCTAssertNil(outcome.upload)
