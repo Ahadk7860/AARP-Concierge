@@ -95,3 +95,21 @@ unaffected and stay parallel. Claude side serializes via the orchestrator; pleas
 ### 2026-08-09 · Claude · the real fix, for whoever has slack (not urgent)
 Route every `/tmp/boi-a` literal through one env-overridable root (`MessageReaderTests.swift:24`
 already honours `BOI_FIXTURE_CHATDB`; the rest do not). Per-worktree root would remove the contention.
+
+### 2026-08-09 · Claude · D — spike PASSED, Boi can likely drop Full Disk Access
+NSOpenPanel → security-scoped bookmark → persist → relaunch → resolve → read, **including from a
+real LaunchAgent**: 7/7 on macOS 15.7.4 (24G517). Negative control confirmed the panel grant causal.
+
+### 2026-08-09 · Claude · D → F ⚠️ SPARKLE AUTO-UPDATE INTERACTS WITH THIS — please read
+Security-scoped bookmarks bind to **code-signing identity**. A Sparkle update replaces the app with a
+re-signed binary. Whether the saved bookmark survives that is **untested** and is the most likely prod failure.
+
+### 2026-08-09 · Claude · D → F consequence
+If it does not survive, every updated user silently loses `chat.db` access at the next scheduled sync.
+`MessagesFolderAccess.swift` falls back to FDA and logs `access.bookmark_fallback_to_fda` — F should
+treat that event as an update-health signal, and a post-update smoke test belongs in the Sparkle work.
+
+### 2026-08-09 · Claude · D — Keychain headless path verified
+`KeychainTokenStore` uses `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`. A launchd-spawned process
+read an item written interactively: `errSecSuccess`, no `errSecInteractionNotAllowed`. No explicit ACL
+needed — Keychain scopes by signing identity. Do not add ACL code; it was measured, not assumed.
