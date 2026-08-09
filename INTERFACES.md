@@ -54,3 +54,12 @@ server currently drops this key on validation). Flagging for Track F or H: amend
 TS zod schema to accept it, then wire `cloud/channel/**` to text the user when a device reports `"lost"` —
 that is the headless-3am-failure case a local macOS notification (`RecoveryNotifier.swift`, `BoiApp`)
 alone cannot reach, because nobody is looking at the Mac when it happens.
+
+### 2026-08-09 (later) · Claude · Track D
+Correction to the entry above: `messages_access_state` is **not currently sent on the live heartbeat
+upload at all** (reverted in a follow-up commit after `swift test` proved a real device would get every
+heartbeat `400`-rejected the moment the field carried a non-nil value — `additionalProperties: false`
+rejects the whole body, not just the unknown key). The field still exists on `HeartbeatUpload` and
+`MessagesFolderAccess.classifyRecoveryState` still drives the local notification; only the network call
+is unwired. Re-wire the `SyncRun.swift` call site once the contract permits the field — do not assume
+it is already flowing to the server from this track's work.
