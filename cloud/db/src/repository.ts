@@ -236,13 +236,16 @@ export async function deleteUser(
     return { deleted: (res.rowCount ?? 0) > 0, verified_tables: Object.keys(residue).sort() };
   }, pool);
 
-  // AFTER the transaction commits, deliberately. A file removed inside a transaction
-  // that then rolls back is a card deleted for a user who still exists — and the
-  // filesystem has no rollback. The rows are gone first; if this throws, it throws
-  // loudly with the user already deleted, which is the safe direction to fail in.
+  // AFTER the transaction commits, deliberately. External stores have no rollback.
+  // The rows are gone first; if this throws, it throws loudly with the user already
+  // deleted, which is the safe direction to fail in.
   const verifiedCardStore = await deleteExternalCards(scope.user_id);
+  const verifiedR2Store = await deleteR2Objects(scope.user_id);
 
-  return { ...result, verified_external: [verifiedCardStore] };
+  return {
+    ...result,
+    verified_external: [verifiedCardStore, verifiedR2Store].filter((s): s is string => s !== null),
+  };
 }
 
 /** The one external store, named so the residue error says which one leaked. */
@@ -254,6 +257,43 @@ export type ExternalCardStore = {
   /** Delete this user's artifacts and return the residue count after deletion. */
   deleteAndCount(userId: string): Promise<number> | number;
 };
+
+// ── R2 content store — same pattern, separate installation point ──
+
+let r2Store: ExternalCardStore | null = null;
+
+/**
+ * Install the R2 content boundary. `null` means "no R2 configured" —
+ * deletion succeeds without it (content-only, not a correctness regression).
+ */
+export function installR2Store(store: ExternalCardStore | null): () => void {
+  if (store !== null && !/^[a-z][a-z0-9()_-]{2,63}$/i.test(store.name)) {
+    throw new Error("R2 store name must be a bounded diagnostic token");
+  }
+  const previous = r2Store;
+  r2Store = store;
+  return () => {
+    if (r2Store !== store) throw new Error("R2 store changed before restore");
+    r2Store = previous;
+  };
+}
+
+/** Delete R2 objects and verify residue. Returns the store name, or null if unconfigured. */
+export async function deleteR2Objects(userId: string): Promise<string | null> {
+  const store = r2Store;
+  if (store === null) return null;
+  if (!/^usr_[0-9A-Za-z]{8,32}$/.test(userId)) {
+    throw new Error("refusing R2 deletion for invalid user id");
+  }
+  const remaining = await store.deleteAndCount(userId);
+  if (!Number.isSafeInteger(remaining) || remaining < 0) {
+    throw new Error(`${store.name} returned an invalid residue count`);
+  }
+  if (remaining > 0) {
+    throw new ResidualUserDataError({ [store.name]: remaining });
+  }
+  return store.name;
+}
 
 const localCardStore: ExternalCardStore = {
   name: CARD_STORE,
