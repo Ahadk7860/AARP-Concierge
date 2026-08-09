@@ -102,3 +102,9 @@ licenses for it) and `chat_route.v1.json` (`{lane, intent?}`), each with a diffe
 against ajv from day one, per orchestrator instruction. Zod mirrors in `cloud/api/src/schemas.ts`;
 `lane` (router outcome) and `intent` (§4.2a cache key) are kept as distinct, non-conflatable
 fields — `intent`'s enum must be hand-kept byte-identical to `cloud/shared/src/intents.ts`.
+
+### 2026-08-09 · Claude · A — shared-file edit: `cloud/shared/src/contracts.ts`
+Added `ChatReplyV2`/`EvidenceRef`/`ChatReplyAny`, ADDITIVE only — `ChatReply` (v1) unchanged,
+selector.ts/reply.ts/waiting-on-me.ts unaffected. Closes the Track H integration finding: v2 was
+schema+zod validated but unreachable from any runtime type. `schemas.ts` now asserts at compile
+time that `ChatReplyV2` is bidirectionally equal to `z.infer<typeof chatReplyV2Schema>`.

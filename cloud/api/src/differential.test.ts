@@ -26,6 +26,7 @@ import { Ajv2020 } from "ajv/dist/2020.js";
 import type { ValidateFunction } from "ajv";
 import type { ZodType } from "zod";
 import { digestSchema, voicePackSchema, chatReplyV2Schema, chatRouteV1Schema } from "./schemas.js";
+import type { ChatReplyV2 } from "../../shared/src/contracts.js";
 
 const SCHEMA_DIR = join(process.cwd(), "contracts", "schema");
 const FIXTURE_DIR = join(process.cwd(), "contracts", "fixtures");
@@ -481,6 +482,38 @@ describe("the zod mirror agrees with the frozen JSON Schema, decision for decisi
 
   it("agrees on every chat_reply.v2 case, including the kind=open conditional", () => {
     differential("chat_reply.v2", chatReplyV2Schema, compile("chat_reply.v2.json"), chatReplyV2Cases());
+  });
+
+  /**
+   * The gap that let chat_reply.v2 land fully schema/zod-validated while being
+   * unreachable from any runtime type (Track H integration finding, 2026-08-09): this
+   * file's differential only ever checked zod against ajv. Nothing checked ADOPTION —
+   * whether `cloud/shared/src/contracts.ts`'s runtime type could express what the schema
+   * and the zod mirror already agreed on. `schemas.ts` now asserts, at compile time, that
+   * its `ChatReplyV2` is bidirectionally equal to `z.infer<typeof chatReplyV2Schema>`
+   * (search that file for "Compile-time guard"); this is the runtime companion — every
+   * fixture already covered above, round-tripped through a value actually typed as the
+   * SHARED type and re-validated by the same zod schema, so a regression here fails a
+   * test rather than only failing `tsc` on a line nobody is looking at.
+   */
+  it("cloud/shared/src/contracts.ts's ChatReplyV2 is not orphaned — fixtures typed as the shared type still validate against chatReplyV2Schema", () => {
+    const openFixture = load("chat_reply_v2", "open.json") as unknown as ChatReplyV2;
+    const answerFixture = load("chat_reply_v2", "answer.json") as unknown as ChatReplyV2;
+    const declineFixture = load("chat_reply_v2", "decline.json") as unknown as ChatReplyV2;
+    for (const [label, fixture] of [
+      ["open", openFixture],
+      ["answer", answerFixture],
+      ["decline", declineFixture],
+    ] as const) {
+      const result = chatReplyV2Schema.safeParse(fixture);
+      const issues = result.success ? null : result.error.issues;
+      expect(result.success, `${label}: ${JSON.stringify(issues)}`).toBe(true);
+    }
+    // The open fixture is the one that actually exercises kind="open" — assert its
+    // evidence made the round trip through the shared type, not just its presence.
+    expect(openFixture.kind).toBe("open");
+    expect(openFixture.evidence).toBeDefined();
+    expect(openFixture.evidence!.length).toBeGreaterThan(0);
   });
 
   it("agrees on every chat_route.v1 case, including the lane/intent conditional", () => {
