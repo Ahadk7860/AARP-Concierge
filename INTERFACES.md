@@ -177,3 +177,31 @@ R2 client (cloud/shared/src/r2.ts) + digest payload store (cloud/db/src/digest-r
 - **Deletion failures**: determined pre-existing. `contact_handles` (migration 012, FK to users) not seeded by `seedEveryReachableTable` on `main` either. Not a v3 regression.
 - **Shared Postgres note**: both worktrees share `boi_dev_d`; baselines unreliable. Round 3 numbers came from `v3/deepseek` migration state. CI with clean Postgres container in progress.
 - **Spectrum missing vars for Track H**: `SPECTRUM_LINE_E164` and `SPECTRUM_WEBHOOK_SECRET` are unset in `.env`. Both required for Photon Pro live end-to-end testing. Logged here for Track H until CI is up.
+
+### 2026-08-09 · Claude · C
+No transport for §4.3 existed anywhere in the repo, so Track C built it: new package
+`cloud/device-search/` (`DeviceGateway`, `attachDeviceGateway`) holds the persistent cloud<->Mac
+WebSocket, request/response correlation by `id`, and the 4s timeout. `gateway.portFor(scope)`
+returns a `DeviceSearchPort` matching Track B's `cloud/agent/src/ports.ts` shape structurally
+(defined independently — that package doesn't exist in this worktree yet).
+
+### 2026-08-09 · Claude · C
+Added `ws` + `@types/ws` to root `package.json`/`package-lock.json` (smallest edit: two
+dependency lines) — no WebSocket library was installed anywhere. `npm ci` in another worktree
+needs these before `cloud/device-search` will typecheck/build.
+
+### 2026-08-09 · Claude · C
+`attachDeviceGateway`'s `resolveUserId` (`cloud/device-search/src/gateway.ts`) is a **dev
+placeholder** — it trusts a `?user_id=` query param with no auth. Whoever wires this into
+`cloud/api/src/main.ts` for real (Track H, or Track C later) must replace it with a real
+device-token check before this ships; do not carry the placeholder into production config.
+
+### 2026-08-09 · Claude · C
+Mac side: `mac/Sources/BoiKit/Search{Protocol,Index,RequestHandler}.swift` implement the
+`ask_device` "search" op end-to-end against the real, already-populated `message_fts` (verified:
+97,137 messages / 566 distinct handles in the real `mirror.db`, filtered FTS query ~1-2ms
+excluding CLI overhead). **Not wired into the app** — `mac/Sources/BoiApp` (Track D's file) still
+needs a WebSocket client that connects to `wss://.../v1/device-link`, decodes
+`AskDeviceSearchRequest`, calls `SearchRequestHandler.handle(_:)`, and encodes the response back.
+`SearchRequestHandler`/`SearchIndex` are the pure, already-tested logic; only the socket plumbing
+in `BoiApp` remains, and Track C did not touch that file per the ownership rule.
