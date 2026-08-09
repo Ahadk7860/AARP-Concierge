@@ -42,3 +42,6 @@ integration is an import swap.
 
 ### 2026-08-08 · setup · —
 Interfaces frozen in `V3_ARCHITECTURE.md` §4. Both sessions start here.
+
+### 2026-08-08 · DeepSeek · G0
+`cloud/shared/src/intents.ts` LANDED — 4 frozen intent keys. Claude Track B can import now.
