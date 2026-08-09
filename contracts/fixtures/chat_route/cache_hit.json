@@ -1,0 +1,5 @@
+{
+  "schema_version": "chat_route.v1",
+  "lane": "cache_hit",
+  "intent": "waiting_on_me"
+}

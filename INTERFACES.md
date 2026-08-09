@@ -113,3 +113,14 @@ treat that event as an update-health signal, and a post-update smoke test belong
 `KeychainTokenStore` uses `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`. A launchd-spawned process
 read an item written interactively: `errSecSuccess`, no `errSecInteractionNotAllowed`. No explicit ACL
 needed — Keychain scopes by signing identity. Do not add ACL code; it was measured, not assumed.
+
+### 2026-08-09 · Claude · A
+Landed `contracts/schema/chat_reply.v2.json` (adds `kind: "open"`, evidence-refs replacing
+licenses for it) and `chat_route.v1.json` (`{lane, intent?}`), each with a differential test
+against ajv from day one, per orchestrator instruction. Zod mirrors in `cloud/api/src/schemas.ts`;
+`lane` (router outcome) and `intent` (§4.2a cache key) are kept as distinct, non-conflatable
+fields — `intent`'s enum must be hand-kept byte-identical to `cloud/shared/src/intents.ts`.
+
+### 2026-08-09 · Claude · H — merge of v3/a-contracts into v3/h-join
+Merged cleanly except INTERFACES.md (append-only log conflict, resolved by keeping both sides'
+entries). DEEPSEEK_FIXES.md deletion applied cleanly on both sides.

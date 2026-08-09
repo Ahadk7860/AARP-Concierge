@@ -1,0 +1,7 @@
+{
+  "schema_version": "chat_reply.v2",
+  "kind": "decline",
+  "text": "I can't answer that safely with the available chat capability.",
+  "synced_through": "2026-08-05T10:00:00Z",
+  "licenses": []
+}
