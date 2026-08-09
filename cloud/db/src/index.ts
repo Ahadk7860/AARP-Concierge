@@ -6,4 +6,5 @@ export * from "./migrate.js";
 export * from "./repository.js";
 export * from "./repository-v3.js";
 export * from "./queue.js";
+export * from "./precompute.js";
 export * from "./test-lock.js";
