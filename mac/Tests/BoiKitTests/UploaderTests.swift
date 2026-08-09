@@ -805,6 +805,52 @@ final class HeartbeatUploadTests: XCTestCase {
     }
 }
 
+// MARK: - The XCTest guard
+
+/// The incident this exists for: `SyncRunTests` constructed `SyncRun` without injecting
+/// an uploader, `fromEnvironment()`'s default `applicationSupportDirectory` was the real
+/// `~/Library/Application Support/Boi`, and on any developer machine that has ever
+/// paired a real device, `swift test` was silently posting real heartbeats — and,
+/// per `SyncRunUploadTests`' own pre-existing failures, potentially real digests — to
+/// the live API. Fixing the six call sites (done, `AppBundleTests.swift`) does not
+/// fix the NEXT test somebody writes without injecting anything; this guard does.
+final class XCTestUploadGuardTests: XCTestCase {
+
+    /// Not really testable any other way: this process genuinely IS running under
+    /// XCTest right now, so this assertion is either trivially true or the guard
+    /// itself is broken.
+    func testThisProcessIsDetectedAsRunningUnderXCTest() {
+        XCTAssertTrue(Uploader.Configuration.isRunningUnderXCTest,
+                      "if this fails, the detection mechanism itself is broken and " +
+                      "every other assertion in this class is meaningless")
+    }
+
+    /// The property `fromEnvironment` and `EnvironmentTokenStore.init` actually default
+    /// to must diverge from the real directory while under test — this is the whole
+    /// guard, asserted directly rather than only indirectly through its effect.
+    func testTheDefaultApplicationSupportDirectoryIsNotTheRealOneUnderTest() {
+        XCTAssertNotEqual(Uploader.Configuration.applicationSupportDirectoryDefaultForCurrentProcess,
+                          Uploader.Configuration.defaultApplicationSupportDirectory)
+    }
+
+    /// The property this whole guard exists to prevent from mattering: a call to
+    /// `fromEnvironment()` with EVERY argument defaulted — the exact shape of the
+    /// original incident, six call sites in `AppBundleTests.swift` alone — resolves
+    /// `applicationSupportDirectory` to the guarded nonexistent path, not the real
+    /// directory, so it cannot find a real `.env` no matter what that real directory
+    /// contains on the machine running this suite. Deliberately does NOT write to or
+    /// read the real `~/Library/Application Support/Boi` to prove this — the property
+    /// test above already establishes the default diverges, and touching the real
+    /// directory from a test is exactly the class of risk this file exists to close
+    /// off, not something to reintroduce to test the fix.
+    func testFromEnvironmentWithNoExplicitOverrideDefaultsToTheGuardedDirectory() {
+        XCTAssertNil(Uploader.Configuration.fromEnvironment([:], searchingFrom: "/nonexistent",
+                                                            arguments: []),
+                     "no BOI_API_BASE anywhere reachable from the guarded default must mean " +
+                     "no configuration, not a fallback to whatever the real machine has")
+    }
+}
+
 // MARK: - Identity
 
 final class TokenStoreTests: XCTestCase {
