@@ -62,7 +62,23 @@ those are volume work where speed matters more than judgment.
 
 ---
 
-## Track E — Data layer (do this first, it unblocks everything)
+## Track 0 — DO THIS BEFORE ANYTHING ELSE (10 minutes)
+
+**G0 — create `cloud/shared/src/intents.ts`** exactly as written in `V3_ARCHITECTURE.md`
+§4.2a.
+
+It is out of Track G order on purpose: **the parallel Claude session's router imports this
+file and is blocked without it.** Until it exists they must hand-write the intent strings,
+which is precisely the drift the frozen keys exist to prevent — and a renamed key is a silent,
+permanent cache miss, not an error.
+
+Ten lines. Create it, commit it alone, note it in `INTERFACES.md`, then start Track E.
+
+The rest of Track G still happens in normal order, after E and F.
+
+---
+
+## Track E — Data layer (start here after Track 0)
 
 **E1. Migrations for every table in `V3_ARCHITECTURE.md` §4.1.**
 New files under `cloud/db/migrations/`, following the existing numbering and the `.down.sql`
