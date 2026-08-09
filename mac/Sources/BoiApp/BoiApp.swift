@@ -82,6 +82,11 @@ enum HeadlessSync {
             return .failed(detail: detail)
         }
         let paths = SyncRun.Paths.installed()
+        // Checked on every attempt, run/skip/fail alike: a genuine loss of
+        // previously-working Messages folder access is exactly as real on a skipped
+        // (idempotent-guard) run as on a completed one, and this is the one place a
+        // headless 3am `--sync` can raise an alarm nobody is otherwise watching for.
+        RecoveryNotifier.notifyIfNeeded(stateDirectory: paths.stateDirectory)
         let force = CommandLine.arguments.contains("--force")
         do {
             let outcome = try SyncRun(paths: paths, salt: salt)
@@ -118,27 +123,60 @@ enum HeadlessSync {
     }
 }
 
+/// Decides which onboarding flow a launch lands on. The Full Disk Access flow
+/// (`OnboardingView`/`PermissionModel`) is the one every existing user who has already
+/// granted FDA is on today, and requirement 4 of the picker-becomes-default decision is
+/// that those users must be completely unaffected — so the check is simply "does FDA
+/// already work," computed once at launch, the same probe `FullDiskAccess.swift` has
+/// always used for this. Only a Mac WITHOUT a working FDA grant — overwhelmingly a
+/// fresh install, since anyone who already has FDA takes the branch above — lands on
+/// the picker (`SecurityScopedSetupView`), which is what "the picker becomes the
+/// default onboarding entry point" means in practice: default for new installs, no
+/// change for old ones.
+///
+/// This is computed once per launch, not re-evaluated live: a user who grants FDA
+/// mid-session while looking at the picker screen sees the picker's own Messages
+/// Folder row go green (`SecurityScopedSetupModel` reads bookmarks and FDA-adjacent
+/// probes independently), and a relaunch is what would move them to the other flow —
+/// consistent with how `PermissionModel`'s own FDA grant flow already requires a
+/// relaunch to observe a fresh grant (see `FullDiskAccess.swift`'s Finding 4).
+enum AppEntryFlow {
+    case fullDiskAccess
+    case securityScopedPicker
+
+    static func current(probe: () -> FullDiskAccess.Status = { FullDiskAccess.probe() }) -> AppEntryFlow {
+        probe().isGranted ? .fullDiskAccess : .securityScopedPicker
+    }
+}
+
 struct BoiApplication: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @StateObject private var model = PermissionModel()
+    @StateObject private var setupModel = SecurityScopedSetupModel()
+    private let entryFlow = AppEntryFlow.current()
 
     var body: some Scene {
         WindowGroup("Boi") {
-            OnboardingView(model: model)
-                .frame(minWidth: 560, minHeight: 460)
-                .onAppear { model.start() }
-                // Leaving for System Settings and coming back with the switch still off
-                // is a real, observable event, and it deserves a better screen than the
-                // one that says "waiting". Both halves are needed: `didBecomeActive` also
-                // fires at launch, so the resign is what proves the user actually went.
-                .onReceive(NotificationCenter.default.publisher(
-                    for: NSApplication.didResignActiveNotification)) { _ in
-                    model.applicationDidResignActive()
+            Group {
+                switch entryFlow {
+                case .fullDiskAccess:
+                    // Unchanged. Every existing FDA-granted user's launch is byte-for-byte
+                    // what it was before this file learned about the picker at all.
+                    OnboardingView(model: model)
+                        .onAppear { model.start() }
+                        .onReceive(NotificationCenter.default.publisher(
+                            for: NSApplication.didResignActiveNotification)) { _ in
+                            model.applicationDidResignActive()
+                        }
+                        .onReceive(NotificationCenter.default.publisher(
+                            for: NSApplication.didBecomeActiveNotification)) { _ in
+                            model.applicationDidBecomeActive()
+                        }
+                case .securityScopedPicker:
+                    SecurityScopedSetupView(model: setupModel)
                 }
-                .onReceive(NotificationCenter.default.publisher(
-                    for: NSApplication.didBecomeActiveNotification)) { _ in
-                    model.applicationDidBecomeActive()
-                }
+            }
+            .frame(minWidth: 560, minHeight: 460)
         }
         .windowResizability(.contentSize)
     }
