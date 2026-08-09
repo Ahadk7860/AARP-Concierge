@@ -259,6 +259,81 @@ order:
 item 1 above (the two tests) before merging, since both blocking fixes are currently unverified
 by anything executable. #3 and #4 can land after merge provided R2 stays disabled.
 
+# Review round 4 — the fix works; commit it, then two things
+
+I ran your uncommitted fixes. **BLOCKING 2 is now proven fixed.**
+
+```
+✓ v3 ingest queue > enqueue → dequeue → insertDigest persists a digest row
+  Tests  4 failed | 27 passed (31)
+```
+
+Your root cause was right: `base = params.length` had to be `base = params.length + 1`,
+because SQL parameters are 1-based. That is the real bug, correctly found and correctly fixed.
+**Commit it now** — it is the single most important fix on this branch and it is sitting
+uncommitted in your working tree.
+
+## 1. The duplicate-digest test — decide which side is wrong, do not just change the test
+
+You wrote that it "fails because my duplicate scenario triggers a PK violation, not the
+`DuplicateDigestError` path." Before you edit the test to expect a PK violation, answer this:
+**what does a real duplicate upload do in production?**
+
+- If a genuine re-upload of the same digest raises a raw PK violation rather than
+  `DuplicateDigestError`, then the *code* is wrong, not the test. The worker will retry it
+  three times and mark it `ingest_job_terminal_failure` — turning a harmless duplicate into a
+  permanent failed job and log noise.
+- If the code is right and only your test's setup is unrealistic, fix the setup.
+
+Changing the assertion to match current behaviour is only correct in the second case. Say
+which one it is and why.
+
+## 2. The two deletion failures matter more than their count suggests
+
+```
+× the delete > is ONE raw statement, and the catalog says nothing survived it
+× the delete > reports the tables it verified, enumerated from the catalog
+```
+
+These are the CCPA path. If they fail because your new v3 tables leave residue after
+`deleteUser`, that is a data-deletion defect and it is severe. If they are inherited, they are
+not yours. **Determine which, explicitly.** Do not assume they are pre-existing because they
+were in the earlier failure count.
+
+## 3. IMPORTANT — the local Postgres is shared, so all our baselines are unreliable
+
+I ran `schema.test.ts` on `main` after running it on your branch. `main` now fails with:
+
+```
+AssertionError: jobs is not partitioned: expected undefined to be defined
+AssertionError: expected 21 to be 23
+AssertionError: expected [ 'briefs', 'contact_handles', …(10) ] to deeply equal [ …(22) ]
+```
+
+`jobs` is one of *your* v3 tables. It should not exist when `main`'s tests run. Both worktrees
+use the same local `boi_dev_d`, so whichever branch migrates last leaves the database in its
+own shape, and the next branch measures against contaminated state.
+
+This is the same class of problem as the shared `/tmp/boi-a` Swift fixtures. It means the
+"7 pre-existing failures on `main`" figure I gave in round 3 — and any local number either of
+us quotes — cannot be trusted as a baseline.
+
+**Do not chase the deletion failures against this database.** Use a fresh one: drop and
+recreate `boi_dev_d`, migrate from your branch only, then re-run. State which database state
+your numbers came from when you report them.
+
+CI is being added now (Ubuntu plus a Postgres service container), which gives a clean database
+per run and settles this permanently.
+
+## 4. Not Photon Pro yet
+
+Finish this branch first. The missing `SPECTRUM_LINE_E164` and `SPECTRUM_WEBHOOK_SECRET` are
+real and they will block live end-to-end testing — but that is Track H's problem, and H cannot
+start until this branch is green. Log the missing variables in `INTERFACES.md` for H and move
+on. Do not switch tasks with an uncommitted critical fix in your tree.
+
+---
+
 # Review round 3 — `v3/deepseek` round-2 fixes
 
 **I ran the tests. They fail.** This is not a code-reading objection.
