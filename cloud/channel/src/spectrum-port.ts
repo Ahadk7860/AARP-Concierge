@@ -41,6 +41,7 @@ export type SpectrumService = "iMessage" | "SMS" | "RCS" | "unknown";
 
 export type SpectrumPart =
   | { kind: "text"; text: string }
+  | { kind: "typing" }
   /**
    * The agent's own contact card, NATIVELY.
    *

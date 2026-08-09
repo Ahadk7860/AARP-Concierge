@@ -136,6 +136,19 @@ export class SpectrumChannel implements Channel {
     };
   }
 
+  /** Fire typing indicator — target <200ms. Called before any routing or model call. */
+  async sendTypingIndicator(user_id: string): Promise<void> {
+    try {
+      const { handle, spaceId } = await this.options.spaceFor(user_id);
+      if (spaceId === null) return; // no conversation yet, nothing to type into
+      const space = await this.options.port.getSpace(spaceId);
+      await this.options.port.send(space, [{ kind: "typing" }]);
+    } catch {
+      // Typing indicator failure must never block or throw — it's an enhancement,
+      // not a correctness requirement.
+    }
+  }
+
   async capabilities(): Promise<Capabilities> {
     // From config. Probing would ask the transport a question whose answer is a billing
     // plan, and the answer would change under us on an upgrade with nothing in the log.
