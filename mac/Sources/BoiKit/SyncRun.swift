@@ -309,11 +309,18 @@ public struct SyncRun {
         if let heartbeatPath,
            let data = FileManager.default.contents(atPath: heartbeatPath),
            let beat = try? JSONDecoder().decode(Heartbeat.self, from: data) {
+            // NOT wired to messagesAccessState yet, deliberately. HeartbeatUpload
+            // carries the field (Uploader.swift) and MessagesFolderAccess can compute
+            // it (used by RecoveryNotifier locally), but contracts/openapi/boi-api.v1
+            // .yaml sets additionalProperties: false on this shape, and the server
+            // enforces it: sending a non-nil value here turned EVERY real heartbeat
+            // upload into `400 rejected` — caught by SyncRunTests failing with
+            // "upload deferred: ... rejected (/v1/heartbeat)" the moment this ran
+            // against a real endpoint, not a contrived test failure. Re-add this
+            // argument only once Track F or H has amended the contract to permit the
+            // field — see INTERFACES.md's entry for this exact field.
             let wire = HeartbeatUpload.from(beat, deviceID: deviceID,
-                                            digestGeneratedAt: phase2Digest?.generated_at,
-                                            messagesAccessState: MessagesFolderAccess
-                                                .classifyRecoveryState(stateDirectory: paths.stateDirectory)
-                                                .wireValue)
+                                            digestGeneratedAt: phase2Digest?.generated_at)
             if let body = try? JSONEncoder().encode(wire) {
                 payloads.append(.init(body: body, endpoint: .heartbeat,
                                       descriptor: .forHeartbeat(wire)))

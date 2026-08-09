@@ -210,3 +210,21 @@ here too since compose-runtime.ts is shared:**
    are not merged into this branch. The flag is safe to leave unset in every real deploy (it
    answers with no relationship data but never fabricates, since the verifier still runs) but is
    not useful until Track E lands and a real `AgentStore` replaces the placeholder.
+
+### 2026-08-09 (later) · Claude · Track D
+Correction to the entry above: `messages_access_state` is **not currently sent on the live heartbeat
+upload at all** (reverted in a follow-up commit after `swift test` proved a real device would get every
+heartbeat `400`-rejected the moment the field carried a non-nil value — `additionalProperties: false`
+rejects the whole body, not just the unknown key). The field still exists on `HeartbeatUpload` and
+`MessagesFolderAccess.classifyRecoveryState` still drives the local notification; only the network call
+is unwired. Re-wire the `SyncRun.swift` call site once the contract permits the field — do not assume
+it is already flowing to the server from this track's work.
+
+### 2026-08-09 · Claude · H — re-merge of v3/d-permissions at 6d19885/4aaac22 (production-bug fix)
+Orchestrator flagged that my earlier merge (at `f162fff`) carried a bug: `messages_access_state`
+was wired into the live heartbeat payload, and the frozen contract's `additionalProperties: false`
+rejects the WHOLE request for an unknown field — every real device heartbeat would have been
+400-rejected. Re-merged to `6d19885` (reverts the wire call) + `4aaac22` (this correction doc).
+Consequence for my earlier finding #4 in the Track H report: `messages_access_state` is NOT on the
+wire at all right now — do not treat it as available. Only conflict was INTERFACES.md, resolved by
+concatenation as before.
