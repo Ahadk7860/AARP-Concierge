@@ -23,6 +23,7 @@ import {
   recordHeartbeat,
   upsertVoicePack,
 } from "../../../db/src/index.js";
+import { enqueue } from "../../../db/src/index.js";
 import type { Queryable, UserScope } from "../../../db/src/index.js";
 import type { Channel, Digest, DigestV2, VoicePack, VoicePackV2 } from "../../../shared/src/index.js";
 import { authenticate, ownsUser } from "../auth.js";
@@ -144,45 +145,42 @@ export function registerIngestRoutes(
     const digest_id = newDigestId();
     // Asked BEFORE the insert, because after it the answer is always "no".
     const first = (await latestDigest(principal.scope)) === null;
+
+    // v3: enqueue for async processing instead of blocking the HTTP request.
+    try {
+      const received_at = new Date().toISOString();
+      await enqueue("ingest", principal.scope, { digest_id, digest, first, received_at });
+      logEvent(log, {
+        msg: "digest.enqueued", route: "/v1/digest", status: 202,
+        user_id: principal.scope.user_id, device_id: digest.device_id, digest_id,
+      });
+      return reply.code(202).send({ digest_id, received_at });
+    } catch (_enqErr) {
+      logEvent(log, {
+        msg: "digest.enqueue_failed", route: "/v1/digest", status: 500,
+        user_id: principal.scope.user_id,
+      });
+      // fall through to inline processing
+    }
+
     try {
       const stored = await insertDigest(principal.scope, { digest_id, digest });
       const received_at = new Date().toISOString();
 
-      // THE FIRST SYNC, AND THE OFFER. Prompt 09's other end.
-      //
-      // People are most curious in the ninety seconds after their history finishes
-      // loading, and until this existed the earliest anyone could see their report was
-      // 8am tomorrow — we were asking them to sleep on it. The offer goes out exactly
-      // once, on the first digest, and names the phrase to text back rather than hinting
-      // that one exists.
-      //
-      // Failure here must not fail the upload: the digest is stored, the Mac is waiting
-      // on a 202, and a transport hiccup is not a reason to make it retry a corpus it
-      // already delivered.
       if (first && deps?.channel !== undefined) {
         try {
           await deps.channel.send(firstSyncOffer(principal.scope.user_id, digest));
-          logEvent(log, {
-            msg: "sync.offer_sent",
-            route: "/v1/digest",
-            user_id: principal.scope.user_id,
-          });
+          logEvent(log, { msg: "sync.offer_sent", route: "/v1/digest", user_id: principal.scope.user_id });
         } catch (err) {
           logEvent(log, {
-            msg: "sync.offer_failed",
-            route: "/v1/digest",
-            user_id: principal.scope.user_id,
+            msg: "sync.offer_failed", route: "/v1/digest", user_id: principal.scope.user_id,
             violations: err instanceof Error ? err.message : "unknown",
           });
         }
       }
       logEvent(log, {
-        msg: "digest.ingested",
-        route: "/v1/digest",
-        status: 202,
-        user_id: principal.scope.user_id,
-        device_id: digest.device_id,
-        digest_id,
+        msg: "digest.ingested", route: "/v1/digest", status: 202,
+        user_id: principal.scope.user_id, device_id: digest.device_id, digest_id,
         relationship_count: stored.relationships,
       });
       return reply.code(202).send({ digest_id, received_at });

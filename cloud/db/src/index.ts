@@ -5,4 +5,5 @@ export * from "./ids.js";
 export * from "./migrate.js";
 export * from "./repository.js";
 export * from "./repository-v3.js";
+export * from "./queue.js";
 export * from "./test-lock.js";
