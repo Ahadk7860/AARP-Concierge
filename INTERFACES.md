@@ -58,3 +58,5 @@ developing against an in-memory `BubbleSink` stub. Signature is frozen, so integ
 ### 2026-08-09 · Claude · I
 `V3_ARCHITECTURE.md` §4.5 still says derivation stays in Swift and must not be duplicated in
 TypeScript. That paragraph predates Track I; `LANGUAGE_DECISION.md` + §6 win. Track H corrects §4.5.
+### 2026-08-09 · DeepSeek · F2
+cloud/channel/src/progressive.ts LANDED — BubbleSink for multi-bubble delivery. Claude Track B can import now.
