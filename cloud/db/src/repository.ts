@@ -566,7 +566,7 @@ export async function upsertRelationships(
   const placeholders: string[] = [];
   for (let i = 0; i < rows.length; i++) {
     const r = rows[i]!;
-    const base = params.length;
+    const base = params.length + 1; // +1 for SQL 1-based param numbering
     params.push(r.contact_id, r.display, JSON.stringify(r), r.as_of);
     placeholders.push(`($1, $${base}, $${base + 1}, $${base + 2}, $${base + 3})`);
   }

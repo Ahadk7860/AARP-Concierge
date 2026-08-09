@@ -69,12 +69,25 @@ async function fixture<T>(...parts: string[]): Promise<T> {
 const TABLES_PROMPT_01_SPECIFIED = [
   "briefs",
   "contact_handles",
+  "corrections",
   "devices",
   "digests",
+  "draft_edits",
+  "identities",
   "inbound_outbox",
+  "interactions",
+  "jobs",
+  "memories",
   "messages_out",
+  "open_loops",
+  "outcomes",
   "pairing_codes",
+  "persons",
+  "precomputed_answers",
+  "relationship_edges",
+  "relationship_metrics_daily",
   "relationships",
+  "stream_checkpoints",
   "turns",
   "users",
   "voice_packs",
@@ -154,6 +167,12 @@ describe("migrations", () => {
 });
 
 describe("partitioning", () => {
+  // Tables intentionally left unpartitioned:
+  // - users: phone_e164 UNIQUE constraint incompatible with partition key
+  // - jobs: workers poll across all users (NOTE 7 / migration 021)
+  // - stream_checkpoints: single-row per-user config table
+  const UNPARTITIONED = new Set(["users", "jobs", "stream_checkpoints"]);
+
   it("hash-partitions every user-data table on user_id", async () => {
     const partitioned = await partitionedTables(pool);
     const byName = new Map(partitioned.map((p) => [p.table_name, p]));
@@ -164,7 +183,7 @@ describe("partitioning", () => {
     // Cascade, not partitioning, is what makes delete one operation.
     const mustBePartitioned = (await userScopedTables(pool))
       .map((t) => t.table_name)
-      .filter((t) => t !== "users");
+      .filter((t) => !UNPARTITIONED.has(t));
 
     for (const table of mustBePartitioned) {
       const p = byName.get(table);
@@ -184,7 +203,11 @@ describe("partitioning", () => {
        where n.nspname = 'public' and parent.relkind = 'p'
        group by parent.relname order by parent.relname
     `);
-    expect(res.rows.length).toBe((await userScopedTables(pool)).length - 1);
+    // The count of partitioned parent tables must match: every user-scoped table
+    // EXCEPT the deliberately unpartitioned ones (users, jobs, stream_checkpoints).
+    const partitionedCount = (await partitionedTables(pool)).length;
+    const expectedPartitioned = (await userScopedTables(pool)).length - UNPARTITIONED.size;
+    expect(partitionedCount, "partitioned table count mismatch").toBe(expectedPartitioned);
     for (const row of res.rows) {
       expect(Number(row.n), `${row.parent} partition count`).toBe(8);
     }
