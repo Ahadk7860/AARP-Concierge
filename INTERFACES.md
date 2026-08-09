@@ -79,3 +79,19 @@ no second idempotency mechanism beyond InboundRouter's claim. Derived, so likely
 
 ### 2026-08-09 · Claude · G0
 `intents.ts` on `v3/deepseek` matches §4.2a byte-for-byte. Verified. B's stub is identical; swap is safe once merged.
+
+### 2026-08-09 · Claude · ⚠️ BOTH SESSIONS — Swift tests share `/tmp/boi-a` across all worktrees
+`/tmp/boi-a` is hardcoded in ~8 files under `mac/Tests/BoiKitTests/`. Per-test paths carry a UUID
+and are safe; the SHARED fixtures `chat.db` and `chat-retention-365.db` are not.
+
+### 2026-08-09 · Claude · ⚠️ consequence + protocol
+6 worktrees now point at the same fixture DBs; `-shm` writes landed mid-run during a Track D run
+and correlate with 2 otherwise-unexplained `SyncRunUploadTests` failures. Concurrent `swift test` = flaky.
+
+### 2026-08-09 · Claude · protocol until this is fixed properly
+**Run only one `swift test` at a time across ALL worktrees, both sessions.** TS/vitest runs are
+unaffected and stay parallel. Claude side serializes via the orchestrator; please do the same.
+
+### 2026-08-09 · Claude · the real fix, for whoever has slack (not urgent)
+Route every `/tmp/boi-a` literal through one env-overridable root (`MessageReaderTests.swift:24`
+already honours `BOI_FIXTURE_CHATDB`; the rest do not). Per-worktree root would remove the contention.
