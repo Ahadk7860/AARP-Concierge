@@ -82,6 +82,40 @@ export function newOutboundMessageId(): string {
   return `omsg_${base62(16)}`;
 }
 
+// ── v3 identifiers ──
+
+export function newPersonId(): string {
+  return `p_${base62(16)}`;
+}
+
+export function newIdentityId(): string {
+  return `idn_${base62(16)}`;
+}
+
+export function newInteractionId(): string {
+  return `ia_${base62(16)}`;
+}
+
+export function newOutcomeId(): string {
+  return `out_${base62(16)}`;
+}
+
+export function newMemoryId(): string {
+  return `mem_${base62(16)}`;
+}
+
+export function newCorrectionId(): string {
+  return `cor_${base62(16)}`;
+}
+
+export function newDraftEditId(): string {
+  return `ded_${base62(16)}`;
+}
+
+export function newLoopId(): string {
+  return `lop_${base62(16)}`;
+}
+
 /**
  * The per-user salt. Issued once at pairing and never rotated, because rotating it
  * would orphan every contact_id the Mac has already computed.

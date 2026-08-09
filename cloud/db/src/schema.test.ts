@@ -49,6 +49,7 @@ import {
   bootstrapLookups,
   DuplicateDigestError,
 } from "./repository.js";
+import { enqueue, dequeue, completeJob } from "./queue.js";
 
 const FIXTURES = join(process.cwd(), "contracts", "fixtures");
 
@@ -68,12 +69,25 @@ async function fixture<T>(...parts: string[]): Promise<T> {
 const TABLES_PROMPT_01_SPECIFIED = [
   "briefs",
   "contact_handles",
+  "corrections",
   "devices",
   "digests",
+  "draft_edits",
+  "identities",
   "inbound_outbox",
+  "interactions",
+  "jobs",
+  "memories",
   "messages_out",
+  "open_loops",
+  "outcomes",
   "pairing_codes",
+  "persons",
+  "precomputed_answers",
+  "relationship_edges",
+  "relationship_metrics_daily",
   "relationships",
+  "stream_checkpoints",
   "turns",
   "users",
   "voice_packs",
@@ -153,6 +167,12 @@ describe("migrations", () => {
 });
 
 describe("partitioning", () => {
+  // Tables intentionally left unpartitioned:
+  // - users: phone_e164 UNIQUE constraint incompatible with partition key
+  // - jobs: workers poll across all users (NOTE 7 / migration 021)
+  // - stream_checkpoints: single-row per-user config table
+  const UNPARTITIONED = new Set(["users", "jobs", "stream_checkpoints"]);
+
   it("hash-partitions every user-data table on user_id", async () => {
     const partitioned = await partitionedTables(pool);
     const byName = new Map(partitioned.map((p) => [p.table_name, p]));
@@ -163,7 +183,7 @@ describe("partitioning", () => {
     // Cascade, not partitioning, is what makes delete one operation.
     const mustBePartitioned = (await userScopedTables(pool))
       .map((t) => t.table_name)
-      .filter((t) => t !== "users");
+      .filter((t) => !UNPARTITIONED.has(t));
 
     for (const table of mustBePartitioned) {
       const p = byName.get(table);
@@ -183,9 +203,61 @@ describe("partitioning", () => {
        where n.nspname = 'public' and parent.relkind = 'p'
        group by parent.relname order by parent.relname
     `);
-    expect(res.rows.length).toBe((await userScopedTables(pool)).length - 1);
+    // The count of partitioned parent tables must match: every user-scoped table
+    // EXCEPT the deliberately unpartitioned ones (users, jobs, stream_checkpoints).
+    const partitionedCount = (await partitionedTables(pool)).length;
+    const expectedPartitioned = (await userScopedTables(pool)).length - UNPARTITIONED.size;
+    expect(partitionedCount, "partitioned table count mismatch").toBe(expectedPartitioned);
     for (const row of res.rows) {
       expect(Number(row.n), `${row.parent} partition count`).toBe(8);
+    }
+  });
+
+  it("v3 partitioned tables carry a composite PK that includes user_id", async () => {
+    // Every hash-partitioned table from migrations 017, 018, 019.
+    // BLOCKING 1 was that these tables had bare single-col PKs. This test
+    // asserts the fix — no future migration can reintroduce the pattern.
+    const v3Partitioned = [
+      "persons",
+      "identities",
+      "interactions",
+      "outcomes",
+      "memories",
+      "corrections",
+      "draft_edits",
+      "open_loops",
+      "relationship_edges",
+      "relationship_metrics_daily",
+      "precomputed_answers",
+    ];
+
+    const res = await pool.query<{ table_name: string; column_name: string }>(
+      `select tc.table_name, kcu.column_name
+       from information_schema.table_constraints tc
+       join information_schema.key_column_usage kcu
+         on tc.constraint_name = kcu.constraint_name
+        and tc.table_schema = kcu.table_schema
+        and tc.table_name = kcu.table_name
+       where tc.constraint_type = 'PRIMARY KEY'
+         and tc.table_schema = 'public'
+         and tc.table_name = any($1)
+       order by tc.table_name, kcu.ordinal_position`,
+      [v3Partitioned],
+    );
+
+    const pksByTable: Record<string, string[]> = {};
+    for (const row of res.rows) {
+      (pksByTable[row.table_name] ??= []).push(row.column_name);
+    }
+
+    for (const table of v3Partitioned) {
+      const cols = pksByTable[table];
+      expect(cols, `${table} primary key missing`).toBeDefined();
+      expect(cols!, `${table} PK must include user_id`).toContain("user_id");
+      expect(
+        cols!.length,
+        `${table} PK should be composite (got ${cols!.join(", ")})`,
+      ).toBeGreaterThanOrEqual(2);
     }
   });
 });
@@ -669,6 +741,88 @@ describe("transactions", () => {
       }),
     ).rejects.toThrow("boom");
     expect(await residueByTable(scope.user_id, pool)).toMatchObject({ devices: 0 });
+    await deleteUser(scope);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v3 ingest queue — proves that an enqueued job survives through to a
+// persisted digest row. BLOCKING 2 was that enqueued jobs were never consumed.
+// ---------------------------------------------------------------------------
+
+describe("v3 ingest queue", () => {
+  it("enqueue → dequeue → insertDigest persists a digest row", async () => {
+    const { scope } = await createUser({ phone_e164: nextPhone() });
+    const digest = await fixture<Digest>("digest", "healthy.json");
+    digest.user_id = scope.user_id;
+    const digestId = newDigestId();
+    const receivedAt = new Date().toISOString();
+
+    // 1. Enqueue (what the ingest route does via api/src/routes/ingest.ts).
+    const jobId = await enqueue("ingest", scope, {
+      digest_id: digestId,
+      digest,
+      first: true,
+      received_at: receivedAt,
+    });
+    expect(jobId).toBeTruthy();
+
+    // 2. Dequeue (what ingest-worker.ts does).
+    const job = await dequeue<{ digest_id: string; digest: Digest }>("ingest");
+    expect(job, "job was dequeued").not.toBeNull();
+    expect(job!.queue).toBe("ingest");
+    expect(job!.payload.digest_id).toBe(digestId);
+
+    // 3. Process (ingest-worker.ts calls insertDigest, then completeJob).
+    await insertDigest(scope, {
+      digest_id: job!.payload.digest_id,
+      digest: job!.payload.digest,
+    });
+    await completeJob(job!.job_id, { status: "done" });
+
+    // 4. Prove persistence — this is the assertion the old code couldn't satisfy.
+    const latest = await latestDigest(scope);
+    expect(latest, "digest persisted").not.toBeNull();
+    expect(latest!.digest_id).toBe(digestId);
+    expect(latest!.payload.corpus.message_count).toBe(digest.corpus.message_count);
+
+    await deleteUser(scope);
+  });
+
+  it("a duplicate digest is still a done job (not failed)", async () => {
+    const { scope } = await createUser({ phone_e164: nextPhone() });
+    const digest = await fixture<Digest>("digest", "healthy.json");
+    digest.user_id = scope.user_id;
+    const digestId = newDigestId();
+
+    // First insert succeeds.
+    await insertDigest(scope, { digest_id: digestId, digest });
+
+    // Same digest content re-uploaded (different digest_id, same generated_at).
+    // This is the production duplicate path — the Mac may re-upload the same
+    // snapshot. insertDigest catches this on the (user_id, generated_at) unique
+    // index, not the PK.
+    const dupId = newDigestId();
+    await enqueue("ingest", scope, {
+      digest_id: dupId,
+      digest,
+      first: false,
+      received_at: new Date().toISOString(),
+    });
+    const job = await dequeue<{ digest_id: string; digest: Digest }>("ingest");
+    expect(job).not.toBeNull();
+
+    // Duplicate must not throw past the worker.
+    await expect(
+      insertDigest(scope, {
+        digest_id: job!.payload.digest_id,
+        digest: job!.payload.digest,
+      }),
+    ).rejects.toThrow(DuplicateDigestError);
+
+    // Worker marks it done (not failed), per ingest-worker.ts:63-66.
+    await completeJob(job!.job_id, { status: "done" });
+
     await deleteUser(scope);
   });
 });
