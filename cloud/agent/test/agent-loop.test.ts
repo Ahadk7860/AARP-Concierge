@@ -1,8 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { unsafeScopeFromUserId } from "../../db/src/scope.js";
 import { InMemoryAgentStore } from "../src/ports.js";
+import type { AgentStore } from "../src/ports.js";
 import type { ToolContext } from "../src/tools.js";
-import { runAgentTurn, type AgentModelProvider, type EscalationProvider } from "../src/agent-loop.js";
+import { runAgentTurn, type AgentModelProvider, type AgentTurnLogger, type EscalationProvider } from "../src/agent-loop.js";
 import { InMemoryBubbleSink } from "../src/bubble-sink-stub.js";
 import type { RouterProvider } from "../src/router.js";
 import type { ChatMessage, ToolCall } from "../src/gemini-client.js";
@@ -262,5 +263,148 @@ describe("runAgentTurn — the agent path: tool calls, verification, delivery", 
       sink,
     });
     expect(result.kind).toBe("agent");
+  });
+});
+
+describe("runAgentTurn — observability (log hook)", () => {
+  it("emits router_decision, one tool_call per call, and verifier_outcome — with no question/answer text in any event", async () => {
+    const sink = new InMemoryBubbleSink();
+    const events: Array<{ event: string; fields: Record<string, unknown> }> = [];
+    const log: AgentTurnLogger = (event, fields) => events.push({ event, fields });
+    const model = new ScriptedAgentModel([
+      { content: null, tool_calls: [toolCall("relationship_state", { person_id: "p_maya01" })] },
+      { content: "Maya's relationship with you is in a steady stage.", tool_calls: null },
+    ]);
+    await runAgentTurn("how's it going with maya?", {
+      router: new ScriptedRouter({ kind: "agent" }),
+      agentModel: model,
+      escalation: new NeverCalledEscalation(),
+      toolContext: ctx(),
+      sink,
+      log,
+    });
+
+    expect(events.map((e) => e.event)).toEqual(["router_decision", "tool_call", "verifier_outcome"]);
+    expect(events[0]).toEqual({ event: "router_decision", fields: { lane: "agent", intent: undefined } });
+    expect(events[1]).toMatchObject({ event: "tool_call", fields: { tool: "relationship_state", ok: true, evidence_count: 1 } });
+    expect(events[2]).toEqual({ event: "verifier_outcome", fields: { status: "verified", attempt: "first", violations: undefined } });
+
+    // No raw question or answer text anywhere in what was logged.
+    const serialized = JSON.stringify(events);
+    expect(serialized).not.toContain("how's it going");
+    expect(serialized).not.toContain("steady stage");
+  });
+
+  it("logs violation claim details on degrade — this is deliberately the one place fabricated text is logged, because it's needed to diagnose the fabrication", async () => {
+    const sink = new InMemoryBubbleSink();
+    const events: Array<{ event: string; fields: Record<string, unknown> }> = [];
+    const model = new ScriptedAgentModel([
+      { content: null, tool_calls: [toolCall("relationship_state", { person_id: "p_maya01" })] },
+      { content: "Jordan is drifting away.", tool_calls: null },
+    ]);
+    await runAgentTurn("how's it going?", {
+      router: new ScriptedRouter({ kind: "agent" }),
+      agentModel: model,
+      escalation: new ScriptedEscalation("Priya also asked about the trip."),
+      toolContext: ctx(),
+      sink,
+      log: (event, fields) => events.push({ event, fields }),
+    });
+
+    const verifierEvent = events.find((e) => e.event === "verifier_outcome");
+    expect(verifierEvent?.fields["status"]).toBe("degraded");
+    expect(verifierEvent?.fields["violations"]).toEqual([{ kind: "name", value: "Priya", reason: "unsupported_name" }]);
+  });
+
+  it("logs a failed tool_call (ok:false) when a tool throws, without crashing the turn", async () => {
+    const events: Array<{ event: string; fields: Record<string, unknown> }> = [];
+    const sink = new InMemoryBubbleSink();
+    const model = new ScriptedAgentModel([
+      { content: null, tool_calls: [toolCall("relationship_state", {})] }, // missing person_id/display -> throws
+      { content: "I couldn't find anything.", tool_calls: null },
+    ]);
+    await runAgentTurn("how's it going?", {
+      router: new ScriptedRouter({ kind: "agent" }),
+      agentModel: model,
+      escalation: new NeverCalledEscalation(),
+      toolContext: ctx(),
+      sink,
+      log: (event, fields) => events.push({ event, fields }),
+    });
+    const toolEvent = events.find((e) => e.event === "tool_call");
+    expect(toolEvent).toMatchObject({ event: "tool_call", fields: { tool: "relationship_state", ok: false } });
+  });
+});
+
+describe("runAgentTurn — per-tool timeouts", () => {
+  it("times out a hung tool call rather than stalling the turn forever, and logs it as such", async () => {
+    vi.useFakeTimers();
+    try {
+      const events: Array<{ event: string; fields: Record<string, unknown> }> = [];
+      const sink = new InMemoryBubbleSink();
+      const notNeededForThisTest = (): never => { throw new Error("not needed for this test"); };
+      const hangingStore: AgentStore = {
+        relationshipState: () => new Promise(() => { /* never resolves */ }),
+        relationshipStateBatch: notNeededForThisTest,
+        openLoops: notNeededForThisTest,
+        drifting: notNeededForThisTest,
+        circle: notNeededForThisTest,
+        memoryWrite: notNeededForThisTest,
+        memorySearch: notNeededForThisTest,
+        resolvePerson: notNeededForThisTest,
+      };
+      const model = new ScriptedAgentModel([
+        { content: null, tool_calls: [toolCall("relationship_state", { person_id: "p_maya01" })] },
+        { content: "I couldn't find anything.", tool_calls: null },
+      ]);
+      const resultPromise = runAgentTurn("how's it going?", {
+        router: new ScriptedRouter({ kind: "agent" }),
+        agentModel: model,
+        escalation: new NeverCalledEscalation(),
+        toolContext: ctx({ store: hangingStore }),
+        sink,
+        log: (event, fields) => events.push({ event, fields }),
+      });
+      // relationship_state's default timeout is 2000ms (only search_messages gets 4000ms).
+      await vi.advanceTimersByTimeAsync(2001);
+      const result = await resultPromise;
+      // The loop doesn't crash or hang — it logs the timeout as a tool error, feeds that
+      // back to the model, and the (scripted) model produces a claim-free fallback answer.
+      expect(result.kind).toBe("agent");
+      const toolEvent = events.find((e) => e.event === "tool_call");
+      expect(toolEvent).toMatchObject({ fields: { tool: "relationship_state", ok: false, error: "tool_timeout" } });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("gives search_messages a longer 4000ms budget, matching §4.3's own device round-trip timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      const events: Array<{ event: string; fields: Record<string, unknown> }> = [];
+      const sink = new InMemoryBubbleSink();
+      const hangingDeviceSearch = { search: () => new Promise<never>(() => { /* never resolves */ }) };
+      const model = new ScriptedAgentModel([
+        { content: null, tool_calls: [toolCall("search_messages", { query: "trip" })] },
+        { content: "I couldn't find anything.", tool_calls: null },
+      ]);
+      const resultPromise = runAgentTurn("what did maya say about the trip?", {
+        router: new ScriptedRouter({ kind: "agent" }),
+        agentModel: model,
+        escalation: new NeverCalledEscalation(),
+        toolContext: ctx({ deviceSearch: hangingDeviceSearch }),
+        sink,
+        log: (event, fields) => events.push({ event, fields }),
+      });
+      // Still hanging just before the 4000ms budget expires.
+      await vi.advanceTimersByTimeAsync(3900);
+      expect(events.find((e) => e.event === "tool_call")).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(200);
+      await resultPromise;
+      const toolEvent = events.find((e) => e.event === "tool_call");
+      expect(toolEvent).toMatchObject({ fields: { tool: "search_messages", ok: false, error: "tool_timeout" } });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

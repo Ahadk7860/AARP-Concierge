@@ -17,6 +17,33 @@ import type { Intent } from "./intents-stub.js";
 
 const MAX_TOOL_ROUNDS = 6;
 
+// SHOULD-FIX (review): only the round limit existed as a guard on a hung tool call — no
+// per-tool timeout, so one stuck call (a device search that never resolves, a store query
+// against a slow connection) could stall the whole turn up to the model's own request
+// timeout. search_messages gets §4.3's own 4s budget (device round-trip + FTS/embedding
+// search); every other tool is local SQL/in-memory and gets a tighter 2s.
+const DEFAULT_TOOL_TIMEOUT_MS = 2000;
+const TOOL_TIMEOUT_MS: Partial<Record<ToolName, number>> = {
+  search_messages: 4000,
+};
+
+class ToolTimeoutError extends Error {
+  constructor(tool: string, ms: number) {
+    super(`tool_timeout:${tool}:${ms}ms`);
+    this.name = "ToolTimeoutError";
+  }
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, tool: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new ToolTimeoutError(tool, ms)), ms);
+    promise.then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (err: unknown) => { clearTimeout(timer); reject(err instanceof Error ? err : new Error(String(err))); },
+    );
+  });
+}
+
 /** One round of the tool-calling loop: given the running message transcript, either
  * return more tool calls to make, or a final draft. Implemented by AgentModelProvider. */
 export interface AgentModelProvider {
@@ -30,6 +57,17 @@ export interface EscalationProvider {
 
 export type PrecomputedAnswerLookup = (intent: Intent) => Promise<{ text: string } | null>;
 
+/**
+ * Observability hook (review: "we cannot debug a fabrication in production without this").
+ * Structural metadata only, matching the rest of this codebase's logging discipline
+ * (compose-runtime.ts: "Operational metadata only — no payload, no provider error
+ * strings") — question text and generated prose are never logged here. The one deliberate
+ * exception is `verifier_outcome`'s violations: a claim's `value` there is the FABRICATED
+ * text the verifier rejected, not real user or counterpart content, and is exactly what's
+ * needed to diagnose why a fabrication happened.
+ */
+export type AgentTurnLogger = (event: string, fields: Record<string, unknown>) => void;
+
 export type AgentTurnDeps = {
   router: RouterProvider;
   agentModel: AgentModelProvider;
@@ -39,6 +77,7 @@ export type AgentTurnDeps = {
   precomputed?: PrecomputedAnswerLookup;
   refusalText?: string;
   maxToolRounds?: number;
+  log?: AgentTurnLogger;
 };
 
 export type AgentTurnResult =
@@ -92,15 +131,27 @@ async function runToolCallingLoop(
       let outputText: string;
       if (name === null) {
         outputText = JSON.stringify({ error: "unknown_tool", evidence: [] });
+        deps.log?.("tool_call", { tool: call.function.name, ok: false, error: "unknown_tool" });
       } else {
+        const startedAt = Date.now();
+        const timeoutMs = TOOL_TIMEOUT_MS[name] ?? DEFAULT_TOOL_TIMEOUT_MS;
         try {
           const input = parseToolArguments(call.function.arguments);
-          const output = await invokeTool(deps.toolContext, name, input);
+          const output = await withTimeout(invokeTool(deps.toolContext, name, input), timeoutMs, name);
           calls.push({ tool: name, output });
           outputText = JSON.stringify(output);
+          deps.log?.("tool_call", {
+            tool: name,
+            ok: true,
+            evidence_count: Array.isArray(output.evidence) ? output.evidence.length : 0,
+            duration_ms: Date.now() - startedAt,
+          });
         } catch (err) {
-          const reason = err instanceof ToolInputError ? err.message : "tool_call_failed";
+          const reason = err instanceof ToolInputError ? err.message
+            : err instanceof ToolTimeoutError ? "tool_timeout"
+            : "tool_call_failed";
           outputText = JSON.stringify({ error: reason, evidence: [] });
+          deps.log?.("tool_call", { tool: name, ok: false, error: reason, duration_ms: Date.now() - startedAt });
         }
       }
       messages.push({ role: "tool", content: outputText, tool_call_id: call.id });
@@ -119,6 +170,10 @@ async function runToolCallingLoop(
  */
 export async function runAgentTurn(question: string, deps: AgentTurnDeps): Promise<AgentTurnResult> {
   const decision: RouterDecision = await routeQuestion(question, deps.router);
+  deps.log?.("router_decision", {
+    lane: decision.kind,
+    intent: decision.kind === "cache_hit" ? decision.intent : undefined,
+  });
 
   if (decision.kind === "refuse") {
     await deliverSingleBubble(deps.sink, deps.refusalText ?? DEFAULT_REFUSAL);
@@ -162,6 +217,14 @@ export async function runAgentTurn(question: string, deps: AgentTurnDeps): Promi
       return deps.escalation.regenerate(escalationMessages, violationSummary);
     },
   );
+
+  deps.log?.("verifier_outcome", {
+    status: outcome.status,
+    attempt: outcome.status === "verified" ? outcome.attempt : undefined,
+    violations: outcome.status === "degraded"
+      ? outcome.violations.map((v) => ({ kind: v.claim.kind, value: v.claim.value, reason: v.reason }))
+      : undefined,
+  });
 
   await deliverBubbles(deps.sink, outcome.text);
   return { kind: "agent", outcome, toolCalls: calls.length };
