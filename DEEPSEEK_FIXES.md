@@ -259,6 +259,81 @@ order:
 item 1 above (the two tests) before merging, since both blocking fixes are currently unverified
 by anything executable. #3 and #4 can land after merge provided R2 stays disabled.
 
+# Review round 3 — `v3/deepseek` round-2 fixes
+
+**I ran the tests. They fail.** This is not a code-reading objection.
+
+## BLOCKING — the tests added to prove BLOCKING 1 and 2 do not pass
+
+There is a local Postgres on this machine (`pg_isready` → accepting connections), so
+`schema.test.ts` is runnable. Results:
+
+| Branch | Tests | Passed | Failed |
+|---|---|---|---|
+| `main` (baseline) | 28 | 21 | 7 |
+| `v3/deepseek` | 31 | 21 | **10** |
+
+Three tests added, three new failures. **Zero of the new tests pass.** Named:
+
+```
+× v3 ingest queue > enqueue → dequeue → insertDigest persists a digest row
+× v3 ingest queue > a duplicate digest is still a done job (not failed)
+```
+
+The first of those is precisely the test the round-1 brief asked for to prove digests are no
+longer silently dropped. It fails. **BLOCKING 2 is still unproven.**
+
+## BLOCKING — and the failure is a real bug in `upsertRelationships`
+
+```
+error: bind message supplies 21 parameters, but prepared statement "" requires 20
+  at Module.scopedQuery       cloud/db/src/scope.ts:144
+  at upsertRelationships      cloud/db/src/repository.ts:573
+  at                          cloud/db/src/repository.ts:727
+```
+
+A parameter-count mismatch in the batch multi-row upsert from E3 — one of this branch's own
+changes. The placeholder list and the bound-parameter array have drifted out of step by one
+column. Any ingest that reaches `upsertRelationships` throws.
+
+Note what this means in combination with the worker: an ingest job now dequeues, throws here,
+retries three times, and lands in `ingest_job_terminal_failure`. The retry logic added in round
+2 works correctly — it is faithfully retrying a call that cannot succeed. **Every digest would
+still be lost**, just noisily now instead of silently. The round-2 fixes are individually sound
+and collectively still broken.
+
+## Note — the "do not chase `schema.test.ts`" guidance is masking real failures
+
+`boi_remaining_work.md` lists this file as a pre-existing failure "needs Postgres." Postgres is
+present and it fails for substantive reasons — 7 on `main` before this branch. That note has
+been discouraging anyone from looking at the one test file that covers partitioning, catalog
+enumeration and deletion verification. Whatever its original cause, it should be re-triaged
+rather than inherited. It is the direct reason BLOCKING 1 shipped.
+
+## What to do
+
+1. Fix the `upsertRelationships` parameter/placeholder mismatch at `repository.ts:573`.
+2. **Run `npx vitest run cloud/db/src/schema.test.ts` and paste the output.** Not a summary —
+   the counts. The pass condition is 24 passed / 7 failed: your three new tests green, with
+   the 7 pre-existing failures unchanged from `main`'s baseline.
+3. Then triage those 7 pre-existing failures separately. Partitioning and catalog enumeration
+   are exactly the coverage that would have caught BLOCKING 1.
+
+Everything else in round 2 — migration 022 with `attempts`, `retryJob`, the boot interlock
+refusing `BOI_R2_DIGEST_STORE` without `BOI_R2_DELETION_ENABLED=1`, and AES-256-GCM via the
+existing `HandleVaultKeyProvider` with backward-compatible reads — looks right on inspection
+and is good work. None of it is verifiable until the suite runs green.
+
+## Correction on item 8
+
+Round 2 records item 8 as "Track D's domain, not Track E/F/G." That is not right. Track D
+proved bookmarks resolve from a LaunchAgent; it cannot test survival across a **Sparkle
+update**, because Track F owns Sparkle, the packaging, and the signing/notarization flow that
+produces the updated binary. The post-update smoke test belongs to Track F. Track D's
+contribution is the signal to assert on: `access.bookmark_fallback_to_fda`.
+
+---
+
 ## Item 8 (Track F, Sparkle) — unchanged and still open
 
 Security-scoped bookmarks bind to code-signing identity; a Sparkle update re-signs the binary.
