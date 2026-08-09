@@ -40,9 +40,14 @@ Paste this as your first message in a **fresh Claude Code session** at
 > Use the `parallel-tracks-teams` skill if it fits; otherwise spawn teammates directly.
 > Requires `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`.
 >
-> **Model policy**: you (Opus 5) orchestrate, review, and own the verifier design. Spawn
-> **Sonnet 5 at medium effort** as track executors. Escalate a track to Opus only if Sonnet
-> stalls twice on the same problem.
+> **Model policy — usage-conscious.** You orchestrate as **Opus 5 at medium effort**: plan,
+> assign, review, and own the verifier design. Every track executor is **Sonnet 5 at medium
+> effort**. Do not spawn Opus executors. Escalate a single task to Opus only if Sonnet stalls
+> twice on the same problem, and drop back to Sonnet immediately after.
+>
+> Keep the teammate roster to **one executor per active track** — four or five agents in
+> flight, not a dozen. More parallelism here buys wall-clock, not quality, and the tracks are
+> already sized to be independent.
 >
 > **Velocity policy — read this carefully.** We are optimizing for speed with reasonable
 > quality, not for exhaustive verification. Do NOT run a full adversarial review pass on
