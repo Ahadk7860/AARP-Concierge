@@ -171,10 +171,9 @@ describe("verify — I2: every claim must trace to this turn's tool results", ()
 
 describe("runVerifiedTurn — regenerate once, then degrade (I1, I2)", () => {
   it("returns the first draft verified when it already passes", async () => {
-    const pool = buildEvidencePool([relationshipCall()]);
     const outcome = await runVerifiedTurn(
       "Maya's relationship is in a steady stage.",
-      pool,
+      [relationshipCall()],
       async () => { throw new Error("must not be called"); },
     );
     expect(outcome).toEqual({
@@ -185,12 +184,11 @@ describe("runVerifiedTurn — regenerate once, then degrade (I1, I2)", () => {
   });
 
   it("regenerates exactly once and ships the corrected draft when it then passes", async () => {
-    const pool = buildEvidencePool([relationshipCall()]);
     let regenerateCalls = 0;
     let receivedSummary = "";
     const outcome = await runVerifiedTurn(
       "Jordan is drifting away.",
-      pool,
+      [relationshipCall()],
       async (summary) => {
         regenerateCalls += 1;
         receivedSummary = summary;
@@ -208,39 +206,63 @@ describe("runVerifiedTurn — regenerate once, then degrade (I1, I2)", () => {
   });
 
   it("degrades to a grounded, evidence-only summary when the regenerate also fails, and never returns free text", async () => {
-    const pool = buildEvidencePool([relationshipCall()]);
+    const calls = [relationshipCall()];
     const outcome = await runVerifiedTurn(
       "Jordan is drifting away.",
-      pool,
+      calls,
       async () => "Priya also asked something.",
     );
     expect(outcome.status).toBe("degraded");
     if (outcome.status === "degraded") {
-      // The degraded text must itself be verifier-clean — it is built from evidence refs,
-      // not model prose, so it cannot reintroduce a fabrication.
+      // The degraded text must itself be verifier-clean — it is built from this turn's
+      // tool calls, not model prose, so it cannot reintroduce a fabrication. It also must
+      // not surface internal hashed identifiers to the user.
+      const pool = buildEvidencePool(calls);
       const check = verify(outcome.text, pool);
       expect(check.ok).toBe(true);
+      expect(outcome.text).not.toContain("p_maya01");
+      expect(outcome.text).toContain("Maya");
       expect(outcome.violations.some((v) => v.claim.value === "Priya")).toBe(true);
     }
   });
 
   it("degrades (never throws, never ships unverified text) when the regenerate call itself throws", async () => {
-    const pool = buildEvidencePool([relationshipCall()]);
     const outcome = await runVerifiedTurn(
       "Jordan is drifting away.",
-      pool,
+      [relationshipCall()],
       async () => { throw new Error("model_call_failed"); },
     );
     expect(outcome.status).toBe("degraded");
   });
 
-  it("default degrade reports evidence refs, and reports honest emptiness with zero tool calls", () => {
-    const emptyPool = buildEvidencePool([]);
-    expect(defaultDegrade(emptyPool)).toMatch(/couldn't verify/);
+  it("default degrade renders human-readable prose from display/description fields, and reports honest emptiness with zero tool calls", () => {
+    expect(defaultDegrade([])).toMatch(/couldn't verify/);
 
-    const pool = buildEvidencePool([relationshipCall(), openLoopCall()]);
-    const text = defaultDegrade(pool);
-    expect(text).toContain("relationship:p_maya01");
-    expect(text).toContain("open_loop:loop_1");
+    const text = defaultDegrade([relationshipCall(), openLoopCall()]);
+    // Human-readable facts, drawn from `display`/`lifecycle_stage`/`description` —
+    // never the raw person_id/loop_id hashes.
+    expect(text).toContain("Maya: steady.");
+    expect(text).toContain("asked whether you're coming to the trip on August 8, 2026");
+    expect(text).not.toContain("p_maya01");
+    expect(text).not.toContain("loop_1");
+  });
+
+  it("never lets a coincidental digit fragment inside an opaque id ground an unrelated number claim", async () => {
+    const call: ToolCallRecord = {
+      tool: "open_loops",
+      output: {
+        loops: [{ loop_id: "loop_12", person_id: "p_maya01", display: "Maya", kind: "question", direction: "i_owe_them", description: "asked about the trip", age_days: 4 }],
+        evidence: [{ source: "open_loop", id: "loop_12" }],
+      },
+    };
+    // "12" appears only inside the opaque id "loop_12" — never as a standalone number
+    // anywhere in the tool output — so a claim of "12" must be rejected, not "grounded"
+    // by the coincidental digit fragment inside that id.
+    const pool = buildEvidencePool([call]);
+    const result = verify("Maya has 12 open loops with you.", pool);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.violations.some((v) => v.claim.kind === "number" && v.claim.value === "12")).toBe(true);
+    }
   });
 });

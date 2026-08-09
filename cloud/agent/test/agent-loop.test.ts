@@ -57,6 +57,17 @@ class ScriptedAgentModel implements AgentModelProvider {
   }
 }
 
+/** Never returns a final answer — always hands back another tool call, forcing the loop
+ * to exhaust maxToolRounds. Used to reproduce the "non-empty calls, empty draft" case. */
+class AlwaysToolCallAgentModel implements AgentModelProvider {
+  private nextId = 1;
+  async turn(_messages: ChatMessage[]): Promise<{ content: string | null; tool_calls: ToolCall[] | null }> {
+    const id = `call_${this.nextId}`;
+    this.nextId += 1;
+    return { content: null, tool_calls: [toolCall("relationship_state", { person_id: "p_maya01" }, id)] };
+  }
+}
+
 class NeverCalledEscalation implements EscalationProvider {
   async regenerate(): Promise<string> {
     throw new Error("escalation must not be called");
@@ -215,6 +226,26 @@ describe("runAgentTurn — the agent path: tool calls, verification, delivery", 
     });
     expect(result.kind).toBe("agent_no_output");
     expect(sink.delivered).toHaveLength(1);
+  });
+
+  it("regression: declines honestly (never a blank bubble) when the tool loop exhausts its rounds WITHOUT a final draft, despite having made tool calls", async () => {
+    // Reproduces the exact bug: draft.trim()==="" but calls.length > 0 (rounds ran out
+    // before the model ever produced a final answer). The old guard
+    // (`draft==="" && calls.length===0`) missed this case entirely, verify("") passed
+    // trivially (zero claims), and an empty bubble shipped to the user.
+    const sink = new InMemoryBubbleSink();
+    const result = await runAgentTurn("how's it going with maya?", {
+      router: new ScriptedRouter({ kind: "agent" }),
+      agentModel: new AlwaysToolCallAgentModel(),
+      escalation: new NeverCalledEscalation(),
+      toolContext: ctx(),
+      sink,
+      maxToolRounds: 3,
+    });
+    expect(result).toEqual({ kind: "agent_no_output", toolCalls: 3 });
+    expect(sink.delivered).toHaveLength(1);
+    expect(sink.delivered[0]!.text.trim()).not.toBe("");
+    expect(sink.isEnded).toBe(true);
   });
 
   it("never lets an unknown tool name from the model crash the loop", async () => {

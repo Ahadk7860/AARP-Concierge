@@ -10,7 +10,7 @@
 import { routeQuestion, type RouterDecision, type RouterProvider } from "./router.js";
 import { invokeTool, type ToolContext, ToolInputError } from "./tools.js";
 import { TOOL_NAMES, type ToolName } from "./tools.js";
-import { buildEvidencePool, runVerifiedTurn, type ToolCallRecord, type VerifiedTurnOutcome } from "./verifier.js";
+import { runVerifiedTurn, type ToolCallRecord, type VerifiedTurnOutcome } from "./verifier.js";
 import type { BubbleSink } from "./bubble-sink-stub.js";
 import type { ChatMessage, ToolCall } from "./gemini-client.js";
 import type { Intent } from "./intents-stub.js";
@@ -137,17 +137,21 @@ export async function runAgentTurn(question: string, deps: AgentTurnDeps): Promi
   }
 
   const { draft, calls } = await runToolCallingLoop(question, deps);
-  if (draft.trim() === "" && calls.length === 0) {
-    // Nothing generated and nothing looked up: there is no unverified prose to guard
-    // against, but there is also nothing honest to say beyond a refusal-shaped decline.
+  if (draft.trim() === "") {
+    // No final draft — either the model made no tool calls and said nothing, or (just as
+    // possible) it made tool calls but the loop exhausted MAX_TOOL_ROUNDS before producing
+    // a final answer. Either way there is no unverified prose to guard against, but there
+    // is also nothing honest to say beyond a refusal-shaped decline. Gating on the draft
+    // alone (not `calls.length === 0`) matters: a non-empty `calls` with an empty draft is
+    // exactly the exhausted-rounds case, and it must not fall through to verify("") — an
+    // empty string has zero claims to check and would verify "ok", shipping a blank bubble.
     await deliverSingleBubble(deps.sink, deps.refusalText ?? DEFAULT_REFUSAL);
     return { kind: "agent_no_output", toolCalls: calls.length };
   }
 
-  const pool = buildEvidencePool(calls);
   const outcome = await runVerifiedTurn(
     draft,
-    pool,
+    calls,
     async (violationSummary) => {
       const escalationMessages: ChatMessage[] = [
         { role: "system", content: SYSTEM_PROMPT },
@@ -173,11 +177,17 @@ async function deliverSingleBubble(sink: BubbleSink, text: string): Promise<void
  * finalizes, per §4.4's "call deliver() as each bubble finalises, end() when done." Splitting
  * happens only after the verifier has cleared the whole text — never before, so no bubble
  * can ever carry unverified prose.
+ *
+ * Deliberately refuses to deliver an empty bubble no matter what the caller passes in: if
+ * `verifiedText` is blank (or entirely whitespace), `paragraphs` is empty and NOTHING is
+ * delivered — there is no fallback branch that reintroduces the original text. Every path
+ * that can produce an empty `verifiedText` today is caught earlier (the empty-draft guard
+ * in `runAgentTurn`, and `defaultDegrade`'s own non-empty fallback string), but this
+ * function does not trust that as its only line of defense.
  */
 async function deliverBubbles(sink: BubbleSink, verifiedText: string): Promise<void> {
   const paragraphs = verifiedText.split(/\n{2,}/).map((p) => p.trim()).filter((p) => p !== "");
-  const bubbles = paragraphs.length > 0 ? paragraphs : [verifiedText];
-  for (const bubble of bubbles) {
+  for (const bubble of paragraphs) {
     await sink.deliver({ type: "text", text: bubble });
   }
   await sink.end();
