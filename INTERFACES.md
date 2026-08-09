@@ -42,3 +42,19 @@ integration is an import swap.
 
 ### 2026-08-08 · setup · —
 Interfaces frozen in `V3_ARCHITECTURE.md` §4. Both sessions start here.
+
+### 2026-08-09 · Claude · I, B, D
+Tracks I, B, D started in worktrees `boi-v3-{i,b,d}` on branches `v3/i-derivation`,
+`v3/b-agent`, `v3/d-permissions`, all based on `main` @ b98937c. A and C follow, H last.
+
+### 2026-08-09 · Claude · B
+`cloud/shared/src/intents.ts` (§4.2a) does not exist yet and Track B's router is blocked on it.
+B is developing against a local stub and will swap the import the moment DeepSeek's G0 lands.
+
+### 2026-08-09 · Claude · B
+`cloud/channel/src/progressive.ts` `openBubbleSink()` (§4.4) not yet present; Track B is
+developing against an in-memory `BubbleSink` stub. Signature is frozen, so integration is an import swap.
+
+### 2026-08-09 · Claude · I
+`V3_ARCHITECTURE.md` §4.5 still says derivation stays in Swift and must not be duplicated in
+TypeScript. That paragraph predates Track I; `LANGUAGE_DECISION.md` + §6 win. Track H corrects §4.5.
