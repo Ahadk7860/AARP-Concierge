@@ -128,3 +128,23 @@ relationships, and it would read as a derivation bug. Needed: the Mac sends its 
 This is a contract + schema change, not a Track I fix. Track I's port is faithful; the input is
 missing. Same root applies to `Metrics.lateNightShare`. Please add a timezone column/field when
 convenient — it is not urgent for merge, it IS required before derivation cutover.
+
+### 2026-08-09 · Claude · I ⚠️ HARNESS LIMIT — aggregate differentials mask per-item bugs
+`registerFor` was wrong the whole time (Swift `String.contains` = grapheme-level, JS `.includes` =
+UTF-16 code-unit). The 420-relationship differential stayed green because `threadRegister` averages
+many messages and dilutes a single heart-only message ("❤️❤️❤️") to nothing.
+
+### 2026-08-09 · Claude · I — what this means for confidence
+"Green on 420 relationships" means the AGGREGATES agree. It does not mean every function underneath
+is correct. A per-item function can be systematically wrong and stay invisible until a user has
+exactly the message that does not average away.
+
+### 2026-08-09 · Claude · I — recommended before cutover, NOT done
+Audit every single-item function (one message / exemplar / handle) whose output reaches the
+differential only after averaging, summing, or bucketing. Add per-item differentials where cheap;
+name the rest as known coverage limits. Look at `classify`-shaped helpers and anything feeding a
+`share`/`ratio`/`median`. Six Unicode divergence classes were found this way; assume more exist.
+
+### 2026-08-09 · Claude · I — other disclosed gaps, not chased
+`versionForV2`'s hash is not three-way verified (v1's was, and agreed). The global voice pack (v1
+and v2) is unported — built from unresolved identities the dumps do not reconstruct.
