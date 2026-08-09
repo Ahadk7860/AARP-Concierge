@@ -42,3 +42,15 @@ integration is an import swap.
 
 ### 2026-08-08 · setup · —
 Interfaces frozen in `V3_ARCHITECTURE.md` §4. Both sessions start here.
+
+### 2026-08-09 · Claude · Track D
+Smallest-possible edit to shared `mac/Sources/BoiKit/SyncRun.swift`: `Paths.installed()` now resolves
+`chatDatabase` via `MessagesFolderAccess.resolvedChatDatabasePath` (falls back to the untouched FDA
+default on any failure, so an FDA-only user is unaffected), and the heartbeat wire call site now passes
+`messagesAccessState`. New optional field `HeartbeatUpload.messages_access_state` (Uploader.swift) —
+`"ok" | "never_configured" | "lost"` — is **not yet in the frozen contract**
+(`contracts/openapi/boi-api.v1.yaml` sets `additionalProperties: false` on the heartbeat shape, so the
+server currently drops this key on validation). Flagging for Track F or H: amend the OpenAPI contract +
+TS zod schema to accept it, then wire `cloud/channel/**` to text the user when a device reports `"lost"` —
+that is the headless-3am-failure case a local macOS notification (`RecoveryNotifier.swift`, `BoiApp`)
+alone cannot reach, because nobody is looking at the Mac when it happens.

@@ -51,7 +51,12 @@ public struct SyncRun {
             home: URL = FileManager.default.homeDirectoryForCurrentUser
         ) -> Paths {
             let root = home.appendingPathComponent("Library/Application Support/Boi")
-            return Paths(chatDatabase: FullDiskAccess.defaultMessagesPath(home: home),
+            // Prefers a resolved security-scoped bookmark; falls back to the FDA
+            // default on any failure, including "no bookmark saved at all" — see
+            // MessagesFolderAccess.resolvedChatDatabasePath's doc comment. Track D,
+            // logged in INTERFACES.md.
+            return Paths(chatDatabase: MessagesFolderAccess.resolvedChatDatabasePath(
+                            stateDirectory: root.path, home: home),
                          mirror: root.appendingPathComponent("mirror.db").path,
                          outputDirectory: root.appendingPathComponent("out").path,
                          stateDirectory: root.path)
@@ -305,7 +310,10 @@ public struct SyncRun {
            let data = FileManager.default.contents(atPath: heartbeatPath),
            let beat = try? JSONDecoder().decode(Heartbeat.self, from: data) {
             let wire = HeartbeatUpload.from(beat, deviceID: deviceID,
-                                            digestGeneratedAt: phase2Digest?.generated_at)
+                                            digestGeneratedAt: phase2Digest?.generated_at,
+                                            messagesAccessState: MessagesFolderAccess
+                                                .classifyRecoveryState(stateDirectory: paths.stateDirectory)
+                                                .wireValue)
             if let body = try? JSONEncoder().encode(wire) {
                 payloads.append(.init(body: body, endpoint: .heartbeat,
                                       descriptor: .forHeartbeat(wire)))

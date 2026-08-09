@@ -173,3 +173,137 @@ final class MessagesFolderAccessTests: XCTestCase {
                        folder.appendingPathComponent("chat.db").path)
     }
 }
+
+// MARK: - Recovery: distinguishing "never configured" from "lost"
+
+final class AccessRecoveryStateTests: XCTestCase {
+
+    func scratch(_ label: String) throws -> String {
+        let path = "/tmp/boi-a/tests/recovery-\(label)-\(UUID().uuidString)"
+        try FileManager.default.createDirectory(atPath: path, withIntermediateDirectories: true)
+        return path
+    }
+
+    /// Same reasoning as `MessagesFolderAccessTests.canonical(_:)`: `/tmp` is one of
+    /// the three roots `URL.resolvingSymlinksInPath()` deliberately does not
+    /// dereference, so bookmark resolution's real, `realpath(3)`-canonicalized path
+    /// would otherwise mismatch this test's own un-canonicalized expectation.
+    func canonical(_ path: String) -> String {
+        guard let resolved = realpath(path, nil) else { return path }
+        defer { free(resolved) }
+        return String(cString: resolved)
+    }
+
+    func makeFakeMessagesFolder() throws -> URL {
+        let folder = try scratch("folder")
+        let folderURL = URL(fileURLWithPath: canonical(folder))
+        try Data("stand-in".utf8).write(to: folderURL.appendingPathComponent("chat.db"))
+        return folderURL
+    }
+
+    func saveBookmark(for folder: URL, in directory: String) throws {
+        let bookmark = try folder.bookmarkData(options: [.withSecurityScope],
+                                               includingResourceValuesForKeys: nil,
+                                               relativeTo: nil)
+        try MessagesFolderAccess.BookmarkStore(directory: directory).save(bookmark)
+    }
+
+    // MARK: classifyRecoveryState
+
+    func testAFreshStateDirectoryIsNeverConfiguredNotLost() throws {
+        let state = try scratch("fresh")
+        XCTAssertEqual(MessagesFolderAccess.classifyRecoveryState(stateDirectory: state),
+                       .neverConfigured,
+                       "a Mac that has never run setup must not read as a recovery emergency")
+    }
+
+    func testAResolvingBookmarkIsOk() throws {
+        let folder = try makeFakeMessagesFolder()
+        let state = try scratch("state")
+        try saveBookmark(for: folder, in: state)
+        XCTAssertEqual(MessagesFolderAccess.classifyRecoveryState(stateDirectory: state), .ok)
+    }
+
+    /// A bookmark that has NEVER once resolved (corrupt from the moment it was
+    /// written, or a save that silently failed) reads as "not yet configured," not
+    /// "lost" — conservative on purpose, so a broken setup attempt does not fire a
+    /// recovery notification for something that was never actually working.
+    func testACorruptBookmarkThatHasNeverWorkedIsNeverConfiguredNotLost() throws {
+        let state = try scratch("state")
+        try MessagesFolderAccess.BookmarkStore(directory: state)
+            .save(Data("not a real bookmark".utf8))
+        XCTAssertEqual(MessagesFolderAccess.classifyRecoveryState(stateDirectory: state),
+                       .neverConfigured)
+    }
+
+    /// THE CASE THIS TYPE EXISTS FOR: a bookmark that worked once and then stopped —
+    /// the Sparkle-re-signs-the-binary scenario. Simulated here by clearing the
+    /// bookmark after a successful classify has already marked it as ever-granted.
+    func testABookmarkThatWorkedThenDisappearsIsLost() throws {
+        let folder = try makeFakeMessagesFolder()
+        let state = try scratch("state")
+        try saveBookmark(for: folder, in: state)
+        XCTAssertEqual(MessagesFolderAccess.classifyRecoveryState(stateDirectory: state), .ok,
+                       "must genuinely succeed once before the marker is trustworthy")
+
+        MessagesFolderAccess.BookmarkStore(directory: state).clear()
+
+        guard case .lost = MessagesFolderAccess.classifyRecoveryState(stateDirectory: state) else {
+            return XCTFail("a previously-working bookmark that vanished must read as lost")
+        }
+    }
+
+    /// Same shape, but the bookmark file survives while the target underneath it
+    /// disappears — the resolution itself starts failing rather than the load.
+    func testABookmarkThatWorkedThenFailsToResolveIsLost() throws {
+        let folder = try makeFakeMessagesFolder()
+        let state = try scratch("state")
+        try saveBookmark(for: folder, in: state)
+        XCTAssertEqual(MessagesFolderAccess.classifyRecoveryState(stateDirectory: state), .ok)
+
+        // Corrupt the bookmark bytes in place — the file is still THERE (unlike the
+        // previous test), but resolution will now fail.
+        try Data("corrupted-after-having-worked".utf8)
+            .write(to: URL(fileURLWithPath: MessagesFolderAccess.BookmarkStore(directory: state).path))
+
+        guard case .lost = MessagesFolderAccess.classifyRecoveryState(stateDirectory: state) else {
+            return XCTFail("a previously-working bookmark that stopped resolving must read as lost")
+        }
+    }
+
+    func testWireValuesAreTheClosedThreeStringSet() {
+        XCTAssertEqual(MessagesFolderAccess.AccessRecoveryState.neverConfigured.wireValue,
+                       "never_configured")
+        XCTAssertEqual(MessagesFolderAccess.AccessRecoveryState.ok.wireValue, "ok")
+        XCTAssertEqual(MessagesFolderAccess.AccessRecoveryState.lost(detail: "x").wireValue, "lost")
+    }
+
+    // MARK: resolvedChatDatabasePath — the seam SyncRun.Paths.installed() calls
+
+    func testNoBookmarkResolvesToTheFDADefaultPath() throws {
+        let state = try scratch("state")
+        let home = URL(fileURLWithPath: "/tmp/boi-a/tests/fake-home-\(UUID().uuidString)")
+        let resolved = MessagesFolderAccess.resolvedChatDatabasePath(stateDirectory: state, home: home)
+        XCTAssertEqual(resolved, FullDiskAccess.defaultMessagesPath(home: home),
+                       "an existing FDA-only user (no bookmark ever saved) must be completely unaffected")
+    }
+
+    func testAResolvingBookmarkOverridesTheFDADefaultPath() throws {
+        let folder = try makeFakeMessagesFolder()
+        let state = try scratch("state")
+        try saveBookmark(for: folder, in: state)
+        let home = URL(fileURLWithPath: "/tmp/boi-a/tests/fake-home-\(UUID().uuidString)")
+        let resolved = MessagesFolderAccess.resolvedChatDatabasePath(stateDirectory: state, home: home)
+        XCTAssertEqual(resolved, folder.appendingPathComponent("chat.db").path)
+    }
+
+    func testAFailingBookmarkFallsBackToTheFDADefaultPathRatherThanThrowing() throws {
+        let state = try scratch("state")
+        try MessagesFolderAccess.BookmarkStore(directory: state).save(Data("garbage".utf8))
+        let home = URL(fileURLWithPath: "/tmp/boi-a/tests/fake-home-\(UUID().uuidString)")
+        let resolved = MessagesFolderAccess.resolvedChatDatabasePath(stateDirectory: state, home: home)
+        XCTAssertEqual(resolved, FullDiskAccess.defaultMessagesPath(home: home),
+                       "a picker user whose bookmark breaks must fall back to the FDA path, " +
+                       "not silently point at nothing")
+    }
+}

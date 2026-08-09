@@ -756,14 +756,27 @@ public struct HeartbeatUpload: Codable, Sendable, Equatable {
     public var digest_as_of: String
     public var macos_version: String?
     public var fda_granted: Bool?
+    /// `MessagesFolderAccess.AccessRecoveryState.wireValue` — "ok" | "never_configured"
+    /// | "lost". **Not yet in the frozen contract**: `contracts/openapi/boi-api.v1.yaml`
+    /// sets `additionalProperties: false` on the heartbeat shape (see the doc comment a
+    /// few lines up about `bundle_path_stable`/`mirror_message_count` failing to
+    /// overlap for the exact same reason), so this field is dropped by server-side
+    /// validation until the contract is amended. Logged in `INTERFACES.md` for Track F
+    /// or H: the point of surfacing this at all is so the cloud can text the user when
+    /// a headless 3am `--sync` silently lost Messages folder access — nobody is looking
+    /// at the Mac at that moment, which is exactly when the local notification alone
+    /// (`RecoveryNotifier.swift` in `BoiApp`) is not enough.
+    public var messages_access_state: String?
 
     public init(device_id: String, app_version: String, digest_as_of: String,
-                macos_version: String? = nil, fda_granted: Bool? = nil) {
+                macos_version: String? = nil, fda_granted: Bool? = nil,
+                messages_access_state: String? = nil) {
         self.device_id = device_id
         self.app_version = app_version
         self.digest_as_of = digest_as_of
         self.macos_version = macos_version
         self.fda_granted = fda_granted
+        self.messages_access_state = messages_access_state
     }
 
     /// Projects the on-disk heartbeat onto the contract's shape.
@@ -774,12 +787,14 @@ public struct HeartbeatUpload: Codable, Sendable, Equatable {
     /// produced nothing as having produced something now.
     public static func from(_ beat: Heartbeat,
                             deviceID: String,
-                            digestGeneratedAt: String?) -> HeartbeatUpload {
+                            digestGeneratedAt: String?,
+                            messagesAccessState: String? = nil) -> HeartbeatUpload {
         HeartbeatUpload(
             device_id: deviceID,
             app_version: beat.app_version,
             digest_as_of: digestGeneratedAt ?? beat.last_successful_sync_at ?? beat.as_of,
             macos_version: ProcessInfo.processInfo.operatingSystemVersionString,
-            fda_granted: beat.full_disk_access)
+            fda_granted: beat.full_disk_access,
+            messages_access_state: messagesAccessState)
     }
 }

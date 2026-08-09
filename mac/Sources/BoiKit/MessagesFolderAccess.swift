@@ -101,6 +101,119 @@ public enum MessagesFolderAccess {
             try? FileManager.default.removeItem(atPath: path)
         }
     }
+
+    // MARK: - Recovery
+
+    /// **A silent 3am failure is the specific risk here.** A user who onboarded through
+    /// the bookmark picker and never separately granted Full Disk Access has nothing for
+    /// `FallbackLocalStoreProvider` to fall back TO — and this is most likely to happen
+    /// right after a Sparkle update re-signs the binary, because bookmark resolution
+    /// keys on code signing identity (non-proof (1) in this file's header comment).
+    ///
+    /// `neverConfigured` and `lost` are DIFFERENT states and must never collapse into
+    /// one: a brand new install that hasn't run setup yet is not an emergency and must
+    /// never trigger a notification (a false alarm on first launch teaches a user to
+    /// ignore every later one, including the real one). Only a previously-WORKING grant
+    /// that stops working is `lost` — which is why this type exists rather than just
+    /// inspecting `MessagesFolderAccess.Error` at the call site: the error alone cannot
+    /// tell the two apart, only the history can.
+    public enum AccessRecoveryState: Equatable {
+        case neverConfigured
+        case ok
+        case lost(detail: String)
+
+        /// The value threaded onto the heartbeat wire — see `HeartbeatUpload` in
+        /// Uploader.swift and the corresponding `INTERFACES.md` entry. Deliberately a
+        /// closed set of three strings rather than the free-text `detail`, which never
+        /// leaves this process — see CONTRACTS.md § 7 on what a wire payload may carry.
+        public var wireValue: String {
+            switch self {
+            case .neverConfigured: return "never_configured"
+            case .ok: return "ok"
+            case .lost: return "lost"
+            }
+        }
+    }
+
+    /// One flag file, written the first time (and every time) the bookmark actually
+    /// resolves and reads successfully. Its only job is answering "was this ever
+    /// working," which is the one fact `classify(...)` cannot derive from the bookmark
+    /// or the error alone.
+    struct EverGrantedMarker {
+        let stateDirectory: String
+        var path: String {
+            URL(fileURLWithPath: stateDirectory)
+                .appendingPathComponent("messages-folder-ever-granted.marker").path
+        }
+        func mark() {
+            try? FileManager.default.createDirectory(atPath: stateDirectory,
+                                                      withIntermediateDirectories: true)
+            FileManager.default.createFile(atPath: path, contents: nil)
+        }
+        var isMarked: Bool { FileManager.default.fileExists(atPath: path) }
+    }
+
+    /// Resolves the bookmark (if any) and classifies the result. Read-only with one
+    /// side effect: a genuinely successful resolution marks `EverGrantedMarker`, because
+    /// that is the only place "this has worked before" can honestly be recorded.
+    public static func classifyRecoveryState(stateDirectory: String) -> AccessRecoveryState {
+        let marker = EverGrantedMarker(stateDirectory: stateDirectory)
+        let store = BookmarkStore(directory: stateDirectory)
+
+        guard store.load() != nil else {
+            // No bookmark on disk at all. If it was ever granted before, the bookmark
+            // file itself is gone (deleted, a restored-from-backup state directory,
+            // manual tampering) — that is a real loss, not "hasn't set up yet."
+            return marker.isMarked ? .lost(detail: "no bookmark file at \(store.path)") : .neverConfigured
+        }
+
+        let provider = SecurityScopedMessagesProvider(directory: stateDirectory)
+        do {
+            try provider.beginAccess()
+            defer { provider.endAccess() }
+            _ = try provider.url(for: .messages)
+            marker.mark()
+            return .ok
+        } catch let error as MessagesFolderAccess.Error {
+            // A bookmark exists but has never once resolved successfully: treat as
+            // "not yet configured" rather than "lost" — conservative on purpose, so a
+            // corrupt save during setup itself does not fire a recovery notification
+            // for something that was never actually working.
+            return marker.isMarked ? .lost(detail: error.description) : .neverConfigured
+        } catch {
+            return marker.isMarked ? .lost(detail: String(describing: error)) : .neverConfigured
+        }
+    }
+
+    /// The one seam `SyncRun.Paths.installed()` calls instead of hardcoding
+    /// `FullDiskAccess.defaultMessagesPath(home:)` directly. Prefers a resolved
+    /// bookmark; falls back to the FDA default path on any failure — including "no
+    /// bookmark at all," which is exactly how an existing FDA-only user (who never ran
+    /// the picker) stays completely unaffected by this file's existence: `beginAccess()`
+    /// throws `.noBookmark` immediately and this returns the untouched FDA path.
+    ///
+    /// Deliberately never calls `stopAccessingSecurityScopedResource()` on the success
+    /// path: `--sync` is a short-lived, one-shot process, and macOS reclaims
+    /// security-scoped access on process exit. Balancing begin/end here would need the
+    /// access kept open for the whole read-and-process pipeline downstream in
+    /// `SyncRun.run()`, which is far more invasive than this seam should be.
+    public static func resolvedChatDatabasePath(stateDirectory: String, home: URL) -> String {
+        let fdaDefault = FullDiskAccess.defaultMessagesPath(home: home)
+        let store = BookmarkStore(directory: stateDirectory)
+        guard store.load() != nil else { return fdaDefault }
+
+        let provider = SecurityScopedMessagesProvider(directory: stateDirectory)
+        do {
+            try provider.beginAccess()
+            let resolved = try provider.url(for: .messages)
+            EverGrantedMarker(stateDirectory: stateDirectory).mark()
+            return resolved.path
+        } catch {
+            StructuredLog.emit("access.bookmark_fallback_to_fda", level: .warn,
+                               fields: ["reason": String(describing: error)])
+            return fdaDefault
+        }
+    }
 }
 
 /// `LocalStoreProvider` backed by a security-scoped bookmark instead of Full Disk
