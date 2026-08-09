@@ -1,0 +1,110 @@
+name: CI
+
+# Ubuntu only, with a Postgres service container. No macOS runner: the repo is private
+# so Actions minutes are metered, Ubuntu bills 1x and macOS bills 10x, and the Swift
+# suite alone takes ~6 minutes — that would cost ~60 billed minutes per run. If a Swift
+# job is added later, gate it behind `workflow_dispatch` so it never runs automatically
+# on every push.
+#
+# THIS WORKFLOW IS EXPECTED TO BE RED ON ITS FIRST RUN. That is not a bug in the
+# workflow — `npm run typecheck`, `npm run lint`, and `npx vitest run` are all already
+# failing on `main` before this file existed, for reasons unrelated to CI (see the PR
+# description that introduced this file for the exact inherited baseline: typecheck and
+# lint failures confined to `cloud/phase2-runtime/**` and `cloud/api/src/main.ts`, which
+# is the live path and explicitly out of scope for every track to touch; several test
+# files — `cloud/db/src/schema.test.ts`, `cloud/e2e/src/e2e.test.ts`,
+# `cloud/intelligence-bridge/**`, `cloud/scheduler/**` among them — already fail against
+# a real, freshly-migrated Postgres). Nothing here uses `continue-on-error` on a whole
+# job to paper over that — a CI that always passes is worse than no CI. The intent is:
+# this run is the first honest signal this repo has ever had, and every check result is
+# real. Fixing the inherited debt is deliberately NOT bundled into this PR; each item is
+# either owned by another track or predates every current track and needs its own
+# triage.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  lint-and-typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      # Checked explicitly, not just relied upon: `npm ci` is stricter than `npm
+      # install` about a lockfile that doesn't match package.json, and a clean
+      # checkout is exactly the scenario a contributor's machine won't have tested if
+      # they only ever ran `npm install` locally.
+      - name: npm ci (clean install)
+        run: npm ci
+
+      - name: typecheck
+        run: npm run typecheck
+
+      # Runs Track I's codegen gate first if/when it lands (npm run lint is defined as
+      # `npm run codegen:check && eslint .` per that track's plan) — this step just
+      # calls whatever `npm run lint` currently resolves to, on purpose, so this
+      # workflow never drifts out of sync with that script's own definition.
+      - name: lint
+        run: npm run lint
+
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: boi_dev_d
+        ports:
+          - 5432:5432
+        # Wait for Postgres to actually accept connections before any step runs —
+        # the service container starts in parallel with checkout/npm ci, and without
+        # this every DB-touching test would race the container's own startup.
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # cloud/db/src/pool.ts defaults to postgres://localhost:5432/boi_dev_d with no
+      # auth when DATABASE_URL is unset — that default assumes a local dev Postgres
+      # with trust auth, which the Postgres service image does not have. Set it
+      # explicitly rather than relying on the default resolving correctly here.
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/boi_dev_d
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: npm ci (clean install)
+        run: npm ci
+
+      # cloud/db/src/schema.test.ts calls migrate() itself in beforeAll (rollbackAll
+      # then migrate, "prove runs clean from empty by actually starting from empty") —
+      # no separate migration step is needed before vitest runs. This single
+      # `vitest run` covers schema.test.ts along with every other file in
+      # cloud/**/*.test.ts; there is no separate "run schema.test.ts against Postgres"
+      # step because the whole suite already needs the same live database (14 test
+      # files import cloud/db/src/pool.ts's getPool(), not just schema.test.ts).
+      - name: vitest (full suite, against the Postgres service)
+        run: npx vitest run
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: pip install jsonschema (scripts/validate_fixtures.py's only dependency)
+        run: pip install "jsonschema>=4.20"
+
+      - name: validate fixtures against contracts/schema
+        run: npm run fixtures
