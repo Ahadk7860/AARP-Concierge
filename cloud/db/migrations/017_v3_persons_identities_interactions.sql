@@ -12,26 +12,28 @@
 
 create table if not exists persons (
   user_id    text not null references users(user_id) on delete cascade,
-  person_id  text primary key,
+  person_id  text not null,
   display    text not null,
-  created_at timestamptz not null default now()
+  created_at timestamptz not null default now(),
+  primary key (user_id, person_id)
 ) partition by hash (user_id);
 
 create table if not exists identities (
   user_id     text not null references users(user_id) on delete cascade,
-  identity_id text primary key,
+  identity_id text not null,
   person_id   text not null,
   source      text not null,
   handle      text not null,
   confidence  text not null,
   merged_by   text,
   as_of       timestamptz not null,
+  primary key (user_id, identity_id),
   unique (user_id, source, handle)
 ) partition by hash (user_id);
 
 create table if not exists interactions (
   user_id        text not null references users(user_id) on delete cascade,
-  interaction_id text primary key,
+  interaction_id text not null,
   person_id      text not null,
   source         text not null,
   direction      text not null,
@@ -39,7 +41,8 @@ create table if not exists interactions (
   thread_ref     text,
   content_ref    text,
   length         int,
-  meta           jsonb not null default '{}'
+  meta           jsonb not null default '{}',
+  primary key (user_id, interaction_id)
 ) partition by hash (user_id);
 
 do $$

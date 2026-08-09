@@ -9,7 +9,7 @@
 
 create table if not exists open_loops (
   user_id     text not null references users(user_id) on delete cascade,
-  loop_id     text primary key,
+  loop_id     text not null,
   person_id   text not null,
   kind        text not null,
   direction   text not null,
@@ -17,7 +17,8 @@ create table if not exists open_loops (
   opened_at   timestamptz not null,
   status      text not null default 'open',
   confidence  text not null,
-  as_of       timestamptz not null
+  as_of       timestamptz not null,
+  primary key (user_id, loop_id)
 ) partition by hash (user_id);
 
 create table if not exists relationship_metrics_daily (

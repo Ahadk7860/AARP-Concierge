@@ -24,6 +24,7 @@ import {
   isInstalledPool,
   type Queryable,
 } from "../../db/src/index.js";
+import { startIngestWorker } from "../../db/src/ingest-worker.js";
 import { SpectrumChannel } from "../../channel/src/spectrum-channel.js";
 import { LiveSpectrumPort } from "../../channel/src/spectrum-live.js";
 import { SpectrumRegistrar } from "../../channel/src/spectrum-registrar.js";
@@ -591,6 +592,10 @@ export async function startRuntime(
       dependencies: statusDeps,
     });
     if (!(await status.ready()).ready) throw new Error("runtime_dependencies_unready");
+
+    // Start the ingest worker — dequeues jobs written by the ingest route.
+    const stopIngestWorker = startIngestWorker({ channel, pollIntervalMs: 5_000 });
+    cleanups.unshift(stopIngestWorker);
 
     const app = buildServer({ channel, registrar });
     if (config.card !== null) registerCardProxy(app, config.card, factories.fetch);

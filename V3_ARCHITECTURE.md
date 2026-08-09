@@ -145,20 +145,21 @@ requires updating this document first and notifying the other session.**
 
 create table persons (
   user_id    text not null references users(user_id) on delete cascade,
-  person_id  text primary key,          -- 'p_' + salted hash, same discipline as h_
+  person_id  text not null,          -- 'p_' + salted hash, same discipline as h_
   display    text not null,
   created_at timestamptz not null default now()
 );
 
 create table identities (
   user_id     text not null references users(user_id) on delete cascade,
-  identity_id text primary key,
+  identity_id text not null,
   person_id   text not null,
   source      text not null,   -- 'imessage'|'gmail'|'calendar'|'photos'|'calls'
   handle      text not null,   -- normalized, salted-hashed exactly like contact_id today
   confidence  text not null,   -- 'exact'|'inferred'|'unknown'   (invariant I6)
   merged_by   text,            -- 'addressbook'|'email_match'|'user_confirmed'
   as_of       timestamptz not null,
+  primary key (user_id, identity_id),
   unique (user_id, source, handle)
 );
 -- The existing iMessage contact_id becomes an identities row with source='imessage'.
@@ -170,7 +171,7 @@ create table identities (
 -- Source-agnostic unit of evidence. Replaces "message" everywhere downstream.
 create table interactions (
   user_id        text not null references users(user_id) on delete cascade,
-  interaction_id text primary key,
+  interaction_id text not null,
   person_id      text not null,
   source         text not null,
   direction      text not null,   -- 'from_me'|'to_me'
@@ -178,14 +179,15 @@ create table interactions (
   thread_ref     text,
   content_ref    text,            -- pointer into R2. NEVER the content itself.
   length         int,
-  meta           jsonb not null default '{}'
+  meta           jsonb not null default '{}',
+  primary key (user_id, interaction_id)
 );
 
 -- ============ MOAT TABLES (highest priority — unbackfillable signal) ============
 
 create table outcomes (
   user_id      text not null references users(user_id) on delete cascade,
-  outcome_id   text primary key,
+  outcome_id   text not null,
   kind         text not null,            -- 'nudge' | 'draft' | 'surfaced_loop' | 'answer'
   person_id    text,
   suggested_at timestamptz not null default now(),
@@ -193,42 +195,46 @@ create table outcomes (
   result       text,                     -- 'sent_verbatim'|'edited'|'ignored'|'dismissed'
   result_at    timestamptz,
   they_replied boolean,
-  meta         jsonb not null default '{}'
+  meta         jsonb not null default '{}',
+  primary key (user_id, outcome_id)
 );
 
 create table memories (
   user_id    text not null references users(user_id) on delete cascade,
-  memory_id  text primary key,
+  memory_id  text not null,
   person_id  text,                         -- null = global
   text       text not null,               -- user-authored fact
   source     text not null,               -- 'user_stated' | 'user_corrected'
   created_at timestamptz not null default now(),
-  active     boolean not null default true
+  active     boolean not null default true,
+  primary key (user_id, memory_id)
 );
 
 create table corrections (
   user_id     text not null references users(user_id) on delete cascade,
-  correction_id text primary key,
+  correction_id text not null,
   turn_id     text,
   claim       text not null,
   correction  text not null,
-  created_at  timestamptz not null default now()
+  created_at  timestamptz not null default now(),
+  primary key (user_id, correction_id)
 );
 
 create table draft_edits (
   user_id    text not null references users(user_id) on delete cascade,
-  edit_id    text primary key,
+  edit_id    text not null,
   person_id  text,
   drafted    text not null,
   sent       text,
-  created_at timestamptz not null default now()
+  created_at timestamptz not null default now(),
+  primary key (user_id, edit_id)
 );
 
 -- ============ RELATIONSHIP DEPTH ============
 
 create table open_loops (
   user_id     text not null references users(user_id) on delete cascade,
-  loop_id     text primary key,
+  loop_id     text not null,
   person_id   text not null,
   kind        text not null,   -- 'question'|'promise'|'plan'|'favor'|'decision'
   direction   text not null,   -- 'i_owe_them'|'they_owe_me'
@@ -236,7 +242,8 @@ create table open_loops (
   opened_at   timestamptz not null,
   status      text not null default 'open',  -- 'open'|'resolved'|'abandoned'
   confidence  text not null,   -- 'high'|'medium'|'unknown'  (I6)
-  as_of       timestamptz not null
+  as_of       timestamptz not null,
+  primary key (user_id, loop_id)
 );
 
 create table relationship_metrics_daily (
@@ -285,6 +292,9 @@ create table precomputed_answers (
 ```
 
 All new tables follow the existing hash-partition-by-`user_id` and cascade-delete discipline.
+Exception: `jobs` is unpartitioned — workers must poll across all users, and a
+hash-partition would force a full partition scan on every dequeue. The `on delete
+cascade` FK to `users` ensures cleanup on account deletion; see migration 021.
 **Verify against `cloud/db/src/catalog.ts` + `schema.test.ts` — those tests enumerate
 user-scoped tables and will fail if a new table is not partitioned/cascading correctly.**
 
@@ -389,6 +399,7 @@ export type BubbleSink = {
 
 export function openBubbleSink(input: {
   scope: UserScope;
+  channel: Channel;
   idempotency_key: string;
   reply_to_message_id: string | null;
 }): BubbleSink;

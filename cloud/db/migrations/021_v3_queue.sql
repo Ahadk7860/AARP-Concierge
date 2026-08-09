@@ -6,6 +6,11 @@
 -- At <1k users a single-worker-pool implementation is correct; the separation
 -- in the data model means splitting into dedicated workers later is a deploy
 -- change, not a migration.
+--
+-- INTENTIONALLY NOT PARTITIONED: workers process jobs from all users, and
+-- hash-partitioning by user_id would force a scan over every partition on
+-- every dequeue. The `on delete cascade` FK to users ensures cleanup on
+-- account deletion (catalog.ts counts it).
 
 create table if not exists jobs (
   job_id     text primary key,

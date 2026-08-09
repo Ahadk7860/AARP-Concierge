@@ -15,7 +15,7 @@ export async function upsertPerson(
     db, scope,
     `insert into persons (user_id, person_id, display)
      values ($1, $2, $3)
-     on conflict (person_id)
+     on conflict (user_id, person_id)
      do update set display = excluded.display`,
     [scope.user_id, input.person_id, input.display],
   );
@@ -84,7 +84,7 @@ export async function insertInteractions(
     db, scope,
     `insert into interactions (user_id, interaction_id, person_id, source, direction, occurred_at, thread_ref, content_ref, length, meta)
      values ${placeholders.join(", ")}
-     on conflict do nothing`,
+     on conflict (user_id, interaction_id) do nothing`,
     params,
   );
   return res.rowCount ?? rows.length;
@@ -230,7 +230,7 @@ export async function upsertOpenLoops(
     db, scope,
     `insert into open_loops (user_id, loop_id, person_id, kind, direction, description, opened_at, status, confidence, as_of)
      values ${placeholders.join(", ")}
-     on conflict (loop_id)
+     on conflict (user_id, loop_id)
      do update set kind = excluded.kind, direction = excluded.direction,
                    description = excluded.description, status = excluded.status,
                    confidence = excluded.confidence, as_of = excluded.as_of`,

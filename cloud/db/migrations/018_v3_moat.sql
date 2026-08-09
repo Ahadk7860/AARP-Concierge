@@ -8,7 +8,7 @@
 
 create table if not exists outcomes (
   user_id      text not null references users(user_id) on delete cascade,
-  outcome_id   text primary key,
+  outcome_id   text not null,
   kind         text not null,
   person_id    text,
   suggested_at timestamptz not null default now(),
@@ -16,35 +16,39 @@ create table if not exists outcomes (
   result       text,
   result_at    timestamptz,
   they_replied boolean,
-  meta         jsonb not null default '{}'
+  meta         jsonb not null default '{}',
+  primary key (user_id, outcome_id)
 ) partition by hash (user_id);
 
 create table if not exists memories (
   user_id    text not null references users(user_id) on delete cascade,
-  memory_id  text primary key,
+  memory_id  text not null,
   person_id  text,
   text       text not null,
   source     text not null,
   created_at timestamptz not null default now(),
-  active     boolean not null default true
+  active     boolean not null default true,
+  primary key (user_id, memory_id)
 ) partition by hash (user_id);
 
 create table if not exists corrections (
   user_id       text not null references users(user_id) on delete cascade,
-  correction_id text primary key,
+  correction_id text not null,
   turn_id       text,
   claim         text not null,
   correction    text not null,
-  created_at    timestamptz not null default now()
+  created_at    timestamptz not null default now(),
+  primary key (user_id, correction_id)
 ) partition by hash (user_id);
 
 create table if not exists draft_edits (
   user_id    text not null references users(user_id) on delete cascade,
-  edit_id    text primary key,
+  edit_id    text not null,
   person_id  text,
   drafted    text not null,
   sent       text,
-  created_at timestamptz not null default now()
+  created_at timestamptz not null default now(),
+  primary key (user_id, edit_id)
 ) partition by hash (user_id);
 
 do $$
