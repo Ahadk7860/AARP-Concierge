@@ -5,7 +5,7 @@
 // splitting to a dedicated process later is a deploy change.
 
 import { getPool, type Queryable } from "./pool.js";
-import { dequeue, completeJob } from "./queue.js";
+import { dequeue, completeJob, retryJob } from "./queue.js";
 import { insertDigest, latestDigest, DuplicateDigestError } from "./repository.js";
 import { unsafeScopeFromUserId } from "./scope.js";
 import type { Digest, DigestV2, OutboundMessage, SendResult } from "../../shared/src/contracts.js";
@@ -65,11 +65,33 @@ export async function processOneIngestJob(
       await completeJob(job.job_id, { status: "done" }, db);
       return true;
     }
-    await completeJob(job.job_id, {
-      status: "failed",
-      error: err instanceof Error ? err.message : String(err),
-    }, db);
-    throw err;
+
+    const maxAttempts = 3;
+    const attempt = await retryJob(job.job_id, db);
+    const errorMsg = err instanceof Error ? err.message : String(err);
+
+    if (attempt > maxAttempts) {
+      // Terminal — no more retries. Emit a loud log/metric.
+      await completeJob(
+        job.job_id,
+        { status: "failed", error: errorMsg },
+        db,
+      );
+      process.stderr.write(
+        JSON.stringify({
+          level: "error",
+          msg: "ingest_job_terminal_failure",
+          job_id: job.job_id,
+          user_id: job.user_id,
+          attempts: attempt,
+          error: errorMsg,
+        }) + "\n",
+      );
+    }
+
+    // Don't throw — transient retries are re-queued (status='pending'),
+    // terminal failures are logged. The poll loop continues either way.
+    return true;
   }
 }
 

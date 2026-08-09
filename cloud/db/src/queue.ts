@@ -85,3 +85,20 @@ export async function completeJob(
     [job_id, outcome.status, outcome.error ?? null],
   );
 }
+
+/**
+ * Re-queue a job for retry. Increments the attempt counter and resets status
+ * to 'pending'. Callers should also log.
+ */
+export async function retryJob(
+  job_id: string,
+  db: Queryable = getPool(),
+): Promise<number> {
+  const res = await db.query<{ attempts: number }>(
+    `update jobs set status = 'pending', attempts = attempts + 1
+     where job_id = $1
+     returning attempts`,
+    [job_id],
+  );
+  return res.rows[0]?.attempts ?? 0;
+}

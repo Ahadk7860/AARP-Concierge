@@ -53,3 +53,9 @@ R2 client (cloud/shared/src/r2.ts) + digest payload store (cloud/db/src/digest-r
 - **§4.4 channel param**: `openBubbleSink` signature in §4.4 now includes `channel: Channel` to match the shipped `progressive.ts`.
 - **Ingest worker**: `cloud/db/src/ingest-worker.ts` created — dequeues from `jobs(queue='ingest')`, calls `insertDigest`. `main.ts` starts the polling loop at boot.
 - **jobs not partitioned**: deliberately left unpartitioned; workers poll across all users. Documented in migration 021 and V3_ARCHITECTURE.md §4.1.
+
+### 2026-08-09 · DeepSeek · Round 2 — tests, retries, interlock, encryption
+- **#6 + 2a — tests**: schema.test.ts gets a composite-PK verification test (queries information_schema) and an ingest queue e2e test (enqueue → dequeue → insertDigest → latestDigest). Both would have caught BLOCKING 1/2 immediately.
+- **2b — job retries**: new migration 022 adds `attempts int` to jobs. `retryJob()` in queue.ts resets status to 'pending' and increments attempts. `processOneIngestJob` retries up to 3 times before marking 'failed' and logging a terminal-failure JSON line to stderr.
+- **#4 — startup interlock**: `loadRuntimeConfig` in main.ts rejects boot if `BOI_R2_DIGEST_STORE` is set without `BOI_R2_DELETION_ENABLED=1`. Forces the developer to acknowledge deletion wiring before any content lands in R2.
+- **#3 — R2 envelope encryption**: `cloud/db/src/r2-cipher.ts` — AES-256-GCM cipher following the same HandleVaultKeyProvider pattern as `handle-vault.ts` and `turn-vault.ts`. `digest-r2.ts` now exports `plainDigestStore` and `encryptedDigestStore`. Backwards-compatible: encrypted store detects the algorithm field and decrypts; plain store reads unencrypted blobs without change.

@@ -188,6 +188,17 @@ export function loadRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Runtime
   }
   if (missing.length > 0 || invalid.length > 0) throw new RuntimeConfigError(missing, invalid);
 
+  // §4 interlock — R2 content upload without R2 deletion means deleteUser lies.
+  // If digest payloads move to R2, the delete cascade must reach them too.
+  // Both use the same R2Store client; the env check forces the developer to
+  // acknowledge the deletion wiring before any content ever lands in R2.
+  const r2DigestStore = nonEmpty(env, "BOI_R2_DIGEST_STORE");
+  const r2Deletion = nonEmpty(env, "BOI_R2_DELETION_ENABLED") === "1";
+  if (r2DigestStore !== null && !r2Deletion) {
+    invalid.push("BOI_R2_DIGEST_STORE (set without BOI_R2_DELETION_ENABLED=1 — content in R2 but no deletion store; deleteUser would leave orphaned objects)");
+  }
+  if (missing.length > 0 || invalid.length > 0) throw new RuntimeConfigError(missing, invalid);
+
 
   const phase2Enabled = nonEmpty(env, "BOI_PHASE2_ENABLED") === "1";
   const phase2UserId = nonEmpty(env, "BOI_PHASE2_USER_ID") ?? null;
