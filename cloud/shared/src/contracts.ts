@@ -90,6 +90,59 @@ export type ChatReply = {
   synced_through: ISO8601; licenses: ChatLicense[]; follow_up_draft?: DraftDelivery;
 };
 
+/** §4.2's universal tool-evidence ref returned by every agent tool ({source,id}). Also
+ * hand-mirrored in cloud/agent/src/types.ts and cloud/api/src/schemas.ts — see the parity
+ * comment on ChatReplyV2 below for why three independent copies of this shape exist and
+ * how they're kept from drifting apart. */
+export type EvidenceRef = { source: string; id: string };
+
+/**
+ * chat_reply.v2 (contracts/schema/chat_reply.v2.json, V3_ARCHITECTURE.md §2/§4.2).
+ * ADDITIVE to v1 — `ChatReply` above is UNCHANGED, and every v1 producer/consumer
+ * (cloud/chat/src/selector.ts, reply.ts, waiting-on-me.ts) keeps compiling and behaving
+ * identically. v2 adds `kind: "open"`: the v3 agent path's verified free-form prose,
+ * carrying `evidence` (this file's `EvidenceRef[]`) instead of the closed-vocabulary
+ * `licenses` that `answer`/`decline` still use.
+ *
+ * Until 2026-08-09 this type did not exist here at all: `chat_reply.v2.json` and its zod
+ * mirror (`cloud/api/src/schemas.ts`'s `chatReplyV2Schema`) were both schema-validated and
+ * differentially tested against each other, but nothing in the runtime type graph could
+ * express `kind: "open"` or `evidence` — every consumer had to downgrade a verified agent
+ * reply back to v1's `{kind:"answer", licenses:[]}`, silently discarding the evidence refs
+ * that make the reply's claims defensible. Integration (Track H) found the gap; this type
+ * closes it.
+ *
+ * Deliberately kept STRUCTURALLY FLAT — matching `z.infer<typeof chatReplyV2Schema>`
+ * exactly — rather than re-encoding the JSON Schema's `kind="open"` if/then/else as a TS
+ * discriminated union. A more precise hand-written union would diverge from what the zod
+ * mirror actually infers and become a THIRD independent copy of the same contract, which
+ * is the exact drift class this project keeps shipping (digest.v2's `unknown` enum member,
+ * this very gap). `cloud/api/src/schemas.ts` asserts this type is BIDIRECTIONALLY equal to
+ * `z.infer<typeof chatReplyV2Schema>` at compile time — see the comment there — so this
+ * file cannot drift from the zod mirror without `tsc` failing, the same guarantee
+ * `differential.test.ts` gives between the zod mirror and the frozen JSON Schema.
+ *
+ * The "evidence required, non-empty licenses forbidden, iff kind=open" invariant is
+ * enforced by ajv (the JSON Schema) and zod (`.refine()`) at those boundaries; a value
+ * constructed directly as this TS type (e.g. Track H's agent-path bridge) is expected to
+ * follow it by convention, same as any other producer here relies on a boundary validator
+ * rather than the type checker to catch a conditional-requiredness bug.
+ */
+export type ChatReplyV2 = {
+  schema_version: "chat_reply.v2";
+  kind: "answer" | "decline" | "open";
+  text: string;
+  synced_through: ISO8601;
+  licenses: ChatLicense[];
+  evidence?: EvidenceRef[];
+  follow_up_draft?: DraftDelivery;
+};
+
+/** Convenience union for code that must accept either wire version — e.g. Track H's
+ * bridge from the verified agent path (chat_reply.v2) back into the existing delivery
+ * pipeline, which speaks chat_reply.v1 today. Discriminate on `schema_version`. */
+export type ChatReplyAny = ChatReply | ChatReplyV2;
+
 export type Gist = {
   schema_version: "gist.v1";
   gist_id: string; contact_id: string; display?: string;

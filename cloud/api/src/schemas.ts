@@ -7,6 +7,7 @@
 
 import { z } from "zod";
 import { ID_PATTERNS, VOICE_PACK_LIMITS } from "./contract-limits.js";
+import type { ChatReplyV2 as SharedChatReplyV2 } from "../../shared/src/contracts.js";
 
 /** CONTRACTS.md § 6: ISO 8601 UTC with a `Z`, at every boundary. No epoch integers. */
 export const isoUtc = z
@@ -359,6 +360,26 @@ export const chatReplyV2Schema = z
     (v) => (v.kind === "open" ? v.evidence !== undefined && v.licenses.length === 0 : v.evidence === undefined),
     { message: "evidence required and licenses empty iff kind = open" },
   );
+
+// Compile-time guard (Track H integration finding, 2026-08-09): `chat_reply.v2` existed
+// here, schema-validated and differentially tested against ajv, but was unreachable from
+// the shared runtime type (`cloud/shared/src/contracts.ts`'s `ChatReply` still only knew
+// v1) — every consumer had to downgrade a verified agent reply and discard its evidence
+// refs. `ChatReplyV2` in that file is now the third representation of this contract
+// (JSON Schema, zod mirror, shared TS type); this asserts it stays BIDIRECTIONALLY equal
+// to what this zod schema actually infers, so `tsc` — not a human re-reading three files —
+// catches the next drift. `.refine()` above doesn't change the inferred type, so this
+// compares against the plain `.strict()` object shape, which is deliberately what
+// `ChatReplyV2` mirrors (see that type's doc comment for why it's flat rather than a more
+// precise discriminated union).
+type ChatReplyV2Inferred = z.infer<typeof chatReplyV2Schema>;
+type AssertExtends<A, B> = A extends B ? true : never;
+// If either line below fails to compile, ChatReplyV2Inferred and SharedChatReplyV2 have
+// diverged — fix cloud/shared/src/contracts.ts's ChatReplyV2 (or this schema) to match.
+const _chatReplyV2MirrorsSharedType: AssertExtends<ChatReplyV2Inferred, SharedChatReplyV2> = true;
+const _sharedTypeMirrorsChatReplyV2: AssertExtends<SharedChatReplyV2, ChatReplyV2Inferred> = true;
+void _chatReplyV2MirrorsSharedType;
+void _sharedTypeMirrorsChatReplyV2;
 
 /**
  * chat_route.v1 — the router's ONLY output (V3_ARCHITECTURE.md §2/§3), built from

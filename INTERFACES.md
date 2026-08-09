@@ -228,3 +228,15 @@ rejects the WHOLE request for an unknown field — every real device heartbeat w
 Consequence for my earlier finding #4 in the Track H report: `messages_access_state` is NOT on the
 wire at all right now — do not treat it as available. Only conflict was INTERFACES.md, resolved by
 concatenation as before.
+
+### 2026-08-09 · Claude · A — shared-file edit: `cloud/shared/src/contracts.ts`
+Added `ChatReplyV2`/`EvidenceRef`/`ChatReplyAny`, ADDITIVE only — `ChatReply` (v1) unchanged,
+selector.ts/reply.ts/waiting-on-me.ts unaffected. Closes the Track H integration finding: v2 was
+schema+zod validated but unreachable from any runtime type. `schemas.ts` now asserts at compile
+time that `ChatReplyV2` is bidirectionally equal to `z.infer<typeof chatReplyV2Schema>`.
+
+### 2026-08-09 · Claude · H — re-merge of v3/a-contracts at f00ef1f
+Merged `ChatReplyV2`/`EvidenceRef`/`ChatReplyAny` (`cloud/shared/src/contracts.ts`) into
+`v3/h-join`. Closes my earlier finding #2 — rewiring `AgentClosedChatBridge` to emit
+`chat_reply.v2`'s `open` kind with real `evidence` refs instead of downgrading to v1. Only
+conflict was INTERFACES.md, resolved by concatenation as before.
