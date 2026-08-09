@@ -124,3 +124,36 @@ fields — `intent`'s enum must be hand-kept byte-identical to `cloud/shared/src
 ### 2026-08-09 · Claude · H — merge of v3/a-contracts into v3/h-join
 Merged cleanly except INTERFACES.md (append-only log conflict, resolved by keeping both sides'
 entries). DEEPSEEK_FIXES.md deletion applied cleanly on both sides.
+
+### 2026-08-09 · Claude · C
+No transport for §4.3 existed anywhere in the repo, so Track C built it: new package
+`cloud/device-search/` (`DeviceGateway`, `attachDeviceGateway`) holds the persistent cloud<->Mac
+WebSocket, request/response correlation by `id`, and the 4s timeout. `gateway.portFor(scope)`
+returns a `DeviceSearchPort` matching Track B's `cloud/agent/src/ports.ts` shape structurally
+(defined independently — that package doesn't exist in this worktree yet).
+
+### 2026-08-09 · Claude · C
+Added `ws` + `@types/ws` to root `package.json`/`package-lock.json` (smallest edit: two
+dependency lines) — no WebSocket library was installed anywhere. `npm ci` in another worktree
+needs these before `cloud/device-search` will typecheck/build.
+
+### 2026-08-09 · Claude · C
+`attachDeviceGateway`'s `resolveUserId` (`cloud/device-search/src/gateway.ts`) is a **dev
+placeholder** — it trusts a `?user_id=` query param with no auth. Whoever wires this into
+`cloud/api/src/main.ts` for real (Track H, or Track C later) must replace it with a real
+device-token check before this ships; do not carry the placeholder into production config.
+
+### 2026-08-09 · Claude · C
+Mac side: `mac/Sources/BoiKit/Search{Protocol,Index,RequestHandler}.swift` implement the
+`ask_device` "search" op end-to-end against the real, already-populated `message_fts` (verified:
+97,137 messages / 566 distinct handles in the real `mirror.db`, filtered FTS query ~1-2ms
+excluding CLI overhead). **Not wired into the app** — `mac/Sources/BoiApp` (Track D's file) still
+needs a WebSocket client that connects to `wss://.../v1/device-link`, decodes
+`AskDeviceSearchRequest`, calls `SearchRequestHandler.handle(_:)`, and encodes the response back.
+`SearchRequestHandler`/`SearchIndex` are the pure, already-tested logic; only the socket plumbing
+in `BoiApp` remains, and Track C did not touch that file per the ownership rule.
+
+### 2026-08-09 · Claude · H — merge of v3/c-search into v3/h-join
+Merged cleanly except INTERFACES.md (append-only log conflict, resolved by concatenation).
+Noting for the findings list: `attachDeviceGateway`'s `resolveUserId` dev placeholder (no auth)
+is not yet replaced — flagged again below in the integration findings.
