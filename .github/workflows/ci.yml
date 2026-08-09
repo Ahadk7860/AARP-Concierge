@@ -43,7 +43,14 @@ jobs:
       - name: npm ci (clean install)
         run: npm ci
 
+      # `if: always()` on both of these on purpose: typecheck currently fails on
+      # main (see the workflow's header comment), and without `always()` a failed
+      # typecheck step stops the job before lint ever runs at all — hiding lint's
+      # result entirely rather than just showing it red. Each check needs to be
+      # independently visible regardless of whether the other one passed; the job as
+      # a whole is still correctly reported failed if either step fails.
       - name: typecheck
+        if: always()
         run: npm run typecheck
 
       # Runs Track I's codegen gate first if/when it lands (npm run lint is defined as
@@ -51,6 +58,7 @@ jobs:
       # calls whatever `npm run lint` currently resolves to, on purpose, so this
       # workflow never drifts out of sync with that script's own definition.
       - name: lint
+        if: always()
         run: npm run lint
 
   test:
@@ -99,12 +107,19 @@ jobs:
       - name: vitest (full suite, against the Postgres service)
         run: npx vitest run
 
+      # `if: always()` from here down, same reasoning as lint-and-typecheck's two
+      # steps: vitest is currently red (see the workflow's header comment), and
+      # without this the fixtures validation — which is currently CLEAN — would never
+      # even run, let alone report its own real result.
       - uses: actions/setup-python@v5
+        if: always()
         with:
           python-version: "3.12"
 
       - name: pip install jsonschema (scripts/validate_fixtures.py's only dependency)
+        if: always()
         run: pip install "jsonschema>=4.20"
 
       - name: validate fixtures against contracts/schema
+        if: always()
         run: npm run fixtures
