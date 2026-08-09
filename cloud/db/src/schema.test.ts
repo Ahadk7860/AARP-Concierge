@@ -798,9 +798,13 @@ describe("v3 ingest queue", () => {
     // First insert succeeds.
     await insertDigest(scope, { digest_id: digestId, digest });
 
-    // Enqueue a duplicate.
+    // Same digest content re-uploaded (different digest_id, same generated_at).
+    // This is the production duplicate path — the Mac may re-upload the same
+    // snapshot. insertDigest catches this on the (user_id, generated_at) unique
+    // index, not the PK.
+    const dupId = newDigestId();
     await enqueue("ingest", scope, {
-      digest_id: digestId,
+      digest_id: dupId,
       digest,
       first: false,
       received_at: new Date().toISOString(),
