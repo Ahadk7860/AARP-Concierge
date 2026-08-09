@@ -240,3 +240,26 @@ Merged `ChatReplyV2`/`EvidenceRef`/`ChatReplyAny` (`cloud/shared/src/contracts.t
 `v3/h-join`. Closes my earlier finding #2 — rewiring `AgentClosedChatBridge` to emit
 `chat_reply.v2`'s `open` kind with real `evidence` refs instead of downgrading to v1. Only
 conflict was INTERFACES.md, resolved by concatenation as before.
+
+### 2026-08-09 · Claude · H — rewired AgentClosedChatBridge to chat_reply.v2, widened ClosedChatPort
+Three follow-on edits to make finding #2's fix reachable end to end:
+1. `cloud/inbound/router.ts` (old path, not previously edited by H): `ClosedChatPort.waitingOnMe()`
+   return type widened `ChatReply` -> `ChatReplyAny`, and `InboundRouteOutcome`'s `"chat"` variant
+   likewise. Purely additive — `ClosedChatAdapter` still returns plain v1 `ChatReply`, a subtype;
+   nothing downstream reads anything but `.text`, so no runtime branch changed. `cloud/inbound/
+   router.test.ts` (10 tests) green, untouched.
+2. `cloud/agent/src/agent-loop.ts`: `AgentTurnResult`'s `"agent"` variant gained `evidence:
+   readonly EvidenceRef[]` = `buildEvidencePool(calls).refs` — the SAME pool the verifier itself
+   checked the delivered text against. Previously this was computed and thrown away; no test
+   asserted a full-object equality on this variant, so this is additive.
+3. `cloud/agent/src/inbound-bridge.ts`: `AgentClosedChatBridge` now returns real `chat_reply.v2`
+   `kind: "open"` + the evidence above for the agent lane; `refuse`/`agent_no_output` still map to
+   v1 `decline` (nothing was generated, evidence would be vacuously `[]`, no reason to change
+   schema_version for a lane that never touches the verifier). Added `runtimeOverride` (test-only)
+   so a scripted model can reach the "open" success/degrade paths without a live Gemini key.
+
+Full suite re-run after both merges: same pre-existing failure set as before this round
+(shared dev Postgres contention under concurrent vitest workers — `webhook.test.ts`/
+`turns.test.ts` pass in isolation, confirmed; `cloud/db/schema.test.ts`, `cloud/e2e`,
+`cloud/intelligence-bridge`, `cloud/scheduler` — matches HANDOFF_CLAUDE.md's documented list).
+Zero new failures. `tsc --noEmit` and `eslint` clean on everything touched this round.

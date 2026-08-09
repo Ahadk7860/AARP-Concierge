@@ -10,10 +10,11 @@
 import { routeQuestion, type RouterDecision, type RouterProvider } from "./router.js";
 import { invokeTool, type ToolContext, ToolInputError } from "./tools.js";
 import { TOOL_NAMES, type ToolName } from "./tools.js";
-import { runVerifiedTurn, type ToolCallRecord, type VerifiedTurnOutcome } from "./verifier.js";
+import { buildEvidencePool, runVerifiedTurn, type ToolCallRecord, type VerifiedTurnOutcome } from "./verifier.js";
 import type { BubbleSink } from "./bubble-sink-stub.js";
 import type { ChatMessage, ToolCall } from "./gemini-client.js";
 import type { Intent } from "./intents-stub.js";
+import type { EvidenceRef } from "./types.js";
 
 const MAX_TOOL_ROUNDS = 6;
 
@@ -83,7 +84,12 @@ export type AgentTurnDeps = {
 export type AgentTurnResult =
   | { kind: "cache_hit"; intent: Intent; delivered: boolean }
   | { kind: "refuse"; delivered: boolean }
-  | { kind: "agent"; outcome: VerifiedTurnOutcome; toolCalls: number }
+  // `evidence` (Track H): every {source,id} ref returned by this turn's tool calls, i.e.
+  // `buildEvidencePool(calls).refs` — the SAME pool the verifier itself checked `outcome`
+  // against. Exposed so a caller wiring a real wire format (e.g. chat_reply.v2's `evidence`
+  // field, cloud/agent/src/inbound-bridge.ts) doesn't have to re-run tool calls or guess;
+  // it is exactly the provenance the verifier already computed and is discarding otherwise.
+  | { kind: "agent"; outcome: VerifiedTurnOutcome; toolCalls: number; evidence: readonly EvidenceRef[] }
   | { kind: "agent_no_output"; toolCalls: number };
 
 const DEFAULT_REFUSAL = "I'm not confident I can answer that safely — want to rephrase, or ask something more specific?";
@@ -227,7 +233,7 @@ export async function runAgentTurn(question: string, deps: AgentTurnDeps): Promi
   });
 
   await deliverBubbles(deps.sink, outcome.text);
-  return { kind: "agent", outcome, toolCalls: calls.length };
+  return { kind: "agent", outcome, toolCalls: calls.length, evidence: buildEvidencePool(calls).refs };
 }
 
 async function deliverSingleBubble(sink: BubbleSink, text: string): Promise<void> {
