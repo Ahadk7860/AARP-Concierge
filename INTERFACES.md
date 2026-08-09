@@ -174,3 +174,39 @@ alone cannot reach, because nobody is looking at the Mac when it happens.
 Merged what exists at d-permissions tip (`f162fff`) — track is actively being worked on, expect
 a re-merge later. Only conflict was INTERFACES.md (append-only, resolved by concatenation). The
 `messages_access_state` OpenAPI/zod gap noted above is still open — carried into the findings list.
+
+### 2026-08-09 · Claude · H — v3/a-contracts, v3/b-agent, v3/c-search, v3/d-permissions all merged into v3/h-join
+Full run: 12 pre-existing failing test files before any merge (shared dev Postgres state, Python
+interpreter, e2e/scheduler flake — matches HANDOFF_CLAUDE.md's documented list), same class of
+failures after all four merges (5-8 files depending on shared-DB state at run time), zero NEW
+failures attributable to the merges. `npm ci` picked up `v3/c-search`'s `ws`/`@types/ws` addition
+cleanly.
+
+### 2026-08-09 · Claude · H — wired the v3 agent path behind BOI_AGENT_PATH_ENABLED into LIVE inbound
+New `cloud/agent/src/inbound-bridge.ts` (`AgentClosedChatBridge`) implements `ClosedChatPort`
+(`cloud/inbound/router.ts`) by calling `runAgentTurn` for real — real `OfflineRouterProvider`/
+`ModelRouterProvider`, real tool registry, real verifier, real (stub) `BubbleSink`. Selected in
+`cloud/phase2-runtime/compose-runtime.ts` (smallest edit: one conditional building `chat`) via
+`agentPathEnabledFromEnv()`; `ClosedChatAdapter` (old path) stays the default when the flag is
+unset, matching runtime.ts's "fails closed" convention. Full test suite green before/after
+(no new failures), `tsc --noEmit` clean except the pre-existing `inbound-adapter.test.ts` errors.
+
+**Three known gaps in this wiring, logged in full in inbound-bridge.ts's file header — flagging
+here too since compose-runtime.ts is shared:**
+1. `ClosedChatPort.waitingOnMe()` returns ONE `ChatReply`; the old wire contract has no concept
+   of §2's multi-bubble delivery. The bridge collapses `sink.deliver()` calls into one joined
+   reply (blank-line-separated) rather than dropping content, but this is NOT the product
+   behavior §2 describes. Real multi-bubble over live inbound traffic needs either
+   `ClosedChatPort` widened to accept a `BubbleSink`, or a new entry point that bypasses
+   `InboundRouter`'s single-reply path and calls the REAL `openBubbleSink` (Track F's, once it
+   reaches `main` — currently only the stub exists here).
+2. `ChatReply` (`cloud/shared/src/contracts.ts`) is still v1-shaped (`answer`/`decline`, no
+   `evidence`) even though `chat_reply.v2`'s `kind: "open"` shipped in `cloud/api/src/schemas.ts`
+   (Track A). The bridge downgrades every agent reply to v1's `answer`/`decline` with
+   `licenses: []`, losing the evidence refs. Widening `ChatReply`'s union is out of phase-1
+   scope (shared file); whoever picks this up next should extend the type and this bridge in
+   the same change so they don't drift again.
+3. `AgentStore` passed into the bridge is `InMemoryAgentStore` (empty) — Track E's §4.1 tables
+   are not merged into this branch. The flag is safe to leave unset in every real deploy (it
+   answers with no relationship data but never fabricates, since the verifier still runs) but is
+   not useful until Track E lands and a real `AgentStore` replaces the placeholder.
