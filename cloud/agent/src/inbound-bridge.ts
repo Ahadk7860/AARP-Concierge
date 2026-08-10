@@ -50,7 +50,7 @@ import type { UserScope } from "../../db/src/scope.js";
 import type { ChatReplyAny } from "../../shared/src/contracts.js";
 import type { ClosedChatPort } from "../../inbound/router.js";
 import { runAgentTurn, type AgentTurnDeps, type AgentTurnLogger } from "./agent-loop.js";
-import { InMemoryBubbleSink } from "./bubble-sink-stub.js";
+import { InMemoryBubbleSink } from "./in-memory-bubble-sink.js";
 import type { AgentStore } from "./ports.js";
 import { DegradedDeviceSearchPort } from "./ports.js";
 import { NullApprovalTokenStore } from "./tools.js";

@@ -11,9 +11,9 @@ import { routeQuestion, type RouterDecision, type RouterProvider } from "./route
 import { invokeTool, type ToolContext, ToolInputError } from "./tools.js";
 import { TOOL_NAMES, type ToolName } from "./tools.js";
 import { buildEvidencePool, runVerifiedTurn, type ToolCallRecord, type VerifiedTurnOutcome } from "./verifier.js";
-import type { BubbleSink } from "./bubble-sink-stub.js";
+import type { BubbleSink } from "../../channel/src/progressive.js";
 import type { ChatMessage, ToolCall } from "./gemini-client.js";
-import type { Intent } from "./intents-stub.js";
+import type { Intent } from "../../shared/src/intents.js";
 import type { EvidenceRef } from "./types.js";
 
 const MAX_TOOL_ROUNDS = 6;

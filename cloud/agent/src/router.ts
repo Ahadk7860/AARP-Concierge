@@ -6,7 +6,7 @@
 // recoverable (the verifier still guards it), but this is the one seam obligated to prefer
 // silence over a guess by contract.
 
-import { INTENTS, type Intent } from "./intents-stub.js";
+import { INTENTS, type Intent } from "../../shared/src/intents.js";
 import { callChatCompletion } from "./gemini-client.js";
 import type { AgentModelConfig } from "./model-config.js";
 

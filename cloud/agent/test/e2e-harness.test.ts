@@ -5,7 +5,7 @@
 // back to when no live model key is configured, not a test-only stand-in), the real
 // tool registry (cloud/agent/src/tools.ts) against a seeded InMemoryAgentStore, the real
 // verifier (cloud/agent/src/verifier.ts), and the real BubbleSink contract (the
-// bubble-sink-stub, aligned to the shipped `openBubbleSink` signature per INTERFACES.md).
+// in-memory-bubble-sink; the real `openBubbleSink` now comes from progressive.ts).
 // Only the LLM-calling seams (AgentModelProvider, EscalationProvider) are scripted, because
 // no live model key is available in CI — this matches every other test in this package.
 //
@@ -26,7 +26,7 @@ import { unsafeScopeFromUserId } from "../../db/src/scope.js";
 import { InMemoryAgentStore } from "../src/ports.js";
 import type { ToolContext } from "../src/tools.js";
 import { runAgentTurn, type AgentModelProvider, type AgentTurnLogger, type EscalationProvider } from "../src/agent-loop.js";
-import { InMemoryBubbleSink } from "../src/bubble-sink-stub.js";
+import { InMemoryBubbleSink } from "../src/in-memory-bubble-sink.js";
 import { OfflineRouterProvider } from "../src/router.js";
 import type { ChatMessage, ToolCall } from "../src/gemini-client.js";
 import { extractClaims } from "../src/verifier.js";

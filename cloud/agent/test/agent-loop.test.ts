@@ -4,7 +4,7 @@ import { InMemoryAgentStore } from "../src/ports.js";
 import type { AgentStore } from "../src/ports.js";
 import type { ToolContext } from "../src/tools.js";
 import { runAgentTurn, type AgentModelProvider, type AgentTurnLogger, type EscalationProvider } from "../src/agent-loop.js";
-import { InMemoryBubbleSink } from "../src/bubble-sink-stub.js";
+import { InMemoryBubbleSink } from "../src/in-memory-bubble-sink.js";
 import type { RouterProvider } from "../src/router.js";
 import type { ChatMessage, ToolCall } from "../src/gemini-client.js";
 
