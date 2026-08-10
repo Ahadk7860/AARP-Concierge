@@ -205,3 +205,12 @@ needs a WebSocket client that connects to `wss://.../v1/device-link`, decodes
 `AskDeviceSearchRequest`, calls `SearchRequestHandler.handle(_:)`, and encodes the response back.
 `SearchRequestHandler`/`SearchIndex` are the pure, already-tested logic; only the socket plumbing
 in `BoiApp` remains, and Track C did not touch that file per the ownership rule.
+
+### 2026-08-10 · Claude · C
+Closed the `resolveUserId` auth hole noted above: the default is now
+`authenticateDeviceLinkRequest` (`cloud/device-search/src/gateway.ts`), which reuses
+`bootstrapLookups.authenticateDeviceToken` and requires `Authorization: Bearer <device_token>` on
+the upgrade request, checked against the claimed `?user_id=`. Whoever wires `attachDeviceGateway`
+into `cloud/api/src/main.ts` needs no options for real auth; the Mac's WS client (`BoiApp`, still
+unwired per the note above) must send that header, and `mac/Sources/BoiKit` device-token storage
+is outside this track's files.

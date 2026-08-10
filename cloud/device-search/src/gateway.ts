@@ -15,6 +15,7 @@
 
 import type { IncomingMessage, Server as HttpServer } from "node:http";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
+import { bootstrapLookups } from "../../db/src/index.js";
 import type { UserScope } from "../../db/src/scope.js";
 import {
   isAskDeviceSearchResponse,
@@ -25,6 +26,12 @@ import {
 
 /** V3_ARCHITECTURE.md §4.3: "Timeout 4s -> agent degrades honestly from there." */
 export const ASK_DEVICE_DEFAULT_TIMEOUT_MS = 4_000;
+
+/** A dead socket that never errors or closes looks identical to a live, idle one until
+ * something tries to use it — which today means a real user waiting out the 4s
+ * `ASK_DEVICE_DEFAULT_TIMEOUT_MS` for a Mac that is not actually there. Pinging every
+ * 30s and terminating on a missed pong makes `hasConnection` truthful in the meantime. */
+export const DEVICE_HEARTBEAT_INTERVAL_MS = 30_000;
 
 type PendingRequest = {
   resolve: (response: AskDeviceSearchResponse) => void;
@@ -40,6 +47,8 @@ export interface DeviceSocket {
   on(event: "message", listener: (data: RawData) => void): void;
   on(event: "close", listener: () => void): void;
   on(event: "error", listener: (err: Error) => void): void;
+  on(event: "pong", listener: () => void): void;
+  ping(): void;
   terminate(): void;
 }
 
@@ -67,9 +76,11 @@ export class DeviceGateway {
   private readonly connections = new Map<string, DeviceSocket>();
   private readonly pending = new Map<string, PendingRequest>();
   readonly timeoutMs: number;
+  readonly heartbeatMs: number;
 
-  constructor(options: { timeoutMs?: number } = {}) {
+  constructor(options: { timeoutMs?: number; heartbeatMs?: number } = {}) {
     this.timeoutMs = options.timeoutMs ?? ASK_DEVICE_DEFAULT_TIMEOUT_MS;
+    this.heartbeatMs = options.heartbeatMs ?? DEVICE_HEARTBEAT_INTERVAL_MS;
   }
 
   register(userId: string, socket: DeviceSocket): void {
@@ -80,11 +91,31 @@ export class DeviceGateway {
     this.connections.set(userId, socket);
 
     const drop = (): void => {
+      clearInterval(heartbeat);
       if (this.connections.get(userId) === socket) this.connections.delete(userId);
     };
     socket.on("message", (data) => this.handleMessage(data));
     socket.on("close", drop);
     socket.on("error", drop);
+
+    // Standard ws heartbeat: each tick, terminate a socket that did not answer the
+    // *previous* ping, then send a fresh one. A socket that answers stays `isAlive`
+    // and is never touched; one that went dark gets `terminate()`d, which fires
+    // `close` above and drops it out of `connections` — so `hasConnection` stops
+    // lying about a link nothing is listening on anymore.
+    let isAlive = true;
+    socket.on("pong", () => {
+      isAlive = true;
+    });
+    const heartbeat = setInterval(() => {
+      if (!isAlive) {
+        socket.terminate();
+        return;
+      }
+      isAlive = false;
+      socket.ping();
+    }, this.heartbeatMs);
+    heartbeat.unref?.();
   }
 
   unregister(userId: string, socket?: DeviceSocket): void {
@@ -156,47 +187,104 @@ export class DeviceGateway {
 }
 
 /**
+ * The signature `resolveUserId` must satisfy. Async because the real implementation
+ * hits the database (the same lookup HTTP auth already pays for), and returning
+ * `null`/rejecting means "reject the upgrade" — there is no other outcome.
+ */
+export type ResolveUserId = (req: IncomingMessage) => Promise<string | null> | string | null;
+
+/**
  * Attaches the WS upgrade handler to an existing HTTP server (Fastify exposes its raw
  * `http.Server` as `app.server`) so Macs can open the persistent connection this
  * protocol depends on.
  *
- * `resolveUserId` is the auth hook. **The default here reads `?user_id=` off the
- * connection URL and is a local/dev placeholder, not production auth** — a Mac could
- * claim to be anyone. Production wiring must swap in a real device-token check (the
- * same kind `bootstrapLookups.authenticateDeviceToken` does for HTTP requests
- * elsewhere in this repo). Logged as an open integration point in INTERFACES.md rather
- * than guessed at here, since the real device-token flow lives in `cloud/db` /
- * `cloud/api`, outside this track's files.
+ * `resolveUserId` is the auth hook, and the default is `authenticateDeviceLinkRequest`
+ * below — real auth, not a placeholder. It is still overridable so tests can inject a
+ * fake, but the inversion that let an unauthenticated default ship silently is exactly
+ * what put this gateway at risk, so the *fake* is now what a caller has to opt into
+ * explicitly, never the other way around.
  */
 export function attachDeviceGateway(
   server: HttpServer,
   gateway: DeviceGateway,
   options: {
     path?: string;
-    resolveUserId?: (req: IncomingMessage) => string | null;
+    resolveUserId?: ResolveUserId;
   } = {},
 ): WebSocketServer {
   const path = options.path ?? "/v1/device-link";
-  const resolveUserId = options.resolveUserId ?? defaultResolveUserId;
+  const resolveUserId = options.resolveUserId ?? authenticateDeviceLinkRequest;
   const wss = new WebSocketServer({ noServer: true });
 
   server.on("upgrade", (req, socket, head) => {
     const url = new URL(req.url ?? "", "http://internal");
     if (url.pathname !== path) return; // not this gateway's path; leave for others
-    const userId = resolveUserId(req);
-    if (userId === null) {
-      socket.destroy();
-      return;
-    }
-    wss.handleUpgrade(req, socket, head, (ws) => {
-      gateway.register(userId, ws);
-    });
+
+    void (async () => {
+      let userId: string | null;
+      try {
+        userId = await resolveUserId(req);
+      } catch {
+        // A malformed token, a database hiccup, an unexpected throw from a caller's
+        // own resolver — none of it is a reason to let the upgrade through. Fail
+        // closed, same as an explicit rejection.
+        userId = null;
+      }
+      if (userId === null) {
+        socket.destroy();
+        return;
+      }
+      wss.handleUpgrade(req, socket, head, (ws) => {
+        gateway.register(userId, ws);
+      });
+    })();
   });
 
   return wss;
 }
 
-function defaultResolveUserId(req: IncomingMessage): string | null {
+/**
+ * Production auth for the `/v1/device-link` upgrade. Reuses the exact mechanism HTTP
+ * routes already use (`bootstrapLookups.authenticateDeviceToken`, see
+ * `cloud/api/src/auth.ts`): a `Bearer <device_token>` `Authorization` header, where the
+ * token's own leading `<user_id>.` segment is never trusted on its own — only the
+ * database row it hashes to is. The connection also names a `?user_id=` it claims to
+ * be, and that claim must match the token's *own* scope or the upgrade is rejected —
+ * the WS-layer equivalent of `ownsUser` in `cloud/api/src/auth.ts`, closing the IDOR a
+ * caller-supplied `user_id` would otherwise open.
+ *
+ * Every failure — missing token, malformed token, a token that does not hash-match any
+ * device, or a token for a *different* user than the one claimed — collapses to the
+ * same `null`, for the same reason `authenticate()` collapses HTTP failures: nothing
+ * here should let a caller distinguish "wrong secret" from "right user, wrong secret"
+ * from "no such user".
+ */
+export async function authenticateDeviceLinkRequest(req: IncomingMessage): Promise<string | null> {
+  const url = new URL(req.url ?? "", "http://internal");
+  const claimedUserId = url.searchParams.get("user_id");
+  if (claimedUserId === null || claimedUserId.length === 0) return null;
+
+  const header = req.headers.authorization;
+  if (typeof header !== "string") return null;
+  const match = /^Bearer\s+(.+)$/i.exec(header.trim());
+  const token = match?.[1];
+  if (token === undefined || token.length === 0) return null;
+
+  const auth = await bootstrapLookups.authenticateDeviceToken(token);
+  if (auth === null) return null;
+  if (auth.scope.user_id !== claimedUserId) return null; // token for A, claiming to be B
+
+  return auth.scope.user_id;
+}
+
+/**
+ * The old default, kept only as an explicit, name-it-yourself opt-in for tests (and any
+ * local/dev harness) that do not want to stand up real device tokens. **Never wire this
+ * in as a default again** — trusting `?user_id=` with no proof is exactly the hole this
+ * file used to have: any client could claim any user and receive that user's
+ * device-search results.
+ */
+export function insecureDevUserIdFromQueryParam(req: IncomingMessage): string | null {
   const url = new URL(req.url ?? "", "http://internal");
   const userId = url.searchParams.get("user_id");
   return userId !== null && userId.length > 0 ? userId : null;

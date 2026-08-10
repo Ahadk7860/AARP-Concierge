@@ -1,8 +1,26 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, beforeAll, afterAll } from "vitest";
 import { createServer, type Server } from "node:http";
-import { WebSocket, WebSocketServer } from "ws";
-import { unsafeScopeFromUserId } from "../../db/src/scope.js";
-import { DeviceGateway, attachDeviceGateway } from "./gateway.js";
+import { WebSocket } from "ws";
+import {
+  acquireSuiteLock,
+  closePool,
+  createUser,
+  deleteUser,
+  getPool,
+  migrate,
+  newDeviceId,
+  registerDevice,
+  releaseSuiteLock,
+  unsafeScopeFromUserId,
+  type UserScope,
+} from "../../db/src/index.js";
+import {
+  DeviceGateway,
+  attachDeviceGateway,
+  authenticateDeviceLinkRequest,
+  insecureDevUserIdFromQueryParam,
+  type DeviceSocket,
+} from "./gateway.js";
 import type { AskDeviceSearchRequest, AskDeviceSearchResponse } from "./protocol.js";
 
 /** A fake Mac: replies to every request it receives with a canned response. */
@@ -12,6 +30,38 @@ function fakeMac(reply: (request: AskDeviceSearchRequest) => AskDeviceSearchResp
     const response = reply(request);
     return response === null ? null : JSON.stringify(response);
   };
+}
+
+/** A minimal `DeviceSocket`-shaped fake with full control over ping/pong, so the
+ * heartbeat can be exercised without a real dead TCP connection (which `ws` answers
+ * automatically at the protocol level, making it untestable from here). */
+function fakeDeviceSocket(options: { respondToPing?: boolean } = {}): {
+  socket: DeviceSocket;
+  isTerminated: () => boolean;
+} {
+  const listeners: Record<string, Array<() => void>> = {};
+  let readyState: number = WebSocket.OPEN;
+  let terminated = false;
+  const socket: DeviceSocket = {
+    get readyState() {
+      return readyState;
+    },
+    send: (_data: string, cb?: (err?: Error) => void) => cb?.(),
+    on: ((event: string, listener: (...args: never[]) => void) => {
+      (listeners[event] ??= []).push(listener as () => void);
+    }) as DeviceSocket["on"],
+    ping: () => {
+      if (options.respondToPing ?? true) {
+        for (const l of listeners["pong"] ?? []) l();
+      }
+    },
+    terminate: () => {
+      terminated = true;
+      readyState = WebSocket.CLOSED;
+      for (const l of listeners["close"] ?? []) l();
+    },
+  };
+  return { socket, isTerminated: () => terminated };
 }
 
 describe("DeviceGateway — in-process socket pair (unit level)", () => {
@@ -34,15 +84,39 @@ describe("DeviceGateway — in-process socket pair (unit level)", () => {
     const gateway = new DeviceGateway();
     expect(gateway.hasConnection("usr_x")).toBe(false);
   });
+
+  it("heartbeat keeps a connection that answers pings marked live", async () => {
+    const gateway = new DeviceGateway({ heartbeatMs: 20 });
+    const { socket, isTerminated } = fakeDeviceSocket({ respondToPing: true });
+    gateway.register("usr_alive001", socket);
+    await new Promise((resolve) => setTimeout(resolve, 90)); // several heartbeat ticks
+    expect(isTerminated()).toBe(false);
+    expect(gateway.hasConnection("usr_alive001")).toBe(true);
+  });
+
+  it("heartbeat terminates a socket that never answers a ping, so hasConnection stops lying", async () => {
+    const gateway = new DeviceGateway({ heartbeatMs: 20 });
+    const { socket, isTerminated } = fakeDeviceSocket({ respondToPing: false });
+    gateway.register("usr_stale001", socket);
+    // First tick sends a ping (isAlive stays true for it); the *next* tick finds no
+    // pong arrived and terminates. Two ticks plus slack is enough.
+    await new Promise((resolve) => setTimeout(resolve, 90));
+    expect(isTerminated()).toBe(true);
+    expect(gateway.hasConnection("usr_stale001")).toBe(false);
+  });
 });
 
 describe("DeviceGateway — real WebSocket round trip", () => {
   async function withServer(
     run: (args: { server: Server; gateway: DeviceGateway; url: string }) => Promise<void>,
+    gatewayOptions: ConstructorParameters<typeof DeviceGateway>[0] = { timeoutMs: 300 },
   ): Promise<void> {
     const server = createServer();
-    const gateway = new DeviceGateway({ timeoutMs: 300 });
-    attachDeviceGateway(server, gateway);
+    const gateway = new DeviceGateway(gatewayOptions);
+    // Explicit opt-in: these tests exercise the transport/correlation logic, not auth,
+    // so they name the insecure dev resolver themselves rather than relying on any
+    // default doing it for them.
+    attachDeviceGateway(server, gateway, { resolveUserId: insecureDevUserIdFromQueryParam });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const address = server.address();
     if (address === null || typeof address === "string") throw new Error("no port");
@@ -208,5 +282,133 @@ describe("DeviceGateway — real WebSocket round trip", () => {
       expect(response.ok).toBe(true);
       mac.close();
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Real device-token auth against a live `boi_dev_d` — the actual security fix. One
+// database-touching file per track, serialised against `cloud/db/src/schema.test.ts`
+// and `cloud/api/src/ingest.test.ts` via the same advisory lock (see
+// `cloud/db/src/test-lock.ts`), since vitest runs test FILES in parallel.
+// ---------------------------------------------------------------------------
+describe("authenticateDeviceLinkRequest — real device tokens", () => {
+  const pool = getPool();
+  const createdScopes: UserScope[] = [];
+
+  // Random, not a counter: this file has no schema-dropping beforeAll of its own (that
+  // lives in cloud/db/src/schema.test.ts), so a deterministic phone number would collide
+  // with a row a previous `vitest run` left behind — same reason every other
+  // DB-touching test file in this repo (signup.test.ts, pipeline.test.ts,
+  // bridge.test.ts, scheduler.test.ts, turns.test.ts) randomises its phone numbers.
+  function randomPhone(): string {
+    return `+1559${String(Math.floor(Math.random() * 9_000_000 + 1_000_000))}`;
+  }
+
+  async function newAccount(): Promise<{ userId: string; token: string }> {
+    const { scope } = await createUser({ phone_e164: randomPhone() });
+    createdScopes.push(scope);
+    const { device_token } = await registerDevice(scope, {
+      device_id: newDeviceId(),
+      platform: "test",
+    });
+    return { userId: scope.user_id, token: device_token };
+  }
+
+  function fakeUpgradeRequest(url: string, headers: Record<string, string> = {}) {
+    return { url, headers } as unknown as import("node:http").IncomingMessage;
+  }
+
+  beforeAll(async () => {
+    await acquireSuiteLock();
+    await migrate(pool);
+  }, 120_000);
+
+  afterAll(async () => {
+    for (const scope of createdScopes) {
+      await deleteUser(scope);
+    }
+    await closePool();
+    await releaseSuiteLock();
+  });
+
+  it("accepts a valid device token whose claimed user_id matches the token's own user", async () => {
+    const account = await newAccount();
+    const req = fakeUpgradeRequest(`/v1/device-link?user_id=${account.userId}`, {
+      authorization: `Bearer ${account.token}`,
+    });
+    await expect(authenticateDeviceLinkRequest(req)).resolves.toBe(account.userId);
+  });
+
+  it("rejects when the Authorization header is missing entirely", async () => {
+    const account = await newAccount();
+    const req = fakeUpgradeRequest(`/v1/device-link?user_id=${account.userId}`);
+    await expect(authenticateDeviceLinkRequest(req)).resolves.toBeNull();
+  });
+
+  it("rejects a malformed / forged token", async () => {
+    const account = await newAccount();
+    const req = fakeUpgradeRequest(`/v1/device-link?user_id=${account.userId}`, {
+      authorization: "Bearer garbage",
+    });
+    await expect(authenticateDeviceLinkRequest(req)).resolves.toBeNull();
+
+    const forged = fakeUpgradeRequest(`/v1/device-link?user_id=${account.userId}`, {
+      authorization: `Bearer ${account.userId}.not-the-real-secret`,
+    });
+    await expect(authenticateDeviceLinkRequest(forged)).resolves.toBeNull();
+  });
+
+  it("rejects a token for user A claiming to be user B (cross-user IDOR)", async () => {
+    const userA = await newAccount();
+    const userB = await newAccount();
+    const req = fakeUpgradeRequest(`/v1/device-link?user_id=${userB.userId}`, {
+      authorization: `Bearer ${userA.token}`, // A's real token, claiming B
+    });
+    await expect(authenticateDeviceLinkRequest(req)).resolves.toBeNull();
+  });
+
+  it("rejects when no user_id is claimed at all, even with a valid token", async () => {
+    const account = await newAccount();
+    const req = fakeUpgradeRequest("/v1/device-link", {
+      authorization: `Bearer ${account.token}`,
+    });
+    await expect(authenticateDeviceLinkRequest(req)).resolves.toBeNull();
+  });
+
+  it("end to end: the real default resolver rejects an upgrade with no token, and accepts one with a valid token", async () => {
+    const account = await newAccount();
+    const server = createServer();
+    const gateway = new DeviceGateway();
+    attachDeviceGateway(server, gateway); // no override: exercises the real default
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (address === null || typeof address === "string") throw new Error("no port");
+    const url = `ws://127.0.0.1:${address.port}/v1/device-link`;
+
+    try {
+      // No auth at all -> rejected.
+      const anon = new WebSocket(`${url}?user_id=${account.userId}`);
+      const anonOutcome = await new Promise<"open" | "closed">((resolve) => {
+        anon.on("open", () => resolve("open"));
+        anon.on("close", () => resolve("closed"));
+        anon.on("error", () => resolve("closed"));
+      });
+      expect(anonOutcome).toBe("closed");
+      expect(gateway.hasConnection(account.userId)).toBe(false);
+
+      // Valid bearer token -> accepted.
+      const authed = new WebSocket(`${url}?user_id=${account.userId}`, {
+        headers: { authorization: `Bearer ${account.token}` },
+      });
+      await new Promise<void>((resolve, reject) => {
+        authed.on("open", () => resolve());
+        authed.on("error", reject);
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(gateway.hasConnection(account.userId)).toBe(true);
+      authed.close();
+    } finally {
+      server.close();
+    }
   });
 });
