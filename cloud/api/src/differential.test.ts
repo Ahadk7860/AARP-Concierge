@@ -25,7 +25,7 @@ import { join } from "node:path";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import type { ValidateFunction } from "ajv";
 import type { ZodType } from "zod";
-import { digestSchema, voicePackSchema, chatReplyV2Schema, chatRouteV1Schema } from "./schemas.js";
+import { digestSchema, voicePackSchema, chatReplyV2Schema, chatRouteV1Schema, heartbeatSchema } from "./schemas.js";
 import type { ChatReplyV2 } from "../../shared/src/contracts.js";
 
 const SCHEMA_DIR = join(process.cwd(), "contracts", "schema");
@@ -438,6 +438,68 @@ function chatRouteCases(): Array<{ label: string; doc: unknown }> {
   return cases;
 }
 
+/**
+ * `messages_access_state` — the field that once could not reach the cloud at all,
+ * because the OLD inline heartbeat schema in `boi-api.v1.yaml` set
+ * `additionalProperties: false` with no room for it, and every real heartbeat that
+ * carried it got a 400. Additive and optional is the whole fix, so the cases below
+ * probe exactly that: present with every value the frozen schema allows, present with
+ * one it does not, and — the case that proves "optional" rather than merely "not yet
+ * required" — absent entirely, same as every heartbeat sent before this field existed.
+ *
+ * The enum is read from the frozen schema itself, same reasoning as `digestV2Cases`:
+ * a member added to `heartbeat.v1.json` is covered here without editing this file.
+ */
+const BASE_HEARTBEAT = {
+  device_id: "dev_abcdefgh",
+  app_version: "0.1.0",
+  digest_as_of: "2026-08-01T09:14:00Z",
+} as const;
+
+function heartbeatCases(): Array<{ label: string; doc: unknown }> {
+  const cases: Array<{ label: string; doc: unknown }> = [
+    { label: "minimal", doc: BASE_HEARTBEAT },
+    { label: "null digest_as_of", doc: { ...BASE_HEARTBEAT, digest_as_of: null } },
+    {
+      label: "fully populated",
+      doc: { ...BASE_HEARTBEAT, macos_version: "26.0", fda_granted: true, messages_access_state: "ok" },
+    },
+  ];
+
+  // Required-key removal: each of the three required keys, dropped in turn, must be
+  // invalid in BOTH validators.
+  for (const key of Object.keys(BASE_HEARTBEAT)) {
+    const doc = clone(BASE_HEARTBEAT) as Record<string, unknown>;
+    delete doc[key];
+    cases.push({ label: `without ${key}`, doc });
+  }
+
+  // Every member the frozen schema permits for messages_access_state, plus one it does
+  // not. A member the zod mirror is missing shows up as ajv VALID / zod invalid; a
+  // member the zod mirror over-accepts shows up the other way.
+  const schema = JSON.parse(
+    readFileSync(join(SCHEMA_DIR, "heartbeat.v1.json"), "utf8"),
+  ) as { properties: Record<string, { enum?: string[] }> };
+  const stateEnum = schema.properties["messages_access_state"]?.enum ?? [];
+  for (const member of [...stateEnum, "not_a_member"]) {
+    cases.push({
+      label: `messages_access_state = ${member}`,
+      doc: { ...BASE_HEARTBEAT, messages_access_state: member },
+    });
+  }
+
+  // Absent entirely — the axis that proves optional, not just "not required yet". Every
+  // case above except this one carries the key; this is the pre-existing-Mac shape.
+  cases.push({ label: "no messages_access_state key", doc: { ...BASE_HEARTBEAT } });
+
+  // Junk key at the root — `additionalProperties: false` is what made this field
+  // impossible to add without a schema change in the first place, so the differential
+  // must keep proving it still holds.
+  cases.push({ label: "junk key", doc: { ...BASE_HEARTBEAT, totally_unexpected: 1 } });
+
+  return cases;
+}
+
 function differential(
   name: string,
   zod: ZodType<unknown>,
@@ -466,6 +528,7 @@ describe("the zod mirror agrees with the frozen JSON Schema, decision for decisi
     expect(voicePackCases().length).toBeGreaterThan(15);
     expect(chatReplyV2Cases().length).toBeGreaterThan(10);
     expect(chatRouteCases().length).toBeGreaterThan(8);
+    expect(heartbeatCases().length).toBeGreaterThan(5);
   });
 
   it("agrees on every digest case", () => {
@@ -518,6 +581,10 @@ describe("the zod mirror agrees with the frozen JSON Schema, decision for decisi
 
   it("agrees on every chat_route.v1 case, including the lane/intent conditional", () => {
     differential("chat_route.v1", chatRouteV1Schema, compile("chat_route.v1.json"), chatRouteCases());
+  });
+
+  it("agrees on every heartbeat case", () => {
+    differential("heartbeat", heartbeatSchema, compile("heartbeat.v1.json"), heartbeatCases());
   });
 
   it("would notice a disagreement — the differential is not vacuous", () => {

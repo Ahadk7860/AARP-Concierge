@@ -59,29 +59,12 @@ paths:
         required: true
         content:
           application/json:
-            schema:
-              type: object
-              additionalProperties: false
-              # AMENDMENT-003: `digest_as_of` is REQUIRED AND NULLABLE.
-              #
-              # At the moment Full Disk Access is granted no sync has ever run, so the
-              # grant heartbeat by definition precedes the first digest. The old shape
-              # encoded an assumption nobody stated -- that a heartbeat always follows a
-              # digest -- and the only ways to satisfy it were to fabricate a timestamp
-              # (which reports a Mac that produced nothing as having produced something
-              # now) or to skip the heartbeat entirely.
-              #
-              # Required and nullable rather than optional, deliberately: `null` is a
-              # CLAIM -- "this device has never synced" -- and an absent field is a
-              # producer that forgot. A widening; every document that validates today
-              # still validates.
-              required: [device_id, app_version, digest_as_of]
-              properties:
-                device_id: { type: string }
-                app_version: { type: string }
-                digest_as_of: { type: [string, "null"], format: date-time }
-                macos_version: { type: string }
-                fda_granted: { type: boolean }
+            # Was inline here, the one endpoint on this document without a file in
+            # contracts/schema/ backing it — which meant differential.test.ts (it only
+            # ever reads contracts/schema/*.json) had never once checked the zod mirror
+            # against this shape. Extracted to ../schema/heartbeat.v1.json, same as
+            # every other request body below, so it gets the same guarantee.
+            schema: { $ref: "../schema/heartbeat.v1.json" }
       responses:
         "204": { description: ok }
         "401": { $ref: "#/components/responses/Unauthorized" }

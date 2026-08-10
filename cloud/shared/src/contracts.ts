@@ -78,6 +78,22 @@ export type VoicePackV2 = Omit<VoicePack, "schema_version" | "exemplars"> & {
   schema_version: "voice_pack.v2"; exemplars: ContextualExemplar[];
 };
 
+/**
+ * POST /v1/heartbeat body. Backed by `contracts/schema/heartbeat.v1.json`.
+ *
+ * `messages_access_state` reports whether the Mac can currently resolve the
+ * security-scoped bookmark to the user's Messages folder — additive and optional, so a
+ * heartbeat that omits it (every Mac build before this field existed) still validates.
+ * `lost` is the state that used to reach only a local macOS notification and never the
+ * cloud; see `messages-access-alert.ts` for what the API does with it.
+ */
+export type HeartbeatPayload = {
+  device_id: string; app_version: string;
+  digest_as_of: ISO8601 | null;
+  macos_version?: string; fda_granted?: boolean;
+  messages_access_state?: "never_configured" | "ok" | "lost";
+};
+
 /** The model may select only this named query during Phase 2. */
 export type ChatQuery = { schema_version: "chat_query.v1"; name: "waiting_on_me"; limit?: number };
 export type DraftDelivery = {

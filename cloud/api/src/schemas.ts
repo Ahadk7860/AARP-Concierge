@@ -8,6 +8,7 @@
 import { z } from "zod";
 import { ID_PATTERNS, VOICE_PACK_LIMITS } from "./contract-limits.js";
 import type { ChatReplyV2 as SharedChatReplyV2 } from "../../shared/src/contracts.js";
+import type { HeartbeatPayload } from "../../shared/src/index.js";
 
 /** CONTRACTS.md § 6: ISO 8601 UTC with a `Z`, at every boundary. No epoch integers. */
 export const isoUtc = z
@@ -413,5 +414,29 @@ export const heartbeatSchema = z
     digest_as_of: isoUtc.nullable(),
     macos_version: z.string().optional(),
     fda_granted: z.boolean().optional(),
+    // ADDITIVE, optional. Absent is what every heartbeat sent before this field existed
+    // looks like, and it must keep validating exactly as it did — `.optional()`, never a
+    // bare `z.enum`, is what makes that true. The Mac side was reverted to not send this
+    // once, after `additionalProperties: false` on the old inline heartbeat schema
+    // turned every real heartbeat into a 400; the shape here and in
+    // `contracts/schema/heartbeat.v1.json` is the fix, and `differential.test.ts` is
+    // what proves the two agree rather than merely resemble each other.
+    messages_access_state: z.enum(["never_configured", "ok", "lost"]).optional(),
   })
   .strict();
+
+// The bidirectional check this file's header promises for every hand-mirrored shape,
+// applied here explicitly: `z.infer<typeof heartbeatSchema>` and `HeartbeatPayload`
+// (cloud/shared/src/contracts.ts, generated from the SAME frozen schema) must describe
+// exactly the same set of keys, with exactly the same optionality — not a subset in
+// either direction. `AssertEqual` fails to compile, not merely to typecheck at a call
+// site, the moment one drifts from the other: add a field to one and forget the other,
+// and `_heartbeatSchemaMatchesSharedType` stops being assignable from `true`.
+type AssertEqual<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2
+  ? true
+  : never;
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+const _heartbeatSchemaMatchesSharedType: AssertEqual<
+  z.infer<typeof heartbeatSchema>,
+  HeartbeatPayload
+> = true;
