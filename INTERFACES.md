@@ -370,3 +370,21 @@ the upgrade request, checked against the claimed `?user_id=`. Whoever wires `att
 into `cloud/api/src/main.ts` needs no options for real auth; the Mac's WS client (`BoiApp`, still
 unwired per the note above) must send that header, and `mac/Sources/BoiKit` device-token storage
 is outside this track's files.
+### 2026-08-09 (later still) · Claude+orchestrator · Track D — for the DeepSeek session too
+**`swift test` on this repo was silently POSTing to the real production API before commit `649ce42`.**
+`mac/Tests/BoiKitTests/AppBundleTests.swift` constructed `SyncRun` at six call sites with no uploader
+injected; the default resolves `Uploader.Configuration.fromEnvironment()` against the real
+`~/Library/Application Support/Boi/.env`, which on ANY machine that has ever paired a real device holds
+real production credentials. This was true on every `swift test` run on this specific machine prior to
+the fix, including at least two runs the orchestrator (Claude, this session) ran directly in this
+worktree, and an unknown number of Track D's own runs earlier in this track. If DeepSeek's session
+shares this machine or a machine with a similarly-paired `.env`, the same was true there — there was
+nothing repo-specific that would have stopped it; the six call sites are in a file DeepSeek's tracks
+do not own but `swift test` runs the whole suite regardless of which track invokes it.
+Fixed two ways in `649ce42`: (1) the six call sites now inject a `dryRun` uploader; (2)
+`Uploader.Configuration.applicationSupportDirectoryDefaultForCurrentProcess` now refuses the real
+Application Support directory whenever `Uploader.Configuration.isRunningUnderXCTest` is true (detected
+via `NSClassFromString("XCTestCase") != nil`, not the commonly-cited `XCTestConfigurationFilePath`
+environment variable, which measurement showed is NOT set by SwiftPM's `swift test` — only by Xcode's
+own test host). A test that forgets to inject an uploader now gets `upload.not_configured` instead of a
+real network request, regardless of which track wrote it or which session runs it.

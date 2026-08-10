@@ -57,16 +57,62 @@ public struct Uploader: Sendable {
                 .appendingPathComponent("Library/Application Support/Boi").path
         }
 
+        /// **True inside `swift test` / Xcode's test runner.**
+        ///
+        /// First attempt was `XCTestConfigurationFilePath` in the environment — the
+        /// commonly-cited technique, and it IS set by Xcode's own test host, but
+        /// measurement (not assumption) showed it is **not** set by SwiftPM's `swift
+        /// test`, which is what this package actually uses: a real test run asserting
+        /// this returned `false`. Caught by the guard's own regression tests failing
+        /// immediately, which is exactly why they exist as tests and not only as a
+        /// doc comment claim.
+        ///
+        /// `NSClassFromString("XCTestCase") != nil` instead: true whenever the XCTest
+        /// framework is loaded into the process, which is true under Xcode, under
+        /// SwiftPM's `swift test`, and under CI, because all three link XCTest.framework
+        /// into the test binary itself rather than signalling through an environment
+        /// variable Xcode happens to set. Keeping the environment check too, OR'd in —
+        /// belt and suspenders for whichever invocation method sets which signal.
+        ///
+        /// This exists because of an incident, not a hypothetical: a test that constructs
+        /// `SyncRun` without injecting an uploader (six call sites existed in
+        /// `AppBundleTests.swift` alone) fell through to `fromEnvironment()`'s default
+        /// `applicationSupportDirectory`, which reads the REAL
+        /// `~/Library/Application Support/Boi/.env` — and on a developer machine that has
+        /// ever paired a real device, that file holds real production credentials. Every
+        /// unguarded `swift test` run was silently POSTing real heartbeats (and, per
+        /// `SyncRunUploadTests`' pre-existing failures, possibly digests) to the live API.
+        /// See `INTERFACES.md`'s entry recording this.
+        public static var isRunningUnderXCTest: Bool {
+            ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+                || NSClassFromString("XCTestCase") != nil
+        }
+
+        /// The default `applicationSupportDirectory` `fromEnvironment` actually resolves
+        /// to at each call site: the real directory outside a test process, but a
+        /// deliberately nonexistent one under XCTest, so the real `.env` fallback can
+        /// never fire by accident. A test that genuinely wants to exercise the real
+        /// installed-app path must pass `applicationSupportDirectory` explicitly — this
+        /// default cannot do it silently, which is exactly the property that failed
+        /// before.
+        public static var applicationSupportDirectoryDefaultForCurrentProcess: String {
+            isRunningUnderXCTest
+                ? "/nonexistent/boi-xctest-guard-never-read-real-config"
+                : defaultApplicationSupportDirectory
+        }
+
         /// Reads the process environment, then the installed app's `.env` in Application
         /// Support, then a developer's `.env` found by walking up from `directory`, then
         /// gives up.
         ///
         /// `applicationSupportDirectory` is injectable so tests can point it at an empty
-        /// temp directory instead of silently reading the developer's real config.
+        /// temp directory instead of silently reading the developer's real config — and
+        /// its default already refuses to be the real directory when running under
+        /// XCTest, so a test that forgets to inject anything at all still cannot reach it.
         public static func fromEnvironment(
             _ environment: [String: String] = ProcessInfo.processInfo.environment,
             searchingFrom directory: String = FileManager.default.currentDirectoryPath,
-            applicationSupportDirectory: String = defaultApplicationSupportDirectory,
+            applicationSupportDirectory: String = applicationSupportDirectoryDefaultForCurrentProcess,
             arguments: [String] = CommandLine.arguments
         ) -> Configuration? {
             let appSupportEnvFile = URL(fileURLWithPath: applicationSupportDirectory)
@@ -700,12 +746,14 @@ public struct EnvironmentTokenStore: TokenStore {
     let applicationSupportDirectory: String
 
     /// `applicationSupportDirectory` is injectable — defaults to the real
-    /// `~/Library/Application Support/Boi`, but tests pass an empty temp directory so they
-    /// never read the developer's actual device credentials off disk.
+    /// `~/Library/Application Support/Boi` outside a test process, but — same guard as
+    /// `Uploader.Configuration.fromEnvironment`, same incident — a deliberately
+    /// nonexistent path under XCTest, so a test that forgets to inject anything still
+    /// cannot read the developer's actual device credentials off disk.
     public init(environment: [String: String] = ProcessInfo.processInfo.environment,
                 searchingFrom directory: String = FileManager.default.currentDirectoryPath,
                 applicationSupportDirectory: String =
-                    Uploader.Configuration.defaultApplicationSupportDirectory) {
+                    Uploader.Configuration.applicationSupportDirectoryDefaultForCurrentProcess) {
         self.environment = environment
         self.directory = directory
         self.applicationSupportDirectory = applicationSupportDirectory
