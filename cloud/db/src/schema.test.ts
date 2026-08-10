@@ -9,7 +9,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { Digest, VoicePack, Brief, Relationship } from "../../shared/src/index.js";
+import type { Digest, DigestV2, VoicePack, Brief, Relationship } from "../../shared/src/index.js";
 import { getPool, closePool, withTransaction } from "./pool.js";
 import { migrate, rollbackAll, loadMigrations, MIGRATIONS_DIR } from "./migrate.js";
 import { acquireSuiteLock, releaseSuiteLock } from "./test-lock.js";
@@ -50,6 +50,8 @@ import {
   DuplicateDigestError,
 } from "./repository.js";
 import { enqueue, dequeue, completeJob } from "./queue.js";
+import { deriveV3FromDigest, personIdForContact } from "./derive-v3.js";
+import { processOneIngestJob } from "./ingest-worker.js";
 
 const FIXTURES = join(process.cwd(), "contracts", "fixtures");
 
@@ -822,6 +824,236 @@ describe("v3 ingest queue", () => {
 
     // Worker marks it done (not failed), per ingest-worker.ts:63-66.
     await completeJob(job!.job_id, { status: "done" });
+
+    await deleteUser(scope);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v3 derivation — proves the previously-orphaned pipeline: repository-v3.ts's write
+// functions (upsertPerson, upsertIdentity, insertInteractions, insertDailyMetrics)
+// had zero non-test callers before derive-v3.ts, so persons/identities/interactions/
+// relationship_metrics_daily were always empty and PostgresAgentStore always degraded.
+// These tests ingest a realistic digest and assert the v3 tables actually contain the
+// expected rows.
+// ---------------------------------------------------------------------------
+
+describe("v3 derivation", () => {
+  it("derives persons, identities, interactions and metrics from a v1 digest (5 relationships)", async () => {
+    const { scope } = await createUser({ phone_e164: nextPhone() });
+    const digest = await fixture<Digest>("digest", "healthy.json");
+    digest.user_id = scope.user_id;
+    const digestId = newDigestId();
+
+    // >1 row on purpose (5 relationships) — repository-v3.ts's batch inserts had an
+    // off-by-one that a single-row call hides entirely (batch-params.test.ts).
+    expect(digest.relationships.length).toBeGreaterThan(1);
+
+    await insertDigest(scope, { digest_id: digestId, digest });
+    const counts = await deriveV3FromDigest(scope, { digest_id: digestId, digest });
+
+    expect(counts).toEqual({ persons: 5, identities: 5, interactions: 5, metrics: 5 });
+
+    const maya = digest.relationships.find((r) => r.display === "Maya")!;
+    const personId = personIdForContact(maya.contact_id);
+
+    const personRow = await scopedQuery<{ display: string }>(
+      pool, scope, `select display from persons where user_id = $1 and person_id = $2`,
+      [scope.user_id, personId],
+    );
+    expect(personRow.rows[0]?.display).toBe("Maya");
+
+    const identityRow = await scopedQuery<{ source: string; handle: string; confidence: string }>(
+      pool, scope,
+      `select source, handle, confidence from identities where user_id = $1 and person_id = $2`,
+      [scope.user_id, personId],
+    );
+    expect(identityRow.rows[0]).toEqual({ source: "imessage", handle: maya.contact_id, confidence: "exact" });
+
+    const interactionRow = await scopedQuery<{
+      direction: string; length: number; occurred_at: string;
+      meta: { relationship_kind: string | null; message_count: number };
+    }>(
+      pool, scope,
+      `select direction, length, occurred_at, meta from interactions where user_id = $1 and person_id = $2`,
+      [scope.user_id, personId],
+    );
+    expect(interactionRow.rows).toHaveLength(1);
+    // received_count (653) > sent_count (551) for Maya.
+    expect(interactionRow.rows[0]?.direction).toBe("to_me");
+    expect(interactionRow.rows[0]?.length).toBe(maya.message_count);
+    // v1 digest carries no `understanding` — relationship_kind must not be invented.
+    expect(interactionRow.rows[0]?.meta.relationship_kind).toBeNull();
+    expect(interactionRow.rows[0]?.meta.message_count).toBe(maya.message_count);
+
+    const metricRow = await scopedQuery<{
+      message_count: number; momentum: number; initiation_ratio: number;
+      median_gap_days: number | null; response_latency_me_min: number; response_latency_them_min: number;
+      register: string | null;
+    }>(
+      pool, scope,
+      `select message_count, momentum, initiation_ratio, median_gap_days,
+              response_latency_me_min, response_latency_them_min, register
+       from relationship_metrics_daily where user_id = $1 and person_id = $2`,
+      [scope.user_id, personId],
+    );
+    expect(metricRow.rows[0]?.message_count).toBe(maya.message_count);
+    expect(metricRow.rows[0]?.momentum).toBeCloseTo(maya.momentum_90d, 6);
+    expect(metricRow.rows[0]?.initiation_ratio).toBeCloseTo(maya.initiation_ratio, 6);
+    // No cadence-gap field exists in the digest — must stay null, not invented.
+    expect(metricRow.rows[0]?.median_gap_days).toBeNull();
+    expect(metricRow.rows[0]?.response_latency_me_min).toBeCloseTo(maya.median_reply_latency_s!.user! / 60, 6);
+    expect(metricRow.rows[0]?.response_latency_them_min).toBeCloseTo(maya.median_reply_latency_s!.them! / 60, 6);
+    expect(metricRow.rows[0]?.register).toBeNull();
+
+    await deleteUser(scope);
+  });
+
+  it("is idempotent: re-running derivation for the same digest does not duplicate rows", async () => {
+    const { scope } = await createUser({ phone_e164: nextPhone() });
+    const digest = await fixture<Digest>("digest", "healthy.json");
+    digest.user_id = scope.user_id;
+    const digestId = newDigestId();
+
+    await insertDigest(scope, { digest_id: digestId, digest });
+    const first = await deriveV3FromDigest(scope, { digest_id: digestId, digest });
+    const second = await deriveV3FromDigest(scope, { digest_id: digestId, digest });
+
+    expect(first).toEqual({ persons: 5, identities: 5, interactions: 5, metrics: 5 });
+    // persons/identities/metrics upsert with `on conflict ... do update`, so the
+    // reported count stays 5 either run. interactions upserts with `do nothing`
+    // (interaction_id is deterministic per digest+person — see derive-v3.ts), so the
+    // second run's rowCount is correctly 0: that IS the idempotency, not a mismatch.
+    expect(second).toEqual({ persons: 5, identities: 5, interactions: 0, metrics: 5 });
+
+    const personCount = await scopedQuery<{ count: string }>(
+      pool, scope, `select count(*)::text as count from persons where user_id = $1`, [scope.user_id],
+    );
+    expect(personCount.rows[0]?.count).toBe("5");
+
+    const interactionCount = await scopedQuery<{ count: string }>(
+      pool, scope, `select count(*)::text as count from interactions where user_id = $1`, [scope.user_id],
+    );
+    expect(interactionCount.rows[0]?.count).toBe("5");
+
+    const metricCount = await scopedQuery<{ count: string }>(
+      pool, scope, `select count(*)::text as count from relationship_metrics_daily where user_id = $1`,
+      [scope.user_id],
+    );
+    expect(metricCount.rows[0]?.count).toBe("5");
+
+    await deleteUser(scope);
+  });
+
+  it("skips group threads — a group is not a single person", async () => {
+    const { scope } = await createUser({ phone_e164: nextPhone() });
+    const digest = await fixture<Digest>("digest", "healthy.json");
+    digest.user_id = scope.user_id;
+    const groupContactId = "h_cccc3333cccc";
+    digest.relationships = [
+      ...digest.relationships,
+      {
+        ...digest.relationships[0]!,
+        contact_id: groupContactId,
+        display: "Climbing crew",
+        is_group: true,
+      },
+    ];
+    const digestId = newDigestId();
+
+    await insertDigest(scope, { digest_id: digestId, digest });
+    const counts = await deriveV3FromDigest(scope, { digest_id: digestId, digest });
+
+    // Still 5, not 6 — the group row contributes nothing.
+    expect(counts).toEqual({ persons: 5, identities: 5, interactions: 5, metrics: 5 });
+
+    const groupPersonRow = await scopedQuery(
+      pool, scope, `select 1 from persons where user_id = $1 and display = $2`,
+      [scope.user_id, "Climbing crew"],
+    );
+    expect(groupPersonRow.rows).toHaveLength(0);
+
+    await deleteUser(scope);
+  });
+
+  it("carries understanding.relationship_kind and .register through from a v2 digest (2 relationships)", async () => {
+    const { scope } = await createUser({ phone_e164: nextPhone() });
+    const base = await fixture<DigestV2>("digest_v2", "understood.json");
+    const digest: DigestV2 = {
+      ...base,
+      user_id: scope.user_id,
+      relationships: [
+        {
+          ...base.relationships[0]!,
+          contact_id: "h_aaaa1111aaaa",
+          display: "Sam",
+          last_contact_at: "2026-07-30T10:00:00Z",
+          understanding: {
+            ...base.relationships[0]!.understanding,
+            relationship_kind: "close_friend",
+            register: "warm",
+          },
+        },
+        {
+          ...base.relationships[0]!,
+          contact_id: "h_bbbb2222bbbb",
+          display: "Jordan",
+          last_contact_at: "2026-07-29T10:00:00Z",
+          understanding: {
+            ...base.relationships[0]!.understanding,
+            relationship_kind: "work",
+            register: "terse",
+          },
+        },
+      ],
+    };
+    const digestId = newDigestId();
+
+    await insertDigest(scope, { digest_id: digestId, digest });
+    const counts = await deriveV3FromDigest(scope, { digest_id: digestId, digest });
+    expect(counts).toEqual({ persons: 2, identities: 2, interactions: 2, metrics: 2 });
+
+    const samId = personIdForContact("h_aaaa1111aaaa");
+    const interactionRow = await scopedQuery<{ meta: { relationship_kind: string | null } }>(
+      pool, scope, `select meta from interactions where user_id = $1 and person_id = $2`,
+      [scope.user_id, samId],
+    );
+    // relationship_kind has no v3 column (STATE_V2.md §6) — carried into meta instead
+    // of the bug this task exists to fix: silently discarding it.
+    expect(interactionRow.rows[0]?.meta.relationship_kind).toBe("close_friend");
+
+    const metricRow = await scopedQuery<{ register: string | null }>(
+      pool, scope, `select register from relationship_metrics_daily where user_id = $1 and person_id = $2`,
+      [scope.user_id, samId],
+    );
+    expect(metricRow.rows[0]?.register).toBe("warm");
+
+    await deleteUser(scope);
+  });
+
+  it("end to end: processOneIngestJob populates the v3 tables the agent path reads", async () => {
+    const { scope } = await createUser({ phone_e164: nextPhone() });
+    const digest = await fixture<Digest>("digest", "healthy.json");
+    digest.user_id = scope.user_id;
+    const digestId = newDigestId();
+
+    await enqueue("ingest", scope, {
+      digest_id: digestId,
+      digest,
+      first: true,
+      received_at: new Date().toISOString(),
+    });
+
+    const processed = await processOneIngestJob();
+    expect(processed).toBe(true);
+
+    // This is the assertion that proves the pipeline is no longer orphaned: before
+    // derive-v3.ts existed, these tables stayed empty forever regardless of how many
+    // digests were ingested.
+    const personCount = await scopedQuery<{ count: string }>(
+      pool, scope, `select count(*)::text as count from persons where user_id = $1`, [scope.user_id],
+    );
+    expect(Number(personCount.rows[0]?.count)).toBe(digest.relationships.length);
 
     await deleteUser(scope);
   });
