@@ -449,9 +449,22 @@ Three non-negotiables from `CONTENT_STORAGE.md`:
 3. **Keyword search first.** Naive vectors over 9.7 B messages at 100k users is ~58 TB. See
    `CONTENT_STORAGE.md` §2.3 for the tiering that makes it ~1 TB, and ship without it.
 
-Derivation stays in Swift on the Mac for now (`CONTENT_STORAGE.md` §4). Do **not** duplicate
-extraction logic in TypeScript — silent drift there produces wrong understanding rather than
-a loud 400.
+**Superseded.** An earlier draft of this section said derivation stays in Swift and must not be
+duplicated in TypeScript. `LANGUAGE_DECISION.md` and §6 supersede that: derivation ports to
+TypeScript under Track I, behind a differential harness that proves parity against the real
+420-relationship digest. Nine modules are ported and differentially green.
+
+The concern behind the old wording was right and still governs the work: two implementations of
+"what a relationship is" drift silently, and wrong understanding is worse than a loud 400. The
+answer is not to avoid the port — multi-source makes a Swift-only derivation impossible, since
+the Mac cannot derive Gmail relationships — but to keep exactly one implementation authoritative
+at a time. Swift stays authoritative until dual-run shows zero divergence, then the Swift
+derivation modules and `Contracts.swift` are **deleted**. A permanent dual-run would be the drift
+bug again, except silent.
+
+Two things gate cutover, both recorded in `INTERFACES.md`: the user's IANA timezone must reach
+the cloud (Swift reads `Calendar.current`; without it ~7% of relationships reclassify), and the
+differential harness only proves aggregates — a per-item function can be wrong and stay hidden.
 
 ---
 
