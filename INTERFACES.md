@@ -334,3 +334,39 @@ merge — HEAD's entries first, then origin/main's). `cloud/api/src/main.ts` and
 `package.json`/`package-lock.json` merged cleanly with no conflict markers. `cloud/shared/src/
 intents.ts` and `cloud/channel/src/progressive.ts` are now present — swapping both Track B
 stubs for the real imports next, per orchestrator's phase-2 scope.
+### 2026-08-09 · Claude · C
+No transport for §4.3 existed anywhere in the repo, so Track C built it: new package
+`cloud/device-search/` (`DeviceGateway`, `attachDeviceGateway`) holds the persistent cloud<->Mac
+WebSocket, request/response correlation by `id`, and the 4s timeout. `gateway.portFor(scope)`
+returns a `DeviceSearchPort` matching Track B's `cloud/agent/src/ports.ts` shape structurally
+(defined independently — that package doesn't exist in this worktree yet).
+
+### 2026-08-09 · Claude · C
+Added `ws` + `@types/ws` to root `package.json`/`package-lock.json` (smallest edit: two
+dependency lines) — no WebSocket library was installed anywhere. `npm ci` in another worktree
+needs these before `cloud/device-search` will typecheck/build.
+
+### 2026-08-09 · Claude · C
+`attachDeviceGateway`'s `resolveUserId` (`cloud/device-search/src/gateway.ts`) is a **dev
+placeholder** — it trusts a `?user_id=` query param with no auth. Whoever wires this into
+`cloud/api/src/main.ts` for real (Track H, or Track C later) must replace it with a real
+device-token check before this ships; do not carry the placeholder into production config.
+
+### 2026-08-09 · Claude · C
+Mac side: `mac/Sources/BoiKit/Search{Protocol,Index,RequestHandler}.swift` implement the
+`ask_device` "search" op end-to-end against the real, already-populated `message_fts` (verified:
+97,137 messages / 566 distinct handles in the real `mirror.db`, filtered FTS query ~1-2ms
+excluding CLI overhead). **Not wired into the app** — `mac/Sources/BoiApp` (Track D's file) still
+needs a WebSocket client that connects to `wss://.../v1/device-link`, decodes
+`AskDeviceSearchRequest`, calls `SearchRequestHandler.handle(_:)`, and encodes the response back.
+`SearchRequestHandler`/`SearchIndex` are the pure, already-tested logic; only the socket plumbing
+in `BoiApp` remains, and Track C did not touch that file per the ownership rule.
+
+### 2026-08-10 · Claude · C
+Closed the `resolveUserId` auth hole noted above: the default is now
+`authenticateDeviceLinkRequest` (`cloud/device-search/src/gateway.ts`), which reuses
+`bootstrapLookups.authenticateDeviceToken` and requires `Authorization: Bearer <device_token>` on
+the upgrade request, checked against the claimed `?user_id=`. Whoever wires `attachDeviceGateway`
+into `cloud/api/src/main.ts` needs no options for real auth; the Mac's WS client (`BoiApp`, still
+unwired per the note above) must send that header, and `mac/Sources/BoiKit` device-token storage
+is outside this track's files.
