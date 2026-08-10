@@ -70,8 +70,21 @@ export function personIdForContact(contact_id: string): string {
  * `on conflict (user_id, interaction_id) do nothing` in insertInteractions makes the
  * re-run a no-op instead of a duplicate.
  */
-function deterministicInteractionId(digest_id: string, person_id: string): string {
-  const digest = createHash("sha256").update(`${digest_id}:${person_id}`).digest("hex");
+function deterministicInteractionId(person_id: string, occurred_at: Date): string {
+  // Keyed on the EVENT (person + when it happened), never on digest_id.
+  //
+  // It was keyed on digest_id, and every sync mints a fresh digest_id — so the same
+  // "last contact with this person" event got a brand new interaction_id on every sync
+  // and `on conflict (user_id, interaction_id) do nothing` never fired. It deduped
+  // within one digest and never across digests, so `interactions` grew by one row per
+  // relationship per sync, all describing one event. Anything counting interactions
+  // would have drifted upward forever.
+  //
+  // Person + occurred_at is stable across re-uploads of the same underlying event, which
+  // is what makes the on-conflict clause actually do its job.
+  const digest = createHash("sha256")
+    .update(`${person_id}:${occurred_at.toISOString()}`)
+    .digest("hex");
   return `ia_${digest.slice(0, 32)}`;
 }
 
@@ -141,7 +154,7 @@ export async function deriveV3FromDigest(
 
       if (r.last_contact_at !== null && r.last_contact_at !== undefined) {
         interactionRows.push({
-          interaction_id: deterministicInteractionId(input.digest_id, person_id),
+          interaction_id: deterministicInteractionId(person_id, new Date(r.last_contact_at)),
           person_id,
           source: "imessage",
           direction: r.sent_count >= r.received_count ? "from_me" : "to_me",

@@ -909,6 +909,33 @@ describe("v3 derivation", () => {
     await deleteUser(scope);
   });
 
+  it("does not duplicate interactions across SEPARATE syncs of the same event", async () => {
+    // The real shape of a re-upload: every sync mints a NEW digest_id for the same
+    // underlying "last contact" event. The test above re-used one digest_id, which is why
+    // it passed while interaction_id was keyed on digest_id and a fresh row landed on
+    // every single sync. `interactions` grew by one row per relationship per sync, all
+    // describing one event, and anything counting interactions drifted upward forever.
+    const { scope } = await createUser({ phone_e164: nextPhone() });
+    const digest = await fixture<Digest>("digest", "healthy.json");
+    digest.user_id = scope.user_id;
+
+    const firstId = newDigestId();
+    await insertDigest(scope, { digest_id: firstId, digest });
+    await deriveV3FromDigest(scope, { digest_id: firstId, digest });
+
+    const secondId = newDigestId();
+    expect(secondId).not.toBe(firstId);
+    const second = await deriveV3FromDigest(scope, { digest_id: secondId, digest });
+
+    // Same people, same last_contact_at — a different digest_id must not mint new rows.
+    expect(second.interactions).toBe(0);
+
+    const rows = await scopedQuery<{ count: string }>(
+      pool, scope, `select count(*)::text as count from interactions where user_id = $1`, [scope.user_id],
+    );
+    expect(rows.rows[0]?.count).toBe("5");
+  });
+
   it("is idempotent: re-running derivation for the same digest does not duplicate rows", async () => {
     const { scope } = await createUser({ phone_e164: nextPhone() });
     const digest = await fixture<Digest>("digest", "healthy.json");
