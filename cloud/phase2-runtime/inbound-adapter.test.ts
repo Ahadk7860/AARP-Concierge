@@ -1,13 +1,15 @@
 import { describe, expect, it } from "vitest";
-import type { InboundMessage, UserScope } from "../../shared/src/index.js";
+import type { InboundMessage } from "../shared/src/index.js";
+import type { UserScope } from "../db/src/index.js";
+import { unsafeScopeFromUserId } from "../db/src/index.js";
 import {
   DeterministicIntentAdapter,
   AutoSetupUserCreator,
 } from "./inbound-adapter.js";
 import type { SetupUserCreator } from "../inbound/router.js";
 import { InboundRouter, SETUP_TOKEN } from "../inbound/router.js";
-import type { SpectrumStreamEvent } from "../../channel/src/spectrum-stream.js";
-import { StubChannel } from "../../shared/src/index.js";
+import type { SpectrumStreamEvent } from "../channel/src/spectrum-stream.js";
+import { StubChannel } from "../shared/src/index.js";
 
 // ---------------------------------------------------------------------------
 // DeterministicIntentAdapter — boi-setup welcome
@@ -30,7 +32,7 @@ function inboundMsg(text: string): InboundMessage {
   };
 }
 
-const scope: UserScope = { user_id: "usr_test001" };
+const scope: UserScope = unsafeScopeFromUserId("usr_test001");
 
 describe("DeterministicIntentAdapter", () => {
   const adapter = new DeterministicIntentAdapter();
@@ -38,14 +40,18 @@ describe("DeterministicIntentAdapter", () => {
   it("returns handled with welcome for boi-setup", async () => {
     const result = await adapter.route(inboundMsg("boi-setup"), scope);
     expect(result.kind).toBe("handled");
-    expect(result.intent).toBe("auto_setup");
-    expect(result.reply_text).toContain("all set");
+    if (result.kind === "handled") {
+      expect(result.intent).toBe("auto_setup");
+      expect(result.reply_text).toContain("all set");
+    }
   });
 
   it("returns handled for boi-setup with extra text", async () => {
     const result = await adapter.route(inboundMsg("boi-setup please"), scope);
     expect(result.kind).toBe("handled");
-    expect(result.intent).toBe("auto_setup");
+    if (result.kind === "handled") {
+      expect(result.intent).toBe("auto_setup");
+    }
   });
 
   it("returns unhandled for normal messages", async () => {
@@ -56,7 +62,9 @@ describe("DeterministicIntentAdapter", () => {
   it("returns handled for 6-digit pairing code", async () => {
     const result = await adapter.route(inboundMsg("123456"), scope);
     expect(result.kind).toBe("handled");
-    expect(result.intent).toBe("pairing_code");
+    if (result.kind === "handled") {
+      expect(result.intent).toBe("pairing_code");
+    }
   });
 });
 
@@ -77,7 +85,7 @@ describe("SETUP_TOKEN matching", () => {
 describe("InboundRouter with setupUser", () => {
   const stubSetup: SetupUserCreator = {
     async createFromSetup(_message: InboundMessage): Promise<UserScope | null> {
-      return { user_id: "usr_auto_created" };
+      return unsafeScopeFromUserId("usr_auto_created");
     },
   };
 
@@ -113,7 +121,7 @@ describe("InboundRouter with setupUser", () => {
       },
       privateStore: {
         async canonicalOutcomeFor() { return null; },
-        async claimCanonicalOutcome(input) {
+        async claimCanonicalOutcome(_input: unknown) {
           return { claimed: true, outcome: { event_key: "k1", delivery_key: "dk1", delivery_status: "pending" as const, outbound_text: "welcome from test" } };
         },
         async markOutcomeDelivered() { /* no-op */ },
@@ -122,7 +130,6 @@ describe("InboundRouter with setupUser", () => {
 
     const event: SpectrumStreamEvent = {
       id: "evt_001",
-      type: "message",
       payload: { text: "boi-setup" },
       cursor: "cursor_001",
     };
@@ -147,7 +154,6 @@ describe("InboundRouter with setupUser", () => {
 
     const event: SpectrumStreamEvent = {
       id: "evt_002",
-      type: "message",
       payload: { text: "boi-setup" },
       cursor: "cursor_002",
     };
