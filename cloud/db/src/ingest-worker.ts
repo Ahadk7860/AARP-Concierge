@@ -7,6 +7,7 @@
 import { getPool, type Queryable } from "./pool.js";
 import { dequeue, completeJob, retryJob } from "./queue.js";
 import { insertDigest, latestDigest, DuplicateDigestError } from "./repository.js";
+import { deriveV3FromDigest } from "./derive-v3.js";
 import { unsafeScopeFromUserId } from "./scope.js";
 import type { Digest, DigestV2, OutboundMessage, SendResult } from "../../shared/src/contracts.js";
 
@@ -45,6 +46,29 @@ export async function processOneIngestJob(
     const first = existing === null;
 
     await insertDigest(scope, { digest_id, digest });
+
+    // Populate the v3 person-centric tables (persons/identities/interactions/
+    // relationship_metrics_daily) that PostgresAgentStore reads. Deliberately its own
+    // transaction, deliberately swallowed on failure — see derive-v3.ts's file header
+    // for why: the digest itself must never be lost to a bug in this newer, less
+    // exercised derivation path. A failure here leaves the v3 cache stale until the
+    // next digest, not the digest ingest failed or retried forever (a retry would hit
+    // DuplicateDigestError on insertDigest and never reach derivation again).
+    try {
+      await deriveV3FromDigest(scope, { digest_id, digest });
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      process.stderr.write(
+        JSON.stringify({
+          level: "error",
+          msg: "v3_derivation_failed",
+          job_id: job.job_id,
+          user_id: job.user_id,
+          digest_id,
+          error: errorMsg,
+        }) + "\n",
+      );
+    }
 
     // First sync offer — same as the old inline path, but async now.
     if (first && deps.channel !== undefined) {
