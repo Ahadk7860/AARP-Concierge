@@ -12,6 +12,7 @@ import type { AgentModelProvider, EscalationProvider } from "./agent-loop.js";
 import type { AgentStore } from "./ports.js";
 import { DegradedDeviceSearchPort, type DeviceSearchPort } from "./ports.js";
 import { NullApprovalTokenStore, type ApprovalTokenStore, type SendPort } from "./tools.js";
+import { PostgresAgentStore } from "./postgres-agent-store.js";
 
 /** BOI_AGENT_PATH_ENABLED=1 gates the v3 agent path. Absent or any other value = disabled,
  * so a misconfigured deploy fails closed to the proven-live selector/reply/waiting-on-me
@@ -52,8 +53,8 @@ export function buildAgentRuntime(env: NodeJS.ProcessEnv = process.env): AgentRu
   };
 }
 
-/** Placeholder ports for local/dev use before Track E's tables and Track C's device link
- * are wired in for real. Never used when agentPathEnabledFromEnv() is false. */
+/** Placeholder ports for local/dev use before Track C's device link is wired in for real.
+ * Never used when agentPathEnabledFromEnv() is false. */
 export type UnwiredPorts = {
   deviceSearch: DeviceSearchPort;
   approvals: ApprovalTokenStore;
@@ -61,6 +62,24 @@ export type UnwiredPorts = {
 
 export function unwiredPorts(): UnwiredPorts {
   return { deviceSearch: new DegradedDeviceSearchPort(), approvals: new NullApprovalTokenStore() };
+}
+
+/**
+ * Track E's §4.1 tables (persons/identities/interactions/open_loops/
+ * relationship_metrics_daily/relationship_edges/memories) are merged, so `AgentStore` now
+ * has a real Postgres-backed implementation — `PostgresAgentStore` (postgres-agent-store.ts).
+ * This is the one place that should be reached for when a caller needs a real store; it
+ * replaces the `InMemoryAgentStore` placeholder that `ports.ts` still exports (kept there
+ * deliberately — the test suite depends on it, see ports.ts's header).
+ *
+ * NOT wired further than this file: `cloud/phase2-runtime/compose-runtime.ts` currently
+ * constructs `new InMemoryAgentStore()` directly for `AgentClosedChatBridgeDeps.store`
+ * (inbound-bridge.ts), and that file is outside this track's edit boundary
+ * (cloud/phase2-runtime/** stays owned by Track H). Swapping that one call site to
+ * `agentStoreFromEnv()` is Track H's follow-up, not a change this file can make on its own.
+ */
+export function agentStoreFromEnv(): AgentStore {
+  return new PostgresAgentStore();
 }
 
 export type { AgentStore, SendPort };
