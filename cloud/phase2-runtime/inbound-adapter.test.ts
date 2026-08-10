@@ -32,7 +32,7 @@ function inboundMsg(text: string): InboundMessage {
   };
 }
 
-const scope: UserScope = unsafeScopeFromUserId("usr_test001");
+const scope: UserScope = unsafeScopeFromUserId("usr_test0001");
 
 describe("DeterministicIntentAdapter", () => {
   const adapter = new DeterministicIntentAdapter();
@@ -85,7 +85,7 @@ describe("SETUP_TOKEN matching", () => {
 describe("InboundRouter with setupUser", () => {
   const stubSetup: SetupUserCreator = {
     async createFromSetup(_message: InboundMessage): Promise<UserScope | null> {
-      return unsafeScopeFromUserId("usr_auto_created");
+      return unsafeScopeFromUserId("usr_autocreated1");
     },
   };
 
