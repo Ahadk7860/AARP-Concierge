@@ -495,7 +495,36 @@ const CAPABILITY_HINT =
  * rather than to silence, and never surfaces internal hashed IDs to the user. When there is
  * nothing groundable to restate, the decline still redirects to real capabilities rather
  * than dead-ending (Task 2) — it never invents a capability or names an ungrounded person. */
+/**
+ * A pure general-knowledge turn degrades for a reason that is NOT a fabrication risk, and it
+ * must not be dressed up as one.
+ *
+ * `extractClaims` flags any capitalized word as a name-kind claim, and `general` deliberately
+ * grounds zero name claims (see the I2 note above) — so "New York in August" trips the gate on
+ * two ordinary proper nouns and the whole answer falls to degrade. The information is fine; the
+ * apology in front of it is what makes a correct answer read as a malfunction.
+ *
+ * This returns `general`'s own text verbatim when EVERY tool call this turn was `general`. That
+ * is the same text the generic degrade path would have quoted, minus the misleading preamble.
+ *
+ * Safety: this is gated on there being NO person-scoped tool call in the turn. If any
+ * relationship/loop/memory tool ran, this path does not apply and the strict degrade stands, so
+ * a general answer can still never launder a claim about a real person in the user's life.
+ */
+function generalOnlyAnswer(calls: readonly ToolCallRecord[]): string | null {
+  if (calls.length === 0) return null;
+  if (!calls.every((c) => c.tool === "general")) return null;
+  const texts: string[] = [];
+  for (const c of calls) {
+    const answer = (c.output as Record<string, unknown>)["answer"];
+    if (typeof answer === "string" && answer.trim() !== "") texts.push(answer.trim());
+  }
+  return texts.length > 0 ? texts.join(" ") : null;
+}
+
 export function defaultDegrade(calls: readonly ToolCallRecord[]): string {
+  const generalOnly = generalOnlyAnswer(calls);
+  if (generalOnly !== null) return generalOnly;
   const summary = renderGroundedSummary(calls);
   if (summary === "") {
     return `I couldn't verify an answer to that from anything I looked up this turn. ${CAPABILITY_HINT}`;
