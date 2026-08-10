@@ -388,3 +388,37 @@ via `NSClassFromString("XCTestCase") != nil`, not the commonly-cited `XCTestConf
 environment variable, which measurement showed is NOT set by SwiftPM's `swift test` — only by Xcode's
 own test host). A test that forgets to inject an uploader now gets `upload.not_configured` instead of a
 real network request, regardless of which track wrote it or which session runs it.
+### 2026-08-10 · Claude · J — §4.2 `relationship_state`'s `lifecycle_stage`/`relationship_kind` have no v3 backing column
+`V3_ARCHITECTURE.md` §4.2 keys `relationship_state` by `person_id`, but `lifecycle_stage` exists
+only on the OLD `contact_id`-keyed `relationships` table (migration 020, plain `text`, no writer
+anywhere — verified: fully unpopulated). `relationship_kind` has never been a column anywhere —
+verified via grep of every file in `cloud/db/migrations/`. Not implemented as specified; reporting
+per this track's scope, not fixing.
+
+### 2026-08-10 · Claude · J — which table(s) would need the columns, and what would populate them
+`relationship_metrics_daily` (migration 019, `person_id`-keyed — persons/identities/interactions'
+actual successor to `relationships`) is the right home for both, not `relationships` again.
+`relationship_kind` already has a live source that goes nowhere today: digest.v2's per-relationship
+`understanding.relationship_kind` enum (`contracts/schema/digest.v2.json`, mirrored in
+`cloud/shared/src/contracts.ts`'s `RelationshipUnderstanding`) is judged by the model on every
+digest upload and discarded after drafting — persisting it to the new column at ingest time needs
+no new derivation. `lifecycle_stage` (`new|building|steady|cooling|dormant|rekindled` per
+`RELATIONSHIP_MODEL.md`) has no computation anywhere yet; its rule would have to be written from
+scratch, plausibly from the momentum/initiation_ratio/gap-day metrics already in that same table.
+
+### 2026-08-10 · Claude · J — `PostgresAgentStore` is not in this branch's tree
+It ships on `v3/h-join`/`origin/HEAD` (commit `fc95aed`), not on `v3/j-contracts` — `cloud/agent/`
+does not exist here, so nothing in this tree currently returns `null` for these fields. Flagging
+for whoever owns that merge: the store should keep returning `null` rather than inventing values
+until the columns above exist, same discipline `relationship_kind`'s `unknown` member already uses.
+
+### 2026-08-10 · Claude · J — edited `cloud/shared/src/contracts.ts`: added `HeartbeatPayload`
+New type for `POST /v1/heartbeat`'s body, including the new optional `messages_access_state`
+(`never_configured|ok|lost`). Additive only — every existing consumer of this file is unaffected.
+
+### 2026-08-10 · Claude · J — disclosed limitation: the messages-access-lost alarm dedups in-memory only
+`cloud/api/src/messages-access-alert.ts`'s `LossEpisodeGate` is per-process, not per-fleet, because
+this track may not touch `cloud/db/migrations/**`. A rolling deploy or a second API replica can
+each re-open the gate once for one continuous outage — bounded double-send, never the "every 15
+minutes" spam it exists to prevent. A durable fix needs a column recording the device's last-seen
+`messages_access_state` (or the last-alerted episode) on `devices` or a new table.
