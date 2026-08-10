@@ -435,7 +435,6 @@ export const heartbeatSchema = z
 type AssertEqual<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2
   ? true
   : never;
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
 const _heartbeatSchemaMatchesSharedType: AssertEqual<
   z.infer<typeof heartbeatSchema>,
   HeartbeatPayload

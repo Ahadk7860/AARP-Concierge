@@ -30,6 +30,7 @@ import { authenticate, ownsUser } from "../auth.js";
 import { duplicate, redactionFailed, send, unauthorized, validation } from "../errors.js";
 import { bodyHash, logEvent } from "../logging.js";
 import { firstSyncOffer } from "../welcome.js";
+import { LossEpisodeGate, messagesAccessLostMessage } from "../messages-access-alert.js";
 import { digestSchema, heartbeatSchema, voicePackSchema } from "../schemas.js";
 import { describeViolations, findRedactionViolations } from "../redaction.js";
 
@@ -91,6 +92,12 @@ export function registerIngestRoutes(
   log: Logger,
   deps: IngestDeps = {},
 ): void {
+  // Per-server, per-process — see `LossEpisodeGate`'s own doc comment for what that
+  // does and does not guarantee. One gate for every device this server handles, closed
+  // over here rather than module-level, so it resets with a fresh `buildServer()` the
+  // same way every other piece of request-scoped state in this file does.
+  const messagesAccessGate = new LossEpisodeGate();
+
   // -------------------------------------------------------------------------
   app.post("/v1/digest", async (req, reply) => {
     const principal = await authenticate(req, reply);
@@ -267,6 +274,44 @@ export function registerIngestRoutes(
       macos_version: beat.macos_version ?? null,
       fda_granted: beat.fda_granted ?? null,
     });
+
+    // The fleet-wide alarm CONTRACTS.md's UNRESOLVED item 10 calls for. Gated to fire
+    // once per loss EPISODE, not once per heartbeat — see `LossEpisodeGate`. And never
+    // allowed to fail the heartbeat: a Mac that is already struggling to report `lost`
+    // must not also start getting 400s or 500s for it. `deps.channel` absent (no
+    // transport configured) is treated the same as a throw from `channel.send` — logged,
+    // never surfaced to the caller.
+    if (messagesAccessGate.shouldAlert(beat.device_id, beat.messages_access_state)) {
+      if (deps.channel === undefined) {
+        logEvent(log, {
+          msg: "messages_access.alert_skipped_no_channel",
+          route: "/v1/heartbeat",
+          user_id: principal.scope.user_id,
+          device_id: beat.device_id,
+        });
+      } else {
+        try {
+          const episodeKey = new Date().toISOString();
+          await deps.channel.send(
+            messagesAccessLostMessage(principal.scope.user_id, beat.device_id, episodeKey),
+          );
+          logEvent(log, {
+            msg: "messages_access.alert_sent",
+            route: "/v1/heartbeat",
+            user_id: principal.scope.user_id,
+            device_id: beat.device_id,
+          });
+        } catch (err) {
+          logEvent(log, {
+            msg: "messages_access.alert_failed",
+            route: "/v1/heartbeat",
+            user_id: principal.scope.user_id,
+            device_id: beat.device_id,
+            violations: err instanceof Error ? err.message : "unknown",
+          });
+        }
+      }
+    }
 
     logEvent(log, {
       msg: "heartbeat",

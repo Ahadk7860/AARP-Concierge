@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import type { FastifyInstance } from "fastify";
 import type { Digest, VoicePack } from "../../shared/src/index.js";
+import { StubChannel } from "../../shared/src/index.js";
 import {
   closePool,
   createUser,
@@ -70,6 +71,9 @@ async function digestFor(account: Account): Promise<Digest> {
 }
 
 let app: FastifyInstance;
+// Exposed so heartbeat tests can assert on what WOULD have been sent, never sending
+// anything real — `StubChannel.sent` records the outbound.v1 documents in memory.
+let channel: StubChannel;
 
 beforeAll(async () => {
   // Serialised against cloud/db/src/schema.test.ts, which drops and rebuilds this same
@@ -79,7 +83,8 @@ beforeAll(async () => {
   // Logs go to a sink, not stdout: the suite's output is what a human reads to judge
   // the gate, and 30 lines of structured JSON per run buries it. The one test that
   // asserts ON log content builds its own server with its own capturing sink.
-  app = buildServer({ logger: makeLogger(new PassThrough()) });
+  channel = new StubChannel();
+  app = buildServer({ logger: makeLogger(new PassThrough()), channel });
   await app.ready();
 }, 120_000);
 
@@ -471,6 +476,100 @@ describe("POST /v1/heartbeat", () => {
       },
     });
     expect(res.statusCode).toBe(400);
+    await deleteUser(account.scope);
+  });
+
+  // -------------------------------------------------------------------------
+  // messages_access_state — the fleet-wide alarm CONTRACTS.md UNRESOLVED item 10 calls
+  // for. `channel` is the SAME `StubChannel` this whole file's `app` was built with, so
+  // no real message is ever sent — `.sent` only ever records outbound.v1 documents.
+
+  function heartbeat(account: Account, state?: string, digestAsOf: string | null = null) {
+    return app.inject({
+      method: "POST",
+      url: "/v1/heartbeat",
+      headers: auth(account.token),
+      payload: {
+        device_id: account.deviceId,
+        app_version: "0.1.0",
+        digest_as_of: digestAsOf,
+        ...(state === undefined ? {} : { messages_access_state: state }),
+      },
+    });
+  }
+
+  function alertsFor(deviceId: string) {
+    return channel.sent.filter((m) => m.idempotency_key.startsWith(`messages-access-lost-`) && m.idempotency_key.includes(deviceId));
+  }
+
+  it("sends the lost-access alert exactly once for a run of repeated `lost` heartbeats", async () => {
+    const account = await newAccount();
+
+    expect((await heartbeat(account, "lost")).statusCode).toBe(204);
+    expect((await heartbeat(account, "lost")).statusCode).toBe(204);
+    expect((await heartbeat(account, "lost")).statusCode).toBe(204);
+
+    const sent = alertsFor(account.deviceId);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.user_id).toBe(account.scope.user_id);
+    expect(sent[0]?.blocks).toEqual([
+      { type: "text", text: expect.stringContaining("open the Boi app") as unknown as string },
+    ]);
+
+    await deleteUser(account.scope);
+  });
+
+  it("does not alert on ok, never_configured, or an absent field", async () => {
+    const account = await newAccount();
+
+    await heartbeat(account, "ok");
+    await heartbeat(account, "never_configured");
+    await heartbeat(account, undefined);
+
+    expect(alertsFor(account.deviceId)).toHaveLength(0);
+    await deleteUser(account.scope);
+  });
+
+  it("re-alerts on a second, distinct loss episode after a recovery", async () => {
+    const account = await newAccount();
+
+    await heartbeat(account, "lost");
+    await heartbeat(account, "lost");
+    expect(alertsFor(account.deviceId)).toHaveLength(1);
+
+    await heartbeat(account, "ok"); // recovered — the gate reopens
+    await heartbeat(account, "lost");
+    await heartbeat(account, "lost");
+
+    // Two episodes, two alerts — never one per heartbeat (12 would mean every beat fired).
+    expect(alertsFor(account.deviceId)).toHaveLength(2);
+
+    await deleteUser(account.scope);
+  });
+
+  it("still accepts the heartbeat (204) even when the channel throws while alerting", async () => {
+    const account = await newAccount();
+    const throwing = new StubChannel("banned"); // StubChannel.send throws in this mode
+    const throwingApp = buildServer({ logger: makeLogger(new PassThrough()), channel: throwing });
+    await throwingApp.ready();
+
+    const res = await throwingApp.inject({
+      method: "POST",
+      url: "/v1/heartbeat",
+      headers: auth(account.token),
+      payload: {
+        device_id: account.deviceId,
+        app_version: "0.1.0",
+        digest_as_of: null,
+        messages_access_state: "lost",
+      },
+    });
+
+    // Fail-safe: a notification failure must never reject the heartbeat.
+    expect(res.statusCode).toBe(204);
+    expect(throwing.sent).toHaveLength(0); // the throw happened before anything was recorded as sent
+
+    await throwingApp.close();
     await deleteUser(account.scope);
   });
 });
