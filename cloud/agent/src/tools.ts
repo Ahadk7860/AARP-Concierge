@@ -6,6 +6,14 @@
 // that reads it; a tool that returns no evidence refs cannot support any claim (V3_ARCHITECTURE
 // §4.2). `draft_message` never sends. `send_message` never fires without an explicit
 // in-conversation `approval_token` (I4) — this is enforced here, not left to the caller.
+//
+// `general` (§2's "general → model knowledge / web" row, never previously built — added
+// here) is the one tool in this file that is NOT a person-bearing §4.2 tool: it answers from
+// the model's own training knowledge only (no web search in this repo), and its evidence
+// carries the distinct source "general". The verifier (verifier.ts) deliberately excludes
+// this tool's output from what can ground a person-name or handle claim — see its header
+// note — so `general` cannot become a way to launder a fabricated fact about a real person
+// through the same gate that legitimately grounds relationship data.
 
 import type { UserScope } from "../../db/src/scope.js";
 import type { AgentStore, DeviceSearchPort } from "./ports.js";
@@ -18,6 +26,8 @@ import type {
   DriftingInput,
   DriftingOutput,
   EvidenceRef,
+  GeneralInput,
+  GeneralOutput,
   MemorySearchInput,
   MemorySearchOutput,
   MemoryWriteInput,
@@ -66,12 +76,32 @@ export class InMemorySendPort implements SendPort {
   }
 }
 
+/**
+ * Answers a general-knowledge question from the model's own training knowledge — no
+ * relationship/message data, no live web (V3_ARCHITECTURE.md §2's `general` row: "model
+ * knowledge / web", but this repo has no search capability, so model-knowledge-only). See
+ * types.ts's GeneralOutput header note and verifier.ts's header note for why this tool's
+ * evidence must never be able to ground a person-name or handle claim.
+ */
+export interface GeneralKnowledgeProvider {
+  answer(query: string): Promise<string>;
+}
+
+/** Honest fallback when no live provider is wired — never fabricates an answer, matching
+ * DegradedDeviceSearchPort's convention (ports.ts). */
+export class DegradedGeneralKnowledgeProvider implements GeneralKnowledgeProvider {
+  async answer(): Promise<string> {
+    throw new Error("general_knowledge_unavailable");
+  }
+}
+
 export type ToolContext = {
   scope: UserScope;
   store: AgentStore;
   deviceSearch?: DeviceSearchPort;
   approvals?: ApprovalTokenStore;
   send?: SendPort;
+  general?: GeneralKnowledgeProvider;
   now?: () => Date;
   requestId?: () => string;
 };
@@ -317,6 +347,47 @@ export async function draftMessage(
 }
 
 // ---------------------------------------------------------------------------
+// general — model knowledge only (§2). CRITICAL: this tool's `evidence` carries the
+// distinct source "general", never a person-scoped source (relationship/open_loop/memory/
+// message) — see verifier.ts's header note on why a person-name or handle claim must never
+// be groundable off this tool's output, only off the person-bearing §4.2 tools.
+// ---------------------------------------------------------------------------
+
+export async function general(
+  ctx: ToolContext,
+  input: GeneralInput,
+): Promise<ToolResult<GeneralOutput>> {
+  const query = requireNonEmptyString("general", "query", input.query);
+  const provider = ctx.general ?? new DegradedGeneralKnowledgeProvider();
+
+  let raw: string;
+  try {
+    raw = await provider.answer(query);
+  } catch {
+    // Honest degrade — never invent an answer when the provider is unwired or fails.
+    return { answer: "", source: "model_knowledge", degraded: "unavailable", evidence: [] };
+  }
+
+  const answer = raw.trim();
+  if (answer === "") {
+    return { answer: "", source: "model_knowledge", degraded: "empty_response", evidence: [] };
+  }
+
+  const requestId = ctx.requestId?.() ?? `gen_${Math.random().toString(36).slice(2, 10)}`;
+  return {
+    answer,
+    source: "model_knowledge",
+    // "general" is a distinct evidence source from every person-scoped source
+    // (relationship/open_loop/relationship_edge/memory/message/send). The verifier keys its
+    // name/handle-grounding restriction off this tool's NAME (`call.tool === "general"`,
+    // buildEvidencePool in verifier.ts), not off this string — but the source string is kept
+    // equally distinct so nothing downstream that inspects `evidence[].source` directly can
+    // mistake this for person-scoped provenance either.
+    evidence: [{ source: "general", id: requestId }],
+  };
+}
+
+// ---------------------------------------------------------------------------
 // send_message — REQUIRES approval_token (I4). Never fires without one.
 // ---------------------------------------------------------------------------
 
@@ -354,6 +425,7 @@ export const TOOL_NAMES = [
   "memory_write",
   "memory_search",
   "draft_message",
+  "general",
   "send_message",
 ] as const;
 
@@ -368,6 +440,7 @@ export type ToolRegistry = {
   memory_write: typeof memoryWrite;
   memory_search: typeof memorySearch;
   draft_message: typeof draftMessage;
+  general: typeof general;
   send_message: typeof sendMessage;
 };
 
@@ -380,6 +453,7 @@ export const TOOL_REGISTRY: ToolRegistry = {
   memory_write: memoryWrite,
   memory_search: memorySearch,
   draft_message: draftMessage,
+  general,
   send_message: sendMessage,
 };
 
@@ -399,6 +473,7 @@ export async function invokeTool(
     case "memory_write": return memoryWrite(ctx, record as unknown as MemoryWriteInput);
     case "memory_search": return memorySearch(ctx, record as unknown as MemorySearchInput);
     case "draft_message": return draftMessage(ctx, record as unknown as DraftMessageInput);
+    case "general": return general(ctx, record as unknown as GeneralInput);
     case "send_message": return sendMessage(ctx, record as unknown as SendMessageInput);
     default: {
       const exhaustive: never = name;

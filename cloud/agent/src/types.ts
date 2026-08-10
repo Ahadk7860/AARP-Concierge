@@ -106,5 +106,26 @@ export type MemorySearchOutput = { memories: MemoryRow[] };
 export type DraftMessageInput = { person_id: string; intent: string };
 export type DraftMessageOutput = { draft: string; based_on: EvidenceRef[] };
 
+// ---------------------------------------------------------------------------
+// general — V3_ARCHITECTURE.md §2's `general → model knowledge / web ~1s` row. Model
+// knowledge ONLY: this worktree has no web-search capability, so `answer` is whatever the
+// configured model already knows, which may be stale or wrong for anything time-sensitive.
+// Deliberately no `display` field anywhere in this shape (see the verifier.ts header note on
+// I2) — a "display"-keyed leaf is the ONLY thing that grounds a person-name claim, and this
+// tool must never be able to produce one.
+// ---------------------------------------------------------------------------
+
+export type GeneralInput = { query: string };
+
+export type GeneralOutput = {
+  /** The model's own free-text answer. Never a person's `display` name field — see above. */
+  answer: string;
+  source: "model_knowledge";
+  /** Set when there is nothing to report (no provider wired, provider call failed, or the
+   * provider returned an empty response) — never silently omitted in favor of a fabricated
+   * placeholder answer. */
+  degraded?: "unavailable" | "empty_response";
+};
+
 export type SendMessageInput = { person_id: string; text: string; approval_token: string };
 export type SendMessageOutput = { sent: boolean };

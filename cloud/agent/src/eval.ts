@@ -4,8 +4,8 @@
 // cloud/chat/src/eval.ts.
 
 import { routeQuestion, type RouterDecision, type RouterProvider } from "./router.js";
-import { buildEvidencePool, verify, type ToolCallRecord } from "./verifier.js";
-import type { ROUTER_EVAL_CASES, VERIFIER_EVAL_CASES } from "./eval-cases.js";
+import { buildEvidencePool, defaultDegrade, hasUsefulAlternative, verify, type ToolCallRecord } from "./verifier.js";
+import type { ROUTER_EVAL_CASES, VERIFIER_EVAL_CASES, REFUSAL_EVAL_CASES } from "./eval-cases.js";
 
 export type RouterEvalReport = {
   evaluated: number;
@@ -81,4 +81,35 @@ export function runVerifierEval(
     unsupported_claim_rate: shouldRejectCount === 0 ? 0 : missed / shouldRejectCount,
     failures,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Refusal-quality eval (Task 2, "refusals must offer a way forward") — release gate: does
+// every refusal/degrade string this codebase can ship pass `hasUsefulAlternative`? A
+// regression back to a bare dead-end decline is a FAILURE here, not a matter of taste.
+// ---------------------------------------------------------------------------
+
+export type RefusalEvalReport = {
+  evaluated: number;
+  correct: number;
+  failures: string[];
+};
+
+function resolveRefusalCaseText(testCase: (typeof REFUSAL_EVAL_CASES)[number]): string {
+  if (testCase.text !== undefined) return testCase.text;
+  return defaultDegrade(testCase.calls ?? []);
+}
+
+export function runRefusalEval(
+  cases: readonly (typeof REFUSAL_EVAL_CASES)[number][],
+): RefusalEvalReport {
+  let correct = 0;
+  const failures: string[] = [];
+  for (const testCase of cases) {
+    const text = resolveRefusalCaseText(testCase);
+    const actual = hasUsefulAlternative(text);
+    if (actual === testCase.expectUseful) correct += 1;
+    else failures.push(testCase.id);
+  }
+  return { evaluated: cases.length, correct, failures };
 }

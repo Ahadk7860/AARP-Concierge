@@ -422,3 +422,42 @@ this track may not touch `cloud/db/migrations/**`. A rolling deploy or a second 
 each re-open the gate once for one continuous outage — bounded double-send, never the "every 15
 minutes" spam it exists to prevent. A durable fix needs a column recording the device's last-seen
 `messages_access_state` (or the last-alerted episode) on `devices` or a new table.
+
+### 2026-08-10 · Claude · B — built the `general` tool (§2, never previously implemented) + refusal quality
+`cloud/agent/src/{types,tool-specs,tools}.ts` add the `general` tool (§2's `general → model
+knowledge / web` row) — model-knowledge-only, no web search exists in this repo, wired to
+`gemini-2.5-flash-lite` via a new `LiveGeneralKnowledgeProvider` (`live-agent-providers.ts`) and
+`AgentRuntime.general` (`runtime.ts`), reachable from `inbound-bridge.ts`'s `toolContext`. This is
+additive to §4.2, not a change to it — §4.2's frozen contract list is otherwise untouched.
+
+**I2 discipline**: `general`'s evidence source is `"general"`, never a person-scoped source. The
+verifier (`verifier.ts`) excludes any tool call named `"general"` from what can ground a "name" or
+"handle" claim (`buildEvidencePool`'s `isGeneralSource` check, plus `GeneralOutput` having no
+`display` field as defense in depth) — dates/numbers from `general` DO ground world facts. Pinned
+by `test/verifier.test.ts`'s "the `general` tool must never ground a person-name or handle claim"
+block and an end-to-end `test/agent-loop.test.ts` case that reproduces the exact adversarial
+scenario the task named: a `general` answer mentioning a real person's name must not let the agent
+assert a relationship fact about them. It doesn't.
+
+**Disclosed residual risk, not silently accepted**: `extractClaims`'s "name" detection is lexical
+(any capitalized word), not semantic — it cannot distinguish "Maya" from "Paris". Given that, the
+only safe rule is that `general` grounds NO name-kind claim at all, which means a general-knowledge
+answer containing any capitalized proper noun (a place, a brand, a historical figure) routinely
+fails first-pass and escalated verification and falls to `defaultDegrade`. This is not a wrong
+answer — the degrade path restates the tool's own `answer` text verbatim, never regenerated model
+prose — but it costs one extra escalation round-trip and shows as `status: "degraded"` in
+telemetry for a large fraction of ordinary `general` queries. Loosening it was considered and
+rejected: letting `general`'s own text ground its own proper nouns would reopen the exact exploit
+above. Full writeup in `verifier.ts`'s header ("RESIDUAL RISK" note).
+
+Also for Task 2 ("refusals must offer a way forward"): `verifier.ts` adds `hasUsefulAlternative` +
+a `CAPABILITY_HINT` tail on `defaultDegrade`'s empty-summary case; `agent-loop.ts`'s `DEFAULT_REFUSAL`
+(now exported) and the `agent_no_output` branch (now prefers `defaultDegrade(calls)` over the bare
+fixed string when calls exist) both changed to redirect to real, current tool capabilities —
+never an invented one, never an ungrounded person. `eval-cases.ts`'s new `REFUSAL_EVAL_CASES` +
+`eval.ts`'s `runRefusalEval` make "a refusal without a useful alternative" a release-gate test
+failure, with an adversarial control case pinning that the check isn't a no-op.
+
+`cloud/agent` test suite: 118 passed (118), up from the pre-existing 92 (26 new tests, zero
+existing tests changed in behavior/expectation beyond the two refusal-text assertions the changed
+strings themselves required).

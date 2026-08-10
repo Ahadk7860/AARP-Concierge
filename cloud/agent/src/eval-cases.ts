@@ -9,7 +9,9 @@
 // cloud/chat/src/fabrication-cases.ts: a green result here is a release gate for THIS
 // deterministic layer, not a claim about the live model.
 
+import { DEFAULT_REFUSAL } from "./agent-loop.js";
 import type { RouterDecision } from "./router.js";
+import type { ToolCallRecord } from "./verifier.js";
 
 export type RouterEvalCase = { id: string; question: string; expected: RouterDecision };
 
@@ -145,5 +147,74 @@ export const VERIFIER_EVAL_CASES: readonly VerifierEvalCase[] = [
     toolFacts: { loop_id: "loop_12", description: "asked about the trip" },
     draft: "Loop asked about the trip.",
     expectedOk: false,
+  },
+] as const;
+
+// ---------------------------------------------------------------------------
+// Task 2 ("refusals must offer a way forward") — a third gate: does every refusal/degrade
+// string this codebase can actually ship offer the user a genuine, grounded alternative,
+// rather than dead-ending? `hasUsefulAlternative` (verifier.ts) is the checkable property;
+// this corpus is what makes "a refusal without a useful alternative" a release-gate FAILURE
+// instead of a matter of taste. `expectUseful: false` cases are the adversarial control —
+// pinning that the check actually has teeth (a bare decline must fail it), not just that it
+// always returns true.
+// ---------------------------------------------------------------------------
+
+export type RefusalEvalCase = {
+  id: string;
+  description: string;
+  /** The literal text a refusal/degrade path would ship. Resolved either directly (`text`)
+   * or via `defaultDegrade(calls)` — the two real shapes a decline takes in this codebase
+   * (agent-loop.ts's I3 fixed string, and the post-verifier-failure degrade). */
+  text?: string;
+  calls?: readonly ToolCallRecord[];
+  expectUseful: boolean;
+};
+
+export const REFUSAL_EVAL_CASES: readonly RefusalEvalCase[] = [
+  {
+    id: "f01",
+    description: "I3's fixed decline (router refuse, pre-tool-call) must name real capabilities",
+    text: DEFAULT_REFUSAL,
+    expectUseful: true,
+  },
+  {
+    id: "f02",
+    description: "defaultDegrade with zero tool calls (nothing groundable at all) still redirects",
+    calls: [],
+    expectUseful: true,
+  },
+  {
+    id: "f03",
+    description: "defaultDegrade with partial evidence restates what was actually found",
+    calls: [{
+      tool: "relationship_state",
+      output: { display: "Maya", lifecycle_stage: "steady", evidence: [{ source: "relationship", id: "p_maya01" }] },
+    }],
+    expectUseful: true,
+  },
+  {
+    id: "f04",
+    description: "defaultDegrade with an open_loops result restates the real loop found",
+    calls: [{
+      tool: "open_loops",
+      output: {
+        loops: [{ loop_id: "loop_1", person_id: "p_maya01", display: "Maya", kind: "question", direction: "i_owe_them", description: "asked about the trip", age_days: 4 }],
+        evidence: [{ source: "open_loop", id: "loop_1" }],
+      },
+    }],
+    expectUseful: true,
+  },
+  {
+    id: "f05_control",
+    description: "ADVERSARIAL CONTROL: a bare decline with no alternative must be flagged as NOT useful — proves the check has teeth",
+    text: "I can't answer that.",
+    expectUseful: false,
+  },
+  {
+    id: "f06_control",
+    description: "ADVERSARIAL CONTROL: the pre-Task-2 dead-end refusal text must be flagged as NOT useful",
+    text: "I'm not confident I can answer that safely — want to rephrase, or ask something more specific?",
+    expectUseful: false,
   },
 ] as const;

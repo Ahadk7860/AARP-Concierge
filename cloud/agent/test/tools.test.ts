@@ -5,6 +5,7 @@ import {
   circle,
   draftMessage,
   drifting,
+  general,
   memorySearch,
   memoryWrite,
   openLoops,
@@ -14,6 +15,7 @@ import {
   sendMessage,
   ToolInputError,
   type ApprovalTokenStore,
+  type GeneralKnowledgeProvider,
   type SendPort,
   type ToolContext,
 } from "../src/tools.js";
@@ -291,6 +293,47 @@ describe("search_messages — §4.2/§4.3 mapping and honest degradation", () =>
     const port = { search: async (): Promise<AskDeviceSearchResponse> => ({ v: 1, id: "r1", ok: true, results: [] }) };
     const result = await searchMessages(ctx({ deviceSearch: port }), { query: "trip" });
     expect(result.degraded).toBeUndefined();
+  });
+});
+
+describe("general — model knowledge only, distinct evidence source", () => {
+  it("returns the provider's answer with a distinct 'general' evidence source", async () => {
+    const provider: GeneralKnowledgeProvider = { answer: async (q) => `Paris is the capital of France. (asked: ${q})` };
+    const result = await general(ctx({ general: provider }), { query: "what is the capital of France?" });
+    expect(result.answer).toContain("Paris is the capital of France");
+    expect(result.source).toBe("model_knowledge");
+    expect(result.degraded).toBeUndefined();
+    expect(result.evidence).toHaveLength(1);
+    expect(result.evidence[0]!.source).toBe("general");
+    // Never a person-scoped source, even by accident.
+    expect(["relationship", "open_loop", "relationship_edge", "memory", "message", "send"]).not.toContain(result.evidence[0]!.source);
+  });
+
+  it("never returns a `display` field — the ONLY key the verifier grounds a name claim on", async () => {
+    const provider: GeneralKnowledgeProvider = { answer: async () => "Some general fact." };
+    const result = await general(ctx({ general: provider }), { query: "anything" });
+    expect(Object.prototype.hasOwnProperty.call(result, "display")).toBe(false);
+  });
+
+  it("degrades honestly with no fabricated answer when no provider is wired", async () => {
+    const result = await general(ctx(), { query: "what is the capital of France?" });
+    expect(result).toEqual({ answer: "", source: "model_knowledge", degraded: "unavailable", evidence: [] });
+  });
+
+  it("degrades honestly when the provider throws", async () => {
+    const provider: GeneralKnowledgeProvider = { answer: async () => { throw new Error("boom"); } };
+    const result = await general(ctx({ general: provider }), { query: "anything" });
+    expect(result).toEqual({ answer: "", source: "model_knowledge", degraded: "unavailable", evidence: [] });
+  });
+
+  it("degrades honestly on an empty provider response rather than shipping a blank claim", async () => {
+    const provider: GeneralKnowledgeProvider = { answer: async () => "   " };
+    const result = await general(ctx({ general: provider }), { query: "anything" });
+    expect(result).toEqual({ answer: "", source: "model_knowledge", degraded: "empty_response", evidence: [] });
+  });
+
+  it("throws on a missing query rather than silently defaulting", async () => {
+    await expect(general(ctx(), {} as { query: string })).rejects.toBeInstanceOf(ToolInputError);
   });
 });
 

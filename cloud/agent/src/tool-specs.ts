@@ -135,6 +135,21 @@ export const AGENT_TOOL_SPECS: ToolSpec[] = [
   {
     type: "function",
     function: {
+      name: "general",
+      description: "Answers a general-knowledge question that is NOT about a specific person in the user's life — facts, definitions, how-to, trivia, and similar. Uses ONLY the model's own training knowledge: there is no live web or real-time data access, so anything time-sensitive (weather, sports scores, prices, news, today's date-dependent facts) may be stale or simply wrong — the answer says so honestly rather than presenting stale knowledge as current. Never use this for questions about a specific person from the relationship/message data — use search_messages, relationship_state, open_loops, drifting, circle, or memory_search for that; this tool's output can never be used to state a fact about a named person.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string" },
+        },
+        required: ["query"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "send_message",
       description: "Send a message to a person. REQUIRES an approval_token obtained from explicit in-conversation user approval — never call this without one the user actually gave this turn.",
       parameters: {

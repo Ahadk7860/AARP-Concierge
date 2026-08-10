@@ -10,7 +10,7 @@
 import { routeQuestion, type RouterDecision, type RouterProvider } from "./router.js";
 import { invokeTool, type ToolContext, ToolInputError } from "./tools.js";
 import { TOOL_NAMES, type ToolName } from "./tools.js";
-import { buildEvidencePool, runVerifiedTurn, type ToolCallRecord, type VerifiedTurnOutcome } from "./verifier.js";
+import { buildEvidencePool, defaultDegrade, runVerifiedTurn, type ToolCallRecord, type VerifiedTurnOutcome } from "./verifier.js";
 import type { BubbleSink } from "../../channel/src/progressive.js";
 import type { ChatMessage, ToolCall } from "./gemini-client.js";
 import type { Intent } from "../../shared/src/intents.js";
@@ -92,11 +92,21 @@ export type AgentTurnResult =
   | { kind: "agent"; outcome: VerifiedTurnOutcome; toolCalls: number; evidence: readonly EvidenceRef[] }
   | { kind: "agent_no_output"; toolCalls: number };
 
-const DEFAULT_REFUSAL = "I'm not confident I can answer that safely — want to rephrase, or ask something more specific?";
+// Task 2 ("refusals must offer a way forward"): I3's fixed decline runs BEFORE any tool
+// call (the router sees question text only — V3_ARCHITECTURE.md §2), so there is no
+// per-turn evidence yet to ground a specific suggestion in. What it CAN honestly offer,
+// without inventing anything, is the real, fixed list of what this assistant can do — the
+// same capability hint the post-tool-call degrade path uses (verifier.ts's
+// defaultDegrade/CAPABILITY_HINT), kept in sync by hasUsefulAlternative's shared keyword
+// check (verifier.test.ts / eval-cases.ts's REFUSAL_EVAL_CASES).
+export const DEFAULT_REFUSAL =
+  "I'm not confident I can answer that safely. I can look up someone's relationship status, search your messages, check open loops, see who's overdue, or answer a general-knowledge question — want to try one of those instead?";
 
 const SYSTEM_PROMPT = `You are Boi, a personal relationship assistant. You answer using ONLY the tools available to you — never from your own general knowledge about the specific people in the user's life. Every person name, handle, date, or number you state must come from a tool result you received this turn.
 
-Call tools to gather what you need, then answer in plain conversational prose. If a tool returns no usable evidence for part of the question, say so honestly rather than guessing. Never call send_message without an approval_token the user explicitly gave this turn — draft_message is always safe to use instead.`;
+Call tools to gather what you need, then answer in plain conversational prose. If a tool returns no usable evidence for part of the question, say so honestly AND name a real alternative you can help with instead of just declining (e.g. "I don't have that, but I can check who's overdue" or "...but I can search your messages for it") — never invent a capability that isn't one of your tools, and never name a person you have not looked up this turn.
+
+The "general" tool answers ONLY from your own training knowledge — there is no live web or real-time data behind it. Use it for questions that are not about a specific person in the user's relationship data (facts, definitions, how-to, trivia). If the question needs current/live information (today's weather, a live score, a current price), say plainly that you can only give a knowledge-based answer and it may be out of date — never present stale model knowledge as if it were current. Never use "general" to answer a question about a specific named person from the user's life, and never restate a name or handle that appeared only in a "general" tool result as if it were a fact about someone in the user's relationships — a "general" result is never proof that its content is about anyone in this conversation. Never call send_message without an approval_token the user explicitly gave this turn — draft_message is always safe to use instead.`;
 
 function toolNameFromCall(call: ToolCall): ToolName | null {
   return (TOOL_NAMES as readonly string[]).includes(call.function.name)
@@ -206,7 +216,13 @@ export async function runAgentTurn(question: string, deps: AgentTurnDeps): Promi
     // alone (not `calls.length === 0`) matters: a non-empty `calls` with an empty draft is
     // exactly the exhausted-rounds case, and it must not fall through to verify("") — an
     // empty string has zero claims to check and would verify "ok", shipping a blank bubble.
-    await deliverSingleBubble(deps.sink, deps.refusalText ?? DEFAULT_REFUSAL);
+    // Task 2: if the loop DID make tool calls before running out of rounds (or content),
+    // prefer restating what those calls actually returned — via the same defaultDegrade
+    // used on a verifier rejection — over the bare fixed refusal string, since that summary
+    // is a genuine, grounded alternative rather than a dead end. `deps.refusalText`, when
+    // the caller explicitly configured one, still wins for the true zero-calls case.
+    const text = calls.length > 0 ? defaultDegrade(calls) : (deps.refusalText ?? DEFAULT_REFUSAL);
+    await deliverSingleBubble(deps.sink, text);
     return { kind: "agent_no_output", toolCalls: calls.length };
   }
 

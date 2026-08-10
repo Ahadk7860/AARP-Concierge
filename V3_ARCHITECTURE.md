@@ -327,6 +327,15 @@ memory_search({ query: string })                      -> { memories: [...] }
 draft_message({ person_id: string, intent: string })
   -> { draft: string, based_on: Array<evidence_ref> }
 
+general({ query: string })
+  -> { answer: string, source: "model_knowledge", degraded?: "unavailable"|"empty_response" }
+  // §2's "general → model knowledge / web" row — implemented 2026-08-10 (Track B). Model
+  // knowledge ONLY: no web-search capability exists in this repo. Evidence source is the
+  // distinct string "general", never a person-scoped source — the verifier (§4.2's own
+  // guarantee, I2) deliberately excludes this tool from grounding any person-name or handle
+  // claim (see INTERFACES.md's 2026-08-10 entry and verifier.ts's header for the residual
+  // risk this creates for ordinary proper-noun-bearing world facts).
+
 send_message({ person_id: string, text: string, approval_token: string })
   -> { sent: boolean }        // approval_token REQUIRED (I4)
 ```

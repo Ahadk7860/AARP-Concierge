@@ -6,12 +6,12 @@
 // or cloud/inbound — that boundary is deliberate, not an oversight.
 
 import { agentModelConfigFromEnv, type AgentModelConfig } from "./model-config.js";
-import { LiveAgentModelProvider, LiveEscalationProvider } from "./live-agent-providers.js";
+import { LiveAgentModelProvider, LiveEscalationProvider, LiveGeneralKnowledgeProvider } from "./live-agent-providers.js";
 import { ModelRouterProvider, OfflineRouterProvider, type RouterProvider } from "./router.js";
 import type { AgentModelProvider, EscalationProvider } from "./agent-loop.js";
 import type { AgentStore } from "./ports.js";
 import { DegradedDeviceSearchPort, type DeviceSearchPort } from "./ports.js";
-import { NullApprovalTokenStore, type ApprovalTokenStore, type SendPort } from "./tools.js";
+import { DegradedGeneralKnowledgeProvider, NullApprovalTokenStore, type ApprovalTokenStore, type GeneralKnowledgeProvider, type SendPort } from "./tools.js";
 import { PostgresAgentStore } from "./postgres-agent-store.js";
 
 /** BOI_AGENT_PATH_ENABLED=1 gates the v3 agent path. Absent or any other value = disabled,
@@ -25,15 +25,21 @@ export type AgentRuntime = {
   router: RouterProvider;
   agentModel: AgentModelProvider;
   escalation: EscalationProvider;
+  /** Backs the `general` tool (tools.ts, §2's "general → model knowledge / web" row).
+   * `DegradedGeneralKnowledgeProvider` when no live model key is configured — it throws on
+   * every call, which `general()` turns into an honest `degraded: "unavailable"` rather
+   * than fabricating an answer. */
+  general: GeneralKnowledgeProvider;
   modelConfig: AgentModelConfig | null;
 };
 
 /**
  * Builds the model-facing seams from env. When no live model key is configured, falls back
- * to the offline router baseline and throws-on-call model/escalation stand-ins — matching
- * the existing `liveModelConfigFromEnv` "absent means offline" convention (live-providers.ts)
- * rather than crashing at boot. Track H supplies `AgentStore` / `DeviceSearchPort` /
- * `ApprovalTokenStore` / `SendPort` separately per request, scoped to the caller's UserScope.
+ * to the offline router baseline and throws-on-call model/escalation/general stand-ins —
+ * matching the existing `liveModelConfigFromEnv` "absent means offline" convention
+ * (live-providers.ts) rather than crashing at boot. Track H supplies `AgentStore` /
+ * `DeviceSearchPort` / `ApprovalTokenStore` / `SendPort` separately per request, scoped to
+ * the caller's UserScope.
  */
 export function buildAgentRuntime(env: NodeJS.ProcessEnv = process.env): AgentRuntime {
   const modelConfig = agentModelConfigFromEnv(env);
@@ -42,6 +48,7 @@ export function buildAgentRuntime(env: NodeJS.ProcessEnv = process.env): AgentRu
       router: new OfflineRouterProvider(),
       agentModel: { turn: async () => ({ content: null, tool_calls: null }) },
       escalation: { regenerate: async () => "" },
+      general: new DegradedGeneralKnowledgeProvider(),
       modelConfig: null,
     };
   }
@@ -49,6 +56,7 @@ export function buildAgentRuntime(env: NodeJS.ProcessEnv = process.env): AgentRu
     router: new ModelRouterProvider(modelConfig),
     agentModel: new LiveAgentModelProvider(modelConfig),
     escalation: new LiveEscalationProvider(modelConfig),
+    general: new LiveGeneralKnowledgeProvider(modelConfig),
     modelConfig,
   };
 }

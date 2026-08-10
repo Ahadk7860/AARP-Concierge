@@ -3,6 +3,7 @@ import {
   buildEvidencePool,
   defaultDegrade,
   extractClaims,
+  hasUsefulAlternative,
   runVerifiedTurn,
   verify,
   type ToolCallRecord,
@@ -23,6 +24,17 @@ function relationshipCall(): ToolCallRecord {
       relationship_kind: "close_friend",
       last_contact: "2026-08-05T10:00:00Z",
       evidence: [{ source: "relationship", id: "p_maya01" }],
+    },
+  };
+}
+
+function generalCall(answer: string): ToolCallRecord {
+  return {
+    tool: "general",
+    output: {
+      answer,
+      source: "model_knowledge",
+      evidence: [{ source: "general", id: "gen_1" }],
     },
   };
 }
@@ -263,6 +275,90 @@ describe("verify — I2: every claim must trace to this turn's tool results", ()
     const pool = buildEvidencePool([]);
     const result = verify("Maya asked about the trip.", pool);
     expect(result.ok).toBe(false);
+  });
+});
+
+describe("the `general` tool must never ground a person-name or handle claim (Task 1's critical constraint)", () => {
+  it("THE POINT: a general result mentioning a real person's name must NOT let the agent assert a relationship fact about them", () => {
+    // Adversarial scenario the task calls out explicitly: the user steers `general` into
+    // asserting something about a name that also happens to be a real person in their
+    // life. No relationship_state/open_loops/drifting/circle/search_messages/memory call
+    // was made for this person this turn — the ONLY tool result mentioning "Maya" is
+    // `general`'s free-text answer. The verifier must still reject a relationship claim
+    // about her, exactly as if the name had never appeared anywhere this turn.
+    const pool = buildEvidencePool([
+      generalCall("Maya Chen, born in 1990, is a notable public figure known for her writing."),
+    ]);
+    const result = verify("Maya is overdue for a reply and has been drifting from you.", pool);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.violations.some((v) => v.claim.kind === "name" && v.claim.value === "Maya")).toBe(true);
+    }
+  });
+
+  it("a name asserted only via `general` does not populate `names`, even though the word is in `words`", () => {
+    const pool = buildEvidencePool([generalCall("Maya Chen is a well-known software engineer.")]);
+    expect(pool.words.has("maya")).toBe(true);
+    expect(pool.names.has("maya")).toBe(false);
+  });
+
+  it("a handle mentioned only via `general` must NOT ground a handle claim", () => {
+    const pool = buildEvidencePool([generalCall("You can reach Acme Corp support at support@acme.com.")]);
+    // Present in the unrestricted pool (dates/general prose are allowed to ground world
+    // facts)...
+    expect(pool.rawStrings.some((s) => s.includes("support@acme.com"))).toBe(true);
+    // ...but excluded from the handle-grounding set specifically.
+    expect(pool.handleRawStrings.some((s) => s.includes("support@acme.com"))).toBe(false);
+    const result = verify("Reach her at support@acme.com.", pool);
+    expect(result.ok).toBe(false);
+  });
+
+  it("a phone-shaped handle mentioned only via `general` must NOT ground a handle claim", () => {
+    const pool = buildEvidencePool([generalCall("The main switchboard number is +14155550100.")]);
+    const result = verify("Call her at +1 415 555 0100.", pool);
+    expect(result.ok).toBe(false);
+  });
+
+  it("dates and numbers from `general` DO ground ordinary world-fact claims — only names/handles are restricted", () => {
+    // Deliberately proper-noun-free (see the RESIDUAL RISK note in verifier.ts's header):
+    // `extractClaims`'s PROPER_NOUN_RE cannot distinguish "Maya" from "Paris" — ANY
+    // capitalized word is a candidate "name" claim, and `general` grounds none of them by
+    // design. A world-fact sentence that happens to name a place/thing still gets flagged
+    // and degrades; this case isolates the number/date grounding this test is actually for.
+    const pool = buildEvidencePool([generalCall("The tower was finished in 1889 and stands 330 meters tall.")]);
+    const result = verify("The tower was finished in 1889 and stands 330 meters tall.", pool);
+    expect(result.ok).toBe(true);
+  });
+
+  it("a name IS still grounded when it comes from a real person-bearing tool this same turn, alongside an unrelated `general` call", () => {
+    // Proves the fix isn't over-broad: `general` being present in the same turn must not
+    // poison a legitimately grounded claim from relationship_state.
+    const pool = buildEvidencePool([relationshipCall(), generalCall("Paris is the capital of France.")]);
+    const result = verify("Maya's relationship with you is steady.", pool);
+    expect(result.ok).toBe(true);
+  });
+
+  it("evidence refs from `general` carry a distinct source, never a person-scoped one", () => {
+    const pool = buildEvidencePool([generalCall("Some world fact.")]);
+    expect(pool.refs).toEqual([{ source: "general", id: "gen_1" }]);
+    for (const ref of pool.refs) {
+      expect(["relationship", "open_loop", "relationship_edge", "memory", "message", "send"]).not.toContain(ref.source);
+    }
+  });
+});
+
+describe("hasUsefulAlternative — Task 2's release-gate check for refusal quality", () => {
+  it("flags a bare decline with no alternative as NOT useful", () => {
+    expect(hasUsefulAlternative("I can't answer that.")).toBe(false);
+    expect(hasUsefulAlternative("Sorry, I don't know.")).toBe(false);
+  });
+
+  it("recognizes defaultDegrade's honest-emptiness text (no tool calls at all) as useful", () => {
+    expect(hasUsefulAlternative(defaultDegrade([]))).toBe(true);
+  });
+
+  it("recognizes defaultDegrade's found-evidence text as useful", () => {
+    expect(hasUsefulAlternative(defaultDegrade([relationshipCall()]))).toBe(true);
   });
 });
 

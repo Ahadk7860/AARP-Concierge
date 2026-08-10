@@ -53,7 +53,7 @@ import { runAgentTurn, type AgentTurnDeps, type AgentTurnLogger } from "./agent-
 import { InMemoryBubbleSink } from "./in-memory-bubble-sink.js";
 import type { AgentStore } from "./ports.js";
 import { DegradedDeviceSearchPort } from "./ports.js";
-import { NullApprovalTokenStore } from "./tools.js";
+import { DegradedGeneralKnowledgeProvider, NullApprovalTokenStore, type GeneralKnowledgeProvider } from "./tools.js";
 import { buildAgentRuntime } from "./runtime.js";
 
 export type AgentClosedChatBridgeDeps = {
@@ -65,7 +65,11 @@ export type AgentClosedChatBridgeDeps = {
    * because the offline fallback (no live key) never produces tool calls, so it cannot
    * exercise the `kind: "open"` + evidence success path; a test needs a scripted model to
    * reach `runAgentTurn`'s "agent" branch without a live Gemini key. */
-  runtimeOverride?: Pick<AgentTurnDeps, "router" | "agentModel" | "escalation">;
+  runtimeOverride?: Pick<AgentTurnDeps, "router" | "agentModel" | "escalation"> & {
+    /** Test-only override for the `general` tool's backing provider. Optional — a test
+     * exercising `refuse`/`agent_no_output`/non-`general` tool paths need not supply one. */
+    general?: GeneralKnowledgeProvider;
+  };
 };
 
 /**
@@ -90,6 +94,7 @@ export class AgentClosedChatBridge implements ClosedChatPort {
         store: this.deps.store,
         deviceSearch: new DegradedDeviceSearchPort(),
         approvals: new NullApprovalTokenStore(),
+        general: runtime.general ?? new DegradedGeneralKnowledgeProvider(),
       },
       sink,
       log: this.deps.log,
@@ -107,7 +112,9 @@ export class AgentClosedChatBridge implements ClosedChatPort {
       return {
         schema_version: "chat_reply.v1",
         kind: "decline",
-        text: joined !== "" ? joined : "I'm not confident I can answer that safely — want to rephrase, or ask something more specific?",
+        text: joined !== ""
+          ? joined
+          : "I'm not confident I can answer that safely. I can look up someone's relationship status, search your messages, check open loops, see who's overdue, or answer a general-knowledge question — want to try one of those instead?",
         synced_through: nowIso,
         licenses: [],
       };

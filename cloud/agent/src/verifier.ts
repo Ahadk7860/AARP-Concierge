@@ -25,6 +25,39 @@
 // is what I2 literally specifies ("must appear in a tool result from this turn"), so it is
 // in scope for v3 as written — but it is a real ceiling on what this gate catches, not a
 // gap in the implementation below.
+//
+// THE `general` TOOL AND I2 (added alongside tools.ts's `general` implementation): `general`
+// (§2 "model knowledge / web") answers from the model's own training knowledge, not from any
+// person-bearing store — its evidence source is "general", never `relationship`/`open_loop`/
+// `memory`/`message`/etc. If its free-text `answer` were treated as ordinary evidence, the
+// model could steer `general` into asserting something about a real person (e.g. "what do
+// you know about Maya Chen") and then have THIS turn's own agent draft cite that assertion —
+// grounding itself, making I2 circular and worthless. Two things stop that:
+//   1. `general`'s output shape (types.ts) has no `display` field, so it can never populate
+//      `names` (the ONLY thing a "name" claim is checked against — see `isNameKey` below).
+//   2. `buildEvidencePool` ALSO excludes any tool call named "general" from `names` and from
+//      the separate `handleRawStrings` set that handle claims are checked against — belt and
+//      suspenders, so a future field rename in `general`'s shape can't silently reopen this.
+// Numbers and dates from `general` DO ground ordinary claims (they populate `words`/
+// `numbers`/`rawStrings` like any other tool) — a world fact ("Paris has ~2.1 million
+// people") is allowed to ground its own number; a claim ABOUT A PERSON is not. See
+// `test/verifier.test.ts`'s "general tool" describe block for the pinned regression.
+//
+// RESIDUAL RISK, disclosed rather than hidden (also logged in INTERFACES.md): `extractClaims`'s
+// "name" detection (PROPER_NOUN_RE) is lexical, not semantic — it cannot tell "Maya" (a
+// person) apart from "Paris" or "Eiffel" (not people). Given that, the ONLY safe rule
+// available is the blunt one implemented here: `general` grounds NO "name"-kind claim,
+// full stop. The cost: a general-knowledge answer that mentions any capitalized proper
+// noun (a place, a brand, a historical figure) will routinely fail first-pass AND escalated
+// verification and fall to `defaultDegrade`. This is NOT a fabrication or a wrong answer —
+// `renderGroundedSummary`'s "general" case restates the tool's own `answer` text verbatim
+// (never regenerated model prose), so the user still gets the correct fact — but it costs an
+// extra escalation round-trip and shows up as `status: "degraded"` in telemetry for a large
+// fraction of ordinary `general` queries. Loosening this (e.g. letting `general`'s own text
+// ground its own proper nouns) was considered and rejected: it would let a query like "who
+// is Maya Chen" reintroduce exactly the exploit this file's tests pin — a real person's name
+// grounding an unrelated relationship claim purely because `general` said it. Precision over
+// recall, per this file's stated policy at the top of the file.
 
 import type { EvidenceRef, ToolResult } from "./types.js";
 
@@ -47,9 +80,15 @@ export type EvidencePool = {
    * This is the ONLY thing a "name" claim is checked against — see the BLOCKING fix note
    * on `isNameKey` below for why free prose and identifiers are both excluded from it. */
   names: ReadonlySet<string>;
-  /** Lowercased, whitespace-collapsed NON-IDENTIFIER string values, for substring/handle
-   * and date-substring checks. */
+  /** Lowercased, whitespace-collapsed NON-IDENTIFIER string values, for the ISO-date
+   * substring check. Includes `general` tool output — a world-fact date is fine to ground
+   * off model knowledge. */
   rawStrings: readonly string[];
+  /** Same as `rawStrings` EXCEPT leaves produced by a tool call named "general" are
+   * excluded. This is the ONLY thing a "handle" claim is checked against — see the
+   * `general`-tool header note above for why: an email/phone/@mention the model itself
+   * asserted via `general` must not verify a handle claim about a specific person. */
+  handleRawStrings: readonly string[];
   /** Every {source,id} evidence ref returned this turn, for downstream provenance display. */
   refs: readonly EvidenceRef[];
 };
@@ -133,6 +172,7 @@ export function buildEvidencePool(calls: readonly ToolCallRecord[]): EvidencePoo
   const numbers = new Set<string>();
   const names = new Set<string>();
   const rawStrings: string[] = [];
+  const handleRawStrings: string[] = [];
   const refs: EvidenceRef[] = [];
 
   const addWords = (raw: string, into: Set<string>): void => {
@@ -144,6 +184,12 @@ export function buildEvidencePool(calls: readonly ToolCallRecord[]): EvidencePoo
   for (const call of calls) {
     const leaves: CollectedLeaves = { text: [], names: [], ids: [] };
     collectLeaves(call.output, null, leaves);
+    // `general` (tools.ts) answers from the model's own knowledge, not a person-bearing
+    // store — see this file's header note. Its leaves still populate `words`/`numbers`/
+    // `rawStrings` (world-fact dates/numbers are fine to ground), but NEVER `names` and
+    // NEVER `handleRawStrings` — that is the one thing standing between "general" and
+    // becoming a fabrication-laundering path for a person's name or handle.
+    const isGeneralSource = call.tool === "general";
     // Opaque identifiers (`leaves.ids`) intentionally contribute to NOTHING below — no
     // rawStrings, no words, no numbers. SHOULD-FIX (same pass): a handle claim like "@12"
     // used to verify off "loop_12" via a bare `rawStrings.some(s => s.includes(...))`
@@ -154,17 +200,23 @@ export function buildEvidencePool(calls: readonly ToolCallRecord[]): EvidencePoo
       const normalized = s.toLowerCase().trim().replace(/\s+/g, " ");
       if (normalized === "") continue;
       rawStrings.push(normalized);
+      if (!isGeneralSource) handleRawStrings.push(normalized);
       addWords(normalized, words);
       for (const match of normalized.matchAll(DIGIT_RUN_RE)) {
         numbers.add(match[0]);
         numbers.add(String(Number(match[0]))); // strips leading zeros, e.g. "08" -> "8"
       }
     }
-    for (const s of leaves.names) addWords(s, names);
+    // Defense in depth: `general`'s own output shape has no `display` key so `leaves.names`
+    // is already empty for it (see types.ts's GeneralOutput note) — this `isGeneralSource`
+    // guard means that stays true even if that shape is ever carelessly extended.
+    if (!isGeneralSource) {
+      for (const s of leaves.names) addWords(s, names);
+    }
     if (Array.isArray(call.output.evidence)) refs.push(...call.output.evidence);
   }
 
-  return { words, numbers, names, rawStrings, refs };
+  return { words, numbers, names, rawStrings, handleRawStrings, refs };
 }
 
 // ---------------------------------------------------------------------------
@@ -272,10 +324,13 @@ function isSupported(claim: Claim, pool: EvidencePool): boolean {
       return pool.numbers.has(claim.value) || pool.numbers.has(String(Number(claim.value)));
     }
     case "handle": {
+      // `handleRawStrings` excludes `general`-tool leaves — see this file's header note and
+      // the `general`-tool comment in buildEvidencePool. A handle must trace to a
+      // person-bearing tool result, never to the model's own free-text "general" answer.
       const digits = digitsOf(claim.value);
-      if (digits.length >= 5 && pool.rawStrings.some((s) => digitsOf(s).includes(digits))) return true;
+      if (digits.length >= 5 && pool.handleRawStrings.some((s) => digitsOf(s).includes(digits))) return true;
       const lowered = claim.value.toLowerCase().replace(/^@/, "");
-      return pool.rawStrings.some((s) => s.includes(lowered));
+      return pool.handleRawStrings.some((s) => s.includes(lowered));
     }
     case "date": {
       if (ISO_DATE_RE.test(claim.value)) {
@@ -407,6 +462,16 @@ function renderGroundedSummary(calls: readonly ToolCallRecord[]): string {
         if (draft !== null) sentences.push(draft.endsWith(".") ? draft : `${draft}.`);
         break;
       }
+      case "general": {
+        // Restated here exactly as tools.ts's `general` returned it — this is the tool's
+        // own text, not free model prose generated fresh for this bubble, so it carries no
+        // I2 risk. It is still never used to ground a NAME/HANDLE claim about a person (see
+        // this file's header note) — that restriction lives in buildEvidencePool/isSupported,
+        // not here; this branch only decides what the degrade summary reads like.
+        const answer = asString(out["answer"]);
+        if (answer !== null) sentences.push(answer.endsWith(".") ? answer : `${answer}.`);
+        break;
+      }
       default:
         break; // memory_write / send_message / unrecognized tools: nothing to restate.
     }
@@ -415,15 +480,50 @@ function renderGroundedSummary(calls: readonly ToolCallRecord[]): string {
   return sentences.join(" ");
 }
 
+// Task 2 ("refusals must offer a way forward"): a decline that dead-ends is a worse outcome
+// than a decline that redirects to something the product can actually do. This lists real
+// tool names/capabilities only — never a specific person (a person can only be named if
+// they came from THIS turn's grounded evidence, which by definition this branch doesn't
+// have, since there was nothing groundable to report). See `hasUsefulAlternative` below and
+// its pinned tests for what "useful alternative" means as a checkable property, not just a
+// vibe.
+const CAPABILITY_HINT =
+  "I can look up someone's relationship status, search your messages, check open loops, see who's overdue, or answer a general-knowledge question — want to try one of those?";
+
 /** Default degrade: a plain, evidence-only summary built from this turn's tool calls —
  * never free model text — so a repeated fabrication still degrades to something true
- * rather than to silence, and never surfaces internal hashed IDs to the user. */
+ * rather than to silence, and never surfaces internal hashed IDs to the user. When there is
+ * nothing groundable to restate, the decline still redirects to real capabilities rather
+ * than dead-ending (Task 2) — it never invents a capability or names an ungrounded person. */
 export function defaultDegrade(calls: readonly ToolCallRecord[]): string {
   const summary = renderGroundedSummary(calls);
   if (summary === "") {
-    return "I couldn't verify an answer to that from anything I looked up this turn.";
+    return `I couldn't verify an answer to that from anything I looked up this turn. ${CAPABILITY_HINT}`;
   }
   return `I couldn't confidently phrase that without adding unsupported details. Here's what I actually found: ${summary}`;
+}
+
+/**
+ * Task 2's release-gate check: a refusal/degrade string counts as "useful" only if it names
+ * at least one real, current capability (drawn from the fixed list below, which mirrors the
+ * tool names actually registered in tools.ts) rather than just declining. Used by the eval
+ * corpus (eval-cases.ts's REFUSAL_EVAL_CASES / eval.ts's runRefusalEval) so a regression back
+ * to a bare "I can't answer that" dead end fails a test instead of shipping silently.
+ */
+const CAPABILITY_KEYWORDS = [
+  "relationship status",
+  "search your messages",
+  "open loops",
+  "who's overdue",
+  "overdue",
+  "general-knowledge",
+  "here's what i actually found",
+  "here's what i found",
+] as const;
+
+export function hasUsefulAlternative(text: string): boolean {
+  const lowered = text.toLowerCase();
+  return CAPABILITY_KEYWORDS.some((kw) => lowered.includes(kw));
 }
 
 /**
