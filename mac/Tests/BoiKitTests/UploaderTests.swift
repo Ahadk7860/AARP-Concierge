@@ -756,6 +756,40 @@ final class HeartbeatUploadTests: XCTestCase {
         // NOTES.md.
         XCTAssertFalse(permitted.contains("bundle_path_stable"))
         XCTAssertFalse(permitted.contains("mirror_message_count"))
+
+        // Same gap, opened by this track rather than found in it: messages_access_state
+        // is real on this struct (see below) but not yet in the frozen contract either
+        // — logged in INTERFACES.md for Track F/H, not asserted as fixed here.
+        XCTAssertFalse(permitted.contains("messages_access_state"))
+    }
+
+    /// `messages_access_state` defaults to nil and, being Optional, is omitted by the
+    /// synthesized encoder rather than encoded as `null` — so a caller that does not
+    /// pass it (every call site before this track) produces byte-identical JSON to
+    /// before this field existed. Nothing already-shipped can regress from its mere
+    /// existence.
+    func testMessagesAccessStateDefaultsToAbsentNotNull() throws {
+        let wire = HeartbeatUpload(device_id: "dev_1", app_version: "1.0.0",
+                                   digest_as_of: "2026-08-03T09:00:00Z")
+        XCTAssertNil(wire.messages_access_state)
+        let encoded = try JSONSerialization.jsonObject(
+            with: try JSONEncoder().encode(wire)) as? [String: Any] ?? [:]
+        XCTAssertFalse(encoded.keys.contains("messages_access_state"))
+    }
+
+    /// When a caller DOES supply it — `SyncRun.swift` does, via
+    /// `MessagesFolderAccess.classifyRecoveryState(...).wireValue` — it threads through
+    /// `.from(...)` onto the struct correctly. This is local plumbing only: the
+    /// strict-schema test above already pins that the SERVER still rejects it as an
+    /// unrecognized key until the contract is amended.
+    func testMessagesAccessStateThreadsThroughFromWhenSupplied() {
+        let onDisk = Heartbeat(as_of: "2026-08-03T09:00:00Z", app_version: "1.0.0",
+                               bundle_path_stable: true, full_disk_access: false,
+                               last_successful_sync_at: nil, mirror_message_count: 0,
+                               corpus_health: CorpusHealth.thin.rawValue)
+        let wire = HeartbeatUpload.from(onDisk, deviceID: "dev_abc", digestGeneratedAt: nil,
+                                        messagesAccessState: "lost")
+        XCTAssertEqual(wire.messages_access_state, "lost")
     }
 
     func testDigestAsOfPrefersTheDigestRatherThanReportingWorkThatDidNotHappen() {
@@ -771,19 +805,73 @@ final class HeartbeatUploadTests: XCTestCase {
     }
 }
 
+// MARK: - The XCTest guard
+
+/// The incident this exists for: `SyncRunTests` constructed `SyncRun` without injecting
+/// an uploader, `fromEnvironment()`'s default `applicationSupportDirectory` was the real
+/// `~/Library/Application Support/Boi`, and on any developer machine that has ever
+/// paired a real device, `swift test` was silently posting real heartbeats — and,
+/// per `SyncRunUploadTests`' own pre-existing failures, potentially real digests — to
+/// the live API. Fixing the six call sites (done, `AppBundleTests.swift`) does not
+/// fix the NEXT test somebody writes without injecting anything; this guard does.
+final class XCTestUploadGuardTests: XCTestCase {
+
+    /// Not really testable any other way: this process genuinely IS running under
+    /// XCTest right now, so this assertion is either trivially true or the guard
+    /// itself is broken.
+    func testThisProcessIsDetectedAsRunningUnderXCTest() {
+        XCTAssertTrue(Uploader.Configuration.isRunningUnderXCTest,
+                      "if this fails, the detection mechanism itself is broken and " +
+                      "every other assertion in this class is meaningless")
+    }
+
+    /// The property `fromEnvironment` and `EnvironmentTokenStore.init` actually default
+    /// to must diverge from the real directory while under test — this is the whole
+    /// guard, asserted directly rather than only indirectly through its effect.
+    func testTheDefaultApplicationSupportDirectoryIsNotTheRealOneUnderTest() {
+        XCTAssertNotEqual(Uploader.Configuration.applicationSupportDirectoryDefaultForCurrentProcess,
+                          Uploader.Configuration.defaultApplicationSupportDirectory)
+    }
+
+    /// The property this whole guard exists to prevent from mattering: a call to
+    /// `fromEnvironment()` with EVERY argument defaulted — the exact shape of the
+    /// original incident, six call sites in `AppBundleTests.swift` alone — resolves
+    /// `applicationSupportDirectory` to the guarded nonexistent path, not the real
+    /// directory, so it cannot find a real `.env` no matter what that real directory
+    /// contains on the machine running this suite. Deliberately does NOT write to or
+    /// read the real `~/Library/Application Support/Boi` to prove this — the property
+    /// test above already establishes the default diverges, and touching the real
+    /// directory from a test is exactly the class of risk this file exists to close
+    /// off, not something to reintroduce to test the fix.
+    func testFromEnvironmentWithNoExplicitOverrideDefaultsToTheGuardedDirectory() {
+        XCTAssertNil(Uploader.Configuration.fromEnvironment([:], searchingFrom: "/nonexistent",
+                                                            arguments: []),
+                     "no BOI_API_BASE anywhere reachable from the guarded default must mean " +
+                     "no configuration, not a fallback to whatever the real machine has")
+    }
+}
+
 // MARK: - Identity
 
 final class TokenStoreTests: XCTestCase {
 
+    // Neither directory exists, so neither the walking `.env` lookup nor the Application
+    // Support lookup can accidentally pick up the developer's real config or credentials —
+    // that is exactly what broke these tests before `applicationSupportDirectory` was made
+    // injectable (it used to unconditionally read `~/Library/Application Support/Boi/.env`).
+    private let noDirectory = "/nonexistent"
+    private let noAppSupport = "/nonexistent-app-support"
+
     func testAMissingIdentityMeansNoUploadRatherThanAnAnonymousOne() {
-        let store = EnvironmentTokenStore(environment: [:], searchingFrom: "/nonexistent")
+        let store = EnvironmentTokenStore(environment: [:], searchingFrom: noDirectory,
+                                          applicationSupportDirectory: noAppSupport)
         XCTAssertNil(store.identity())
     }
 
     func testTheProcessEnvironmentSupplesTheIdentity() {
         let store = EnvironmentTokenStore(
             environment: ["BOI_USER_ID": "usr_123", "BOI_DEVICE_TOKEN": "tok"],
-            searchingFrom: "/nonexistent")
+            searchingFrom: noDirectory, applicationSupportDirectory: noAppSupport)
         XCTAssertEqual(store.identity(),
                        DeviceIdentity(user_id: "usr_123", device_token: "tok"))
     }
@@ -792,14 +880,16 @@ final class TokenStoreTests: XCTestCase {
         // A token with no user id would post a digest whose `user_id` is the locally
         // derived HMAC, which the server answers with 401. Better to not send.
         let store = EnvironmentTokenStore(environment: ["BOI_DEVICE_TOKEN": "tok"],
-                                          searchingFrom: "/nonexistent")
+                                          searchingFrom: noDirectory,
+                                          applicationSupportDirectory: noAppSupport)
         XCTAssertNil(store.identity())
     }
 
     func testConfigurationReadsTheVariableThatAlreadyExists() {
         let configuration = Uploader.Configuration.fromEnvironment(
             ["BOI_API_BASE": "http://localhost:3041"],
-            searchingFrom: "/nonexistent", arguments: ["boi-cli"])
+            searchingFrom: noDirectory, applicationSupportDirectory: noAppSupport,
+            arguments: ["boi-cli"])
         XCTAssertEqual(configuration?.baseURL.absoluteString, "http://localhost:3041")
         XCTAssertEqual(configuration?.dryRun, false)
     }
@@ -809,13 +899,15 @@ final class TokenStoreTests: XCTestCase {
         // a flag through, so the configuration reads argv directly.
         let configuration = Uploader.Configuration.fromEnvironment(
             ["BOI_API_BASE": "http://localhost:3041"],
-            searchingFrom: "/nonexistent", arguments: ["Boi", "--sync", "--dry-run"])
+            searchingFrom: noDirectory, applicationSupportDirectory: noAppSupport,
+            arguments: ["Boi", "--sync", "--dry-run"])
         XCTAssertEqual(configuration?.dryRun, true)
     }
 
     func testNoBaseURLMeansNoUploadRatherThanADefaultPort() {
-        XCTAssertNil(Uploader.Configuration.fromEnvironment([:], searchingFrom: "/nonexistent",
-                                                            arguments: []))
+        XCTAssertNil(Uploader.Configuration.fromEnvironment(
+            [:], searchingFrom: noDirectory, applicationSupportDirectory: noAppSupport,
+            arguments: []))
     }
 }
 
@@ -974,8 +1066,10 @@ final class SyncRunUploadTests: XCTestCase {
                                                outputDirectory: state + "/out",
                                                stateDirectory: state),
                                   salt: Self.salt,
-                                  tokenStore: EnvironmentTokenStore(environment: [:],
-                                                                    searchingFrom: "/nonexistent"))
+                                  tokenStore: EnvironmentTokenStore(
+                                      environment: [:],
+                                      searchingFrom: "/nonexistent",
+                                      applicationSupportDirectory: "/nonexistent-app-support"))
             .run()
         XCTAssertTrue(outcome.ran)
         XCTAssertNil(outcome.upload)

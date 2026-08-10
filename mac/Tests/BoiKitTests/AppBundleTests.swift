@@ -363,6 +363,19 @@ final class HeartbeatTests: XCTestCase {
 
 final class SyncRunTests: XCTestCase {
 
+    /// **Every `SyncRun` in this file must inject this.** `Uploader.Configuration
+    /// .fromEnvironment()` now refuses its real Application Support `.env` fallback
+    /// while `swift test` is running (see `Uploader.Configuration
+    /// .applicationSupportDirectoryDefaultForCurrentProcess`) — but that guard is the
+    /// second layer, not a reason to skip the first. A `dryRun` uploader with an
+    /// unreachable base URL means this suite proves nothing about the network by
+    /// omission: nothing is sent, on purpose, regardless of what any environment or
+    /// `.env` anywhere on the machine says.
+    private func dryRunUploader() -> Uploader {
+        Uploader(configuration: .init(baseURL: URL(string: "http://127.0.0.1:1")!, dryRun: true),
+                identity: DeviceIdentity(user_id: "usr_synctest0000001", device_token: "tok_synctest"))
+    }
+
     private func paths(label: String) throws -> SyncRun.Paths {
         let root = "/tmp/boi-a/tests/run-\(label)-\(UUID().uuidString)"
         try FileManager.default.createDirectory(atPath: root, withIntermediateDirectories: true)
@@ -384,7 +397,7 @@ final class SyncRunTests: XCTestCase {
     /// nothing. Two invocations inside the window do one run and log a skip.
     func testASecondRunInsideTheWindowSkips() throws {
         let paths = try paths(label: "idempotent")
-        let run = SyncRun(paths: paths, salt: MetricsFixture.salt)
+        let run = SyncRun(paths: paths, salt: MetricsFixture.salt, uploader: dryRunUploader())
         let now = MetricsFixture.now
 
         let first = try run.run(now: now)
@@ -408,7 +421,7 @@ final class SyncRunTests: XCTestCase {
     /// `launchd` re-running on every wake, not to stop a human who just clicked.
     func testForceOverridesTheGuard() throws {
         let paths = try paths(label: "force")
-        let run = SyncRun(paths: paths, salt: MetricsFixture.salt)
+        let run = SyncRun(paths: paths, salt: MetricsFixture.salt, uploader: dryRunUploader())
         XCTAssertTrue(try run.run(now: MetricsFixture.now).ran)
         XCTAssertTrue(try run.run(now: MetricsFixture.now, force: true).ran)
     }
@@ -417,7 +430,7 @@ final class SyncRunTests: XCTestCase {
     /// rest of the product reads.
     func testARunProducesTheDigestThePacksAndTheHeartbeat() throws {
         let paths = try paths(label: "artifacts")
-        let outcome = try SyncRun(paths: paths, salt: MetricsFixture.salt)
+        let outcome = try SyncRun(paths: paths, salt: MetricsFixture.salt, uploader: dryRunUploader())
             .run(now: MetricsFixture.now)
 
         XCTAssertTrue(outcome.ran)
@@ -447,7 +460,7 @@ final class SyncRunTests: XCTestCase {
                                   mirror: root + "/mirror.db",
                                   outputDirectory: root + "/out",
                                   stateDirectory: root)
-        let outcome = try SyncRun(paths: paths, salt: MetricsFixture.salt)
+        let outcome = try SyncRun(paths: paths, salt: MetricsFixture.salt, uploader: dryRunUploader())
             .run(now: MetricsFixture.now)
 
         XCTAssertTrue(outcome.ran)
@@ -477,7 +490,7 @@ final class SyncRunTests: XCTestCase {
                                   outputDirectory: root + "/out",
                                   stateDirectory: root)
 
-        XCTAssertThrowsError(try SyncRun(paths: paths, salt: MetricsFixture.salt)
+        XCTAssertThrowsError(try SyncRun(paths: paths, salt: MetricsFixture.salt, uploader: dryRunUploader())
             .runReportingFailures(now: MetricsFixture.now),
             "an unreadable chat.db must still be an error")
 
@@ -493,7 +506,7 @@ final class SyncRunTests: XCTestCase {
     /// And the successful path reports it as probed, not asserted.
     func testASuccessfulRunProbesRatherThanAssertingAccess() throws {
         let paths = try paths(label: "probed")
-        _ = try SyncRun(paths: paths, salt: MetricsFixture.salt).run(now: MetricsFixture.now)
+        _ = try SyncRun(paths: paths, salt: MetricsFixture.salt, uploader: dryRunUploader()).run(now: MetricsFixture.now)
         let heartbeat = try XCTUnwrap(Heartbeat.read(fromDirectory: paths.stateDirectory))
         XCTAssertTrue(heartbeat.full_disk_access)
         // The probe really did open the database this run read from.

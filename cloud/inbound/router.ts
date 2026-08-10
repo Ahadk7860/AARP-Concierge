@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 import type { SpectrumStreamEvent } from "../channel/src/spectrum-stream.js";
-import type { ChatReply, InboundMessage } from "../shared/src/contracts.js";
+import type { ChatReplyAny, InboundMessage } from "../shared/src/contracts.js";
 import type { UserScope } from "../db/src/scope.js";
 import { EncryptedPrivateStore } from "./private-store.js";
 
@@ -14,9 +14,21 @@ export interface DeterministicIntentPort {
   route(message: InboundMessage, scope: UserScope): Promise<DeterministicIntentResult>;
 }
 
-/** Track J implements this closed seam; Track I neither imports nor widens J's code. */
+/**
+ * Track J implements this closed seam; Track I neither imports nor widens J's code.
+ *
+ * Return type widened `ChatReply` -> `ChatReplyAny` (Track H, v3/h-join): the ONLY change
+ * is which wire version a producer may return. `ClosedChatAdapter` (the old path) still
+ * returns plain `ChatReply` (v1), a subtype of `ChatReplyAny` — nothing about its behavior
+ * changes. This exists so `AgentClosedChatBridge` (cloud/agent/src/inbound-bridge.ts) can
+ * return `chat_reply.v2`'s `kind: "open"` with real `evidence` refs instead of downgrading
+ * a verified agent reply back to v1 and discarding the evidence that makes it defensible.
+ * Every consumer downstream of this port only ever reads `.text` (see `InboundRouter.route`
+ * below) and `.schema_version`/`.kind` are otherwise opaque to it, so this widening is
+ * type-level only — no runtime branch anywhere needed to change.
+ */
 export interface ClosedChatPort {
-  waitingOnMe(message: InboundMessage, scope: UserScope): Promise<ChatReply>;
+  waitingOnMe(message: InboundMessage, scope: UserScope): Promise<ChatReplyAny>;
 }
 
 export interface InboundEventDecoder {
@@ -37,7 +49,7 @@ export type InboundRouteOutcome =
   | { kind: "unknown_user" }
   | { kind: "duplicate"; idempotency_key: string }
   | { kind: "deterministic"; intent: string; reply_text: string | null; idempotency_key: string }
-  | { kind: "chat"; reply: ChatReply; idempotency_key: string };
+  | { kind: "chat"; reply: ChatReplyAny; idempotency_key: string };
 
 export const SETUP_TOKEN = "boi-setup";
 

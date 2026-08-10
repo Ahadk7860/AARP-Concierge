@@ -114,6 +114,156 @@ treat that event as an update-health signal, and a post-update smoke test belong
 read an item written interactively: `errSecSuccess`, no `errSecInteractionNotAllowed`. No explicit ACL
 needed — Keychain scopes by signing identity. Do not add ACL code; it was measured, not assumed.
 
+### 2026-08-09 · Claude · A
+Landed `contracts/schema/chat_reply.v2.json` (adds `kind: "open"`, evidence-refs replacing
+licenses for it) and `chat_route.v1.json` (`{lane, intent?}`), each with a differential test
+against ajv from day one, per orchestrator instruction. Zod mirrors in `cloud/api/src/schemas.ts`;
+`lane` (router outcome) and `intent` (§4.2a cache key) are kept as distinct, non-conflatable
+fields — `intent`'s enum must be hand-kept byte-identical to `cloud/shared/src/intents.ts`.
+
+### 2026-08-09 · Claude · H — merge of v3/a-contracts into v3/h-join
+Merged cleanly except INTERFACES.md (append-only log conflict, resolved by keeping both sides'
+entries). DEEPSEEK_FIXES.md deletion applied cleanly on both sides.
+
+### 2026-08-09 · Claude · C
+No transport for §4.3 existed anywhere in the repo, so Track C built it: new package
+`cloud/device-search/` (`DeviceGateway`, `attachDeviceGateway`) holds the persistent cloud<->Mac
+WebSocket, request/response correlation by `id`, and the 4s timeout. `gateway.portFor(scope)`
+returns a `DeviceSearchPort` matching Track B's `cloud/agent/src/ports.ts` shape structurally
+(defined independently — that package doesn't exist in this worktree yet).
+
+### 2026-08-09 · Claude · C
+Added `ws` + `@types/ws` to root `package.json`/`package-lock.json` (smallest edit: two
+dependency lines) — no WebSocket library was installed anywhere. `npm ci` in another worktree
+needs these before `cloud/device-search` will typecheck/build.
+
+### 2026-08-09 · Claude · C
+`attachDeviceGateway`'s `resolveUserId` (`cloud/device-search/src/gateway.ts`) is a **dev
+placeholder** — it trusts a `?user_id=` query param with no auth. Whoever wires this into
+`cloud/api/src/main.ts` for real (Track H, or Track C later) must replace it with a real
+device-token check before this ships; do not carry the placeholder into production config.
+
+### 2026-08-09 · Claude · C
+Mac side: `mac/Sources/BoiKit/Search{Protocol,Index,RequestHandler}.swift` implement the
+`ask_device` "search" op end-to-end against the real, already-populated `message_fts` (verified:
+97,137 messages / 566 distinct handles in the real `mirror.db`, filtered FTS query ~1-2ms
+excluding CLI overhead). **Not wired into the app** — `mac/Sources/BoiApp` (Track D's file) still
+needs a WebSocket client that connects to `wss://.../v1/device-link`, decodes
+`AskDeviceSearchRequest`, calls `SearchRequestHandler.handle(_:)`, and encodes the response back.
+`SearchRequestHandler`/`SearchIndex` are the pure, already-tested logic; only the socket plumbing
+in `BoiApp` remains, and Track C did not touch that file per the ownership rule.
+
+### 2026-08-09 · Claude · H — merge of v3/c-search into v3/h-join
+Merged cleanly except INTERFACES.md (append-only log conflict, resolved by concatenation).
+Noting for the findings list: `attachDeviceGateway`'s `resolveUserId` dev placeholder (no auth)
+is not yet replaced — flagged again below in the integration findings.
+
+### 2026-08-09 · Claude · Track D
+Smallest-possible edit to shared `mac/Sources/BoiKit/SyncRun.swift`: `Paths.installed()` now resolves
+`chatDatabase` via `MessagesFolderAccess.resolvedChatDatabasePath` (falls back to the untouched FDA
+default on any failure, so an FDA-only user is unaffected), and the heartbeat wire call site now passes
+`messagesAccessState`. New optional field `HeartbeatUpload.messages_access_state` (Uploader.swift) —
+`"ok" | "never_configured" | "lost"` — is **not yet in the frozen contract**
+(`contracts/openapi/boi-api.v1.yaml` sets `additionalProperties: false` on the heartbeat shape, so the
+server currently drops this key on validation). Flagging for Track F or H: amend the OpenAPI contract +
+TS zod schema to accept it, then wire `cloud/channel/**` to text the user when a device reports `"lost"` —
+that is the headless-3am-failure case a local macOS notification (`RecoveryNotifier.swift`, `BoiApp`)
+alone cannot reach, because nobody is looking at the Mac when it happens.
+
+### 2026-08-09 · Claude · H — merge of v3/d-permissions into v3/h-join
+Merged what exists at d-permissions tip (`f162fff`) — track is actively being worked on, expect
+a re-merge later. Only conflict was INTERFACES.md (append-only, resolved by concatenation). The
+`messages_access_state` OpenAPI/zod gap noted above is still open — carried into the findings list.
+
+### 2026-08-09 · Claude · H — v3/a-contracts, v3/b-agent, v3/c-search, v3/d-permissions all merged into v3/h-join
+Full run: 12 pre-existing failing test files before any merge (shared dev Postgres state, Python
+interpreter, e2e/scheduler flake — matches HANDOFF_CLAUDE.md's documented list), same class of
+failures after all four merges (5-8 files depending on shared-DB state at run time), zero NEW
+failures attributable to the merges. `npm ci` picked up `v3/c-search`'s `ws`/`@types/ws` addition
+cleanly.
+
+### 2026-08-09 · Claude · H — wired the v3 agent path behind BOI_AGENT_PATH_ENABLED into LIVE inbound
+New `cloud/agent/src/inbound-bridge.ts` (`AgentClosedChatBridge`) implements `ClosedChatPort`
+(`cloud/inbound/router.ts`) by calling `runAgentTurn` for real — real `OfflineRouterProvider`/
+`ModelRouterProvider`, real tool registry, real verifier, real (stub) `BubbleSink`. Selected in
+`cloud/phase2-runtime/compose-runtime.ts` (smallest edit: one conditional building `chat`) via
+`agentPathEnabledFromEnv()`; `ClosedChatAdapter` (old path) stays the default when the flag is
+unset, matching runtime.ts's "fails closed" convention. Full test suite green before/after
+(no new failures), `tsc --noEmit` clean except the pre-existing `inbound-adapter.test.ts` errors.
+
+**Three known gaps in this wiring, logged in full in inbound-bridge.ts's file header — flagging
+here too since compose-runtime.ts is shared:**
+1. `ClosedChatPort.waitingOnMe()` returns ONE `ChatReply`; the old wire contract has no concept
+   of §2's multi-bubble delivery. The bridge collapses `sink.deliver()` calls into one joined
+   reply (blank-line-separated) rather than dropping content, but this is NOT the product
+   behavior §2 describes. Real multi-bubble over live inbound traffic needs either
+   `ClosedChatPort` widened to accept a `BubbleSink`, or a new entry point that bypasses
+   `InboundRouter`'s single-reply path and calls the REAL `openBubbleSink` (Track F's, once it
+   reaches `main` — currently only the stub exists here).
+2. `ChatReply` (`cloud/shared/src/contracts.ts`) is still v1-shaped (`answer`/`decline`, no
+   `evidence`) even though `chat_reply.v2`'s `kind: "open"` shipped in `cloud/api/src/schemas.ts`
+   (Track A). The bridge downgrades every agent reply to v1's `answer`/`decline` with
+   `licenses: []`, losing the evidence refs. Widening `ChatReply`'s union is out of phase-1
+   scope (shared file); whoever picks this up next should extend the type and this bridge in
+   the same change so they don't drift again.
+3. `AgentStore` passed into the bridge is `InMemoryAgentStore` (empty) — Track E's §4.1 tables
+   are not merged into this branch. The flag is safe to leave unset in every real deploy (it
+   answers with no relationship data but never fabricates, since the verifier still runs) but is
+   not useful until Track E lands and a real `AgentStore` replaces the placeholder.
+
+### 2026-08-09 (later) · Claude · Track D
+Correction to the entry above: `messages_access_state` is **not currently sent on the live heartbeat
+upload at all** (reverted in a follow-up commit after `swift test` proved a real device would get every
+heartbeat `400`-rejected the moment the field carried a non-nil value — `additionalProperties: false`
+rejects the whole body, not just the unknown key). The field still exists on `HeartbeatUpload` and
+`MessagesFolderAccess.classifyRecoveryState` still drives the local notification; only the network call
+is unwired. Re-wire the `SyncRun.swift` call site once the contract permits the field — do not assume
+it is already flowing to the server from this track's work.
+
+### 2026-08-09 · Claude · H — re-merge of v3/d-permissions at 6d19885/4aaac22 (production-bug fix)
+Orchestrator flagged that my earlier merge (at `f162fff`) carried a bug: `messages_access_state`
+was wired into the live heartbeat payload, and the frozen contract's `additionalProperties: false`
+rejects the WHOLE request for an unknown field — every real device heartbeat would have been
+400-rejected. Re-merged to `6d19885` (reverts the wire call) + `4aaac22` (this correction doc).
+Consequence for my earlier finding #4 in the Track H report: `messages_access_state` is NOT on the
+wire at all right now — do not treat it as available. Only conflict was INTERFACES.md, resolved by
+concatenation as before.
+
+### 2026-08-09 · Claude · A — shared-file edit: `cloud/shared/src/contracts.ts`
+Added `ChatReplyV2`/`EvidenceRef`/`ChatReplyAny`, ADDITIVE only — `ChatReply` (v1) unchanged,
+selector.ts/reply.ts/waiting-on-me.ts unaffected. Closes the Track H integration finding: v2 was
+schema+zod validated but unreachable from any runtime type. `schemas.ts` now asserts at compile
+time that `ChatReplyV2` is bidirectionally equal to `z.infer<typeof chatReplyV2Schema>`.
+
+### 2026-08-09 · Claude · H — re-merge of v3/a-contracts at f00ef1f
+Merged `ChatReplyV2`/`EvidenceRef`/`ChatReplyAny` (`cloud/shared/src/contracts.ts`) into
+`v3/h-join`. Closes my earlier finding #2 — rewiring `AgentClosedChatBridge` to emit
+`chat_reply.v2`'s `open` kind with real `evidence` refs instead of downgrading to v1. Only
+conflict was INTERFACES.md, resolved by concatenation as before.
+
+### 2026-08-09 · Claude · H — rewired AgentClosedChatBridge to chat_reply.v2, widened ClosedChatPort
+Three follow-on edits to make finding #2's fix reachable end to end:
+1. `cloud/inbound/router.ts` (old path, not previously edited by H): `ClosedChatPort.waitingOnMe()`
+   return type widened `ChatReply` -> `ChatReplyAny`, and `InboundRouteOutcome`'s `"chat"` variant
+   likewise. Purely additive — `ClosedChatAdapter` still returns plain v1 `ChatReply`, a subtype;
+   nothing downstream reads anything but `.text`, so no runtime branch changed. `cloud/inbound/
+   router.test.ts` (10 tests) green, untouched.
+2. `cloud/agent/src/agent-loop.ts`: `AgentTurnResult`'s `"agent"` variant gained `evidence:
+   readonly EvidenceRef[]` = `buildEvidencePool(calls).refs` — the SAME pool the verifier itself
+   checked the delivered text against. Previously this was computed and thrown away; no test
+   asserted a full-object equality on this variant, so this is additive.
+3. `cloud/agent/src/inbound-bridge.ts`: `AgentClosedChatBridge` now returns real `chat_reply.v2`
+   `kind: "open"` + the evidence above for the agent lane; `refuse`/`agent_no_output` still map to
+   v1 `decline` (nothing was generated, evidence would be vacuously `[]`, no reason to change
+   schema_version for a lane that never touches the verifier). Added `runtimeOverride` (test-only)
+   so a scripted model can reach the "open" success/degrade paths without a live Gemini key.
+
+Full suite re-run after both merges: same pre-existing failure set as before this round
+(shared dev Postgres contention under concurrent vitest workers — `webhook.test.ts`/
+`turns.test.ts` pass in isolation, confirmed; `cloud/db/schema.test.ts`, `cloud/e2e`,
+`cloud/intelligence-bridge`, `cloud/scheduler` — matches HANDOFF_CLAUDE.md's documented list).
+Zero new failures. `tsc --noEmit` and `eslint` clean on everything touched this round.
+
 ### 2026-08-09 · Claude · I → E ⚠️ CUTOVER BLOCKER — derivation depends on the Mac's local timezone
 Swift `ThreadStructure` reads `Calendar.current` (device local time). Cloud/TS defaults to UTC.
 Measured on real data: **28 of 420 relationships (6.7%) get a different `relationshipKind`** from this alone.
@@ -177,3 +327,64 @@ R2 client (cloud/shared/src/r2.ts) + digest payload store (cloud/db/src/digest-r
 - **Deletion failures**: determined pre-existing. `contact_handles` (migration 012, FK to users) not seeded by `seedEveryReachableTable` on `main` either. Not a v3 regression.
 - **Shared Postgres note**: both worktrees share `boi_dev_d`; baselines unreliable. Round 3 numbers came from `v3/deepseek` migration state. CI with clean Postgres container in progress.
 - **Spectrum missing vars for Track H**: `SPECTRUM_LINE_E164` and `SPECTRUM_WEBHOOK_SECRET` are unset in `.env`. Both required for Photon Pro live end-to-end testing. Logged here for Track H until CI is up.
+
+### 2026-08-09 · Claude · H — merged main (v3/deepseek @ 3863ced) into v3/h-join, phase 2 start
+Only conflict was INTERFACES.md (append-only, resolved by concatenation as with every prior
+merge — HEAD's entries first, then origin/main's). `cloud/api/src/main.ts` and
+`package.json`/`package-lock.json` merged cleanly with no conflict markers. `cloud/shared/src/
+intents.ts` and `cloud/channel/src/progressive.ts` are now present — swapping both Track B
+stubs for the real imports next, per orchestrator's phase-2 scope.
+### 2026-08-09 · Claude · C
+No transport for §4.3 existed anywhere in the repo, so Track C built it: new package
+`cloud/device-search/` (`DeviceGateway`, `attachDeviceGateway`) holds the persistent cloud<->Mac
+WebSocket, request/response correlation by `id`, and the 4s timeout. `gateway.portFor(scope)`
+returns a `DeviceSearchPort` matching Track B's `cloud/agent/src/ports.ts` shape structurally
+(defined independently — that package doesn't exist in this worktree yet).
+
+### 2026-08-09 · Claude · C
+Added `ws` + `@types/ws` to root `package.json`/`package-lock.json` (smallest edit: two
+dependency lines) — no WebSocket library was installed anywhere. `npm ci` in another worktree
+needs these before `cloud/device-search` will typecheck/build.
+
+### 2026-08-09 · Claude · C
+`attachDeviceGateway`'s `resolveUserId` (`cloud/device-search/src/gateway.ts`) is a **dev
+placeholder** — it trusts a `?user_id=` query param with no auth. Whoever wires this into
+`cloud/api/src/main.ts` for real (Track H, or Track C later) must replace it with a real
+device-token check before this ships; do not carry the placeholder into production config.
+
+### 2026-08-09 · Claude · C
+Mac side: `mac/Sources/BoiKit/Search{Protocol,Index,RequestHandler}.swift` implement the
+`ask_device` "search" op end-to-end against the real, already-populated `message_fts` (verified:
+97,137 messages / 566 distinct handles in the real `mirror.db`, filtered FTS query ~1-2ms
+excluding CLI overhead). **Not wired into the app** — `mac/Sources/BoiApp` (Track D's file) still
+needs a WebSocket client that connects to `wss://.../v1/device-link`, decodes
+`AskDeviceSearchRequest`, calls `SearchRequestHandler.handle(_:)`, and encodes the response back.
+`SearchRequestHandler`/`SearchIndex` are the pure, already-tested logic; only the socket plumbing
+in `BoiApp` remains, and Track C did not touch that file per the ownership rule.
+
+### 2026-08-10 · Claude · C
+Closed the `resolveUserId` auth hole noted above: the default is now
+`authenticateDeviceLinkRequest` (`cloud/device-search/src/gateway.ts`), which reuses
+`bootstrapLookups.authenticateDeviceToken` and requires `Authorization: Bearer <device_token>` on
+the upgrade request, checked against the claimed `?user_id=`. Whoever wires `attachDeviceGateway`
+into `cloud/api/src/main.ts` needs no options for real auth; the Mac's WS client (`BoiApp`, still
+unwired per the note above) must send that header, and `mac/Sources/BoiKit` device-token storage
+is outside this track's files.
+### 2026-08-09 (later still) · Claude+orchestrator · Track D — for the DeepSeek session too
+**`swift test` on this repo was silently POSTing to the real production API before commit `649ce42`.**
+`mac/Tests/BoiKitTests/AppBundleTests.swift` constructed `SyncRun` at six call sites with no uploader
+injected; the default resolves `Uploader.Configuration.fromEnvironment()` against the real
+`~/Library/Application Support/Boi/.env`, which on ANY machine that has ever paired a real device holds
+real production credentials. This was true on every `swift test` run on this specific machine prior to
+the fix, including at least two runs the orchestrator (Claude, this session) ran directly in this
+worktree, and an unknown number of Track D's own runs earlier in this track. If DeepSeek's session
+shares this machine or a machine with a similarly-paired `.env`, the same was true there — there was
+nothing repo-specific that would have stopped it; the six call sites are in a file DeepSeek's tracks
+do not own but `swift test` runs the whole suite regardless of which track invokes it.
+Fixed two ways in `649ce42`: (1) the six call sites now inject a `dryRun` uploader; (2)
+`Uploader.Configuration.applicationSupportDirectoryDefaultForCurrentProcess` now refuses the real
+Application Support directory whenever `Uploader.Configuration.isRunningUnderXCTest` is true (detected
+via `NSClassFromString("XCTestCase") != nil`, not the commonly-cited `XCTestConfigurationFilePath`
+environment variable, which measurement showed is NOT set by SwiftPM's `swift test` — only by Xcode's
+own test host). A test that forgets to inject an uploader now gets `upload.not_configured` instead of a
+real network request, regardless of which track wrote it or which session runs it.

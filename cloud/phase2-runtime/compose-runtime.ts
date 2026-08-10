@@ -25,6 +25,14 @@ import {
 } from "./inbound-adapter.js";
 import type { ChatSelectorProvider } from "../chat/src/selector.js";
 import type { HandleEnvelopeKeyProvider } from "../api/src/main.js";
+// Track H (v3/h-join): the v3 agent path, wired BESIDE ClosedChatAdapter rather than in
+// place of it, selected below via BOI_AGENT_PATH_ENABLED (agentPathEnabledFromEnv). See
+// cloud/agent/src/inbound-bridge.ts's file-level comment for the two known gaps this
+// wiring carries (multi-bubble collapse, ChatReply v1 downgrade, no real AgentStore yet).
+import { agentPathEnabledFromEnv } from "../agent/src/runtime.js";
+import { AgentClosedChatBridge } from "../agent/src/inbound-bridge.js";
+import { InMemoryAgentStore } from "../agent/src/ports.js";
+import type { ClosedChatPort } from "../inbound/router.js";
 
 export type Phase2Dependencies = {
   db: Queryable;
@@ -57,12 +65,21 @@ export async function startPhase2Runtime(deps: Phase2Dependencies): Promise<Phas
   // reads liveModelConfigFromEnv() when configured, falling back to the
   // decline stub when no model key is present. compose-runtime uses whatever
   // it receives.
+  // BOI_AGENT_PATH_ENABLED gates the v3 agent path; absent/any-other-value keeps the
+  // proven-live closed-vocabulary path (runtime.ts's "fails closed" convention, §2/§6).
+  // The agent path's AgentStore has no real backing until Track E's §4.1 tables merge —
+  // see inbound-bridge.ts's third gap note — so this flag must stay unset in production
+  // until then; it exists so the wiring is reachable and testable now.
+  const chat: ClosedChatPort = agentPathEnabledFromEnv()
+    ? new AgentClosedChatBridge({ store: new InMemoryAgentStore() })
+    : new ClosedChatAdapter(deps.db, deps.selectorProvider);
+
   const router = new InboundRouter({
     decoder: new SpectrumEventDecoder(),
     users: new HandleUserResolver(deps.db),
     setupUser: new AutoSetupUserCreator(deps.db),
     deterministic: new DeterministicIntentAdapter(),
-    chat: new ClosedChatAdapter(deps.db, deps.selectorProvider),
+    chat,
     delivery: new SpectrumReplyDeliveryPort(deps.channel),
     privateStore,
   });

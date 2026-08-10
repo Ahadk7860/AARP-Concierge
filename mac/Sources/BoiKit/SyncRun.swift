@@ -51,7 +51,12 @@ public struct SyncRun {
             home: URL = FileManager.default.homeDirectoryForCurrentUser
         ) -> Paths {
             let root = home.appendingPathComponent("Library/Application Support/Boi")
-            return Paths(chatDatabase: FullDiskAccess.defaultMessagesPath(home: home),
+            // Prefers a resolved security-scoped bookmark; falls back to the FDA
+            // default on any failure, including "no bookmark saved at all" — see
+            // MessagesFolderAccess.resolvedChatDatabasePath's doc comment. Track D,
+            // logged in INTERFACES.md.
+            return Paths(chatDatabase: MessagesFolderAccess.resolvedChatDatabasePath(
+                            stateDirectory: root.path, home: home),
                          mirror: root.appendingPathComponent("mirror.db").path,
                          outputDirectory: root.appendingPathComponent("out").path,
                          stateDirectory: root.path)
@@ -304,6 +309,16 @@ public struct SyncRun {
         if let heartbeatPath,
            let data = FileManager.default.contents(atPath: heartbeatPath),
            let beat = try? JSONDecoder().decode(Heartbeat.self, from: data) {
+            // NOT wired to messagesAccessState yet, deliberately. HeartbeatUpload
+            // carries the field (Uploader.swift) and MessagesFolderAccess can compute
+            // it (used by RecoveryNotifier locally), but contracts/openapi/boi-api.v1
+            // .yaml sets additionalProperties: false on this shape, and the server
+            // enforces it: sending a non-nil value here turned EVERY real heartbeat
+            // upload into `400 rejected` — caught by SyncRunTests failing with
+            // "upload deferred: ... rejected (/v1/heartbeat)" the moment this ran
+            // against a real endpoint, not a contrived test failure. Re-add this
+            // argument only once Track F or H has amended the contract to permit the
+            // field — see INTERFACES.md's entry for this exact field.
             let wire = HeartbeatUpload.from(beat, deviceID: deviceID,
                                             digestGeneratedAt: phase2Digest?.generated_at)
             if let body = try? JSONEncoder().encode(wire) {
