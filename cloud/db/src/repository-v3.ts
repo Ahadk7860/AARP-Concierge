@@ -72,7 +72,7 @@ export async function insertInteractions(
   const placeholders: string[] = [];
   for (let i = 0; i < rows.length; i++) {
     const r = rows[i]!;
-    const base = params.length;
+    const base = params.length + 1; // +1 for SQL 1-based param numbering
     params.push(r.interaction_id, r.person_id, r.source, r.direction,
       r.occurred_at.toISOString(), r.thread_ref ?? null, r.content_ref ?? null,
       r.length ?? null, JSON.stringify(r.meta ?? {}));
@@ -219,11 +219,11 @@ export async function upsertOpenLoops(
   const placeholders: string[] = [];
   for (let i = 0; i < loops.length; i++) {
     const l = loops[i]!;
-    const base = params.length;
+    const base = params.length + 1; // +1 for SQL 1-based param numbering
     params.push(l.loop_id, l.person_id, l.kind, l.direction, l.description,
       l.opened_at.toISOString(), l.status ?? "open", l.confidence, l.as_of.toISOString());
     placeholders.push(
-      `($1, $${base}, $${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7})`,
+      `($1, $${base}, $${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8})`,
     );
   }
   const res = await scopedQuery(
@@ -292,7 +292,7 @@ export async function insertDailyMetrics(
   const placeholders: string[] = [];
   for (let i = 0; i < rows.length; i++) {
     const r = rows[i]!;
-    const base = params.length;
+    const base = params.length + 1; // +1 for SQL 1-based param numbering
     params.push(r.person_id, r.day, r.message_count, r.momentum ?? null,
       r.initiation_ratio ?? null, r.median_gap_days ?? null,
       r.response_latency_me_min ?? null, r.response_latency_them_min ?? null,
@@ -335,7 +335,7 @@ export async function upsertRelationshipEdges(
   const placeholders: string[] = [];
   for (let i = 0; i < edges.length; i++) {
     const e = edges[i]!;
-    const base = params.length;
+    const base = params.length + 1; // +1 for SQL 1-based param numbering
     params.push(e.person_a, e.person_b, e.shared_groups ?? 0,
       e.co_mentions ?? 0, e.tie_strength ?? null, e.as_of.toISOString());
     placeholders.push(
