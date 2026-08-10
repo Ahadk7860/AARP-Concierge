@@ -24,22 +24,33 @@ final class SecurityScopedSetupModel: ObservableObject {
     enum StepStatus: Equatable {
         case notGranted
         case checking
-        case granted
+        /// `.direct` is the ordinary per-step grant. `.fullDiskAccess` means an existing
+        /// Full Disk Access grant already covers this step — Messages Folder access is
+        /// a strict subset of what FDA grants, so a user who already has FDA sees this
+        /// row satisfied with nothing to click. Contacts and Automation are separate TCC
+        /// services FDA does not cover, so they never report this source.
+        case granted(via: GrantSource = .direct)
         /// Granted once, but the bookmark no longer resolves — see
         /// `MessagesFolderAccess.Error.bookmarkStale` for why this is surfaced instead
         /// of silently re-prompting.
         case needsReauthorization(detail: String)
 
+        enum GrantSource: Equatable {
+            case direct
+            case fullDiskAccess
+        }
+
         var label: String {
             switch self {
             case .notGranted: return "Not granted"
             case .checking: return "Checking…"
-            case .granted: return "Granted"
+            case .granted(.direct): return "Granted"
+            case .granted(.fullDiskAccess): return "Already granted via Full Disk Access"
             case .needsReauthorization: return "Needs re-authorization"
             }
         }
 
-        var isGranted: Bool { self == .granted }
+        var isGranted: Bool { if case .granted = self { return true }; return false }
     }
 
     @Published private(set) var messagesFolderStatus: StepStatus = .checking
@@ -48,9 +59,12 @@ final class SecurityScopedSetupModel: ObservableObject {
 
     private let bookmarkDirectory: String
     private let automationTarget = "Messages"
+    private let fdaProbe: () -> FullDiskAccess.Status
 
-    init(bookmarkDirectory: String = SyncRun.Paths.installed().stateDirectory) {
+    init(bookmarkDirectory: String = SyncRun.Paths.installed().stateDirectory,
+         fdaProbe: @escaping () -> FullDiskAccess.Status = { FullDiskAccess.probe() }) {
         self.bookmarkDirectory = bookmarkDirectory
+        self.fdaProbe = fdaProbe
     }
 
     func refreshAll() {
@@ -62,6 +76,15 @@ final class SecurityScopedSetupModel: ObservableObject {
     // MARK: - Messages folder
 
     func refreshMessagesFolderStatus() {
+        // Full Disk Access already covers this: it grants unrestricted read of
+        // ~/Library/Messages, which is strictly more than the security-scoped bookmark
+        // gives. An FDA-granted user should see this satisfied and have nothing to
+        // click — the picker is the primary path for users WITHOUT FDA, not a second
+        // hurdle for users who already cleared the bigger one.
+        guard !fdaProbe().isGranted else {
+            messagesFolderStatus = .granted(via: .fullDiskAccess)
+            return
+        }
         let store = MessagesFolderAccess.BookmarkStore(directory: bookmarkDirectory)
         guard store.load() != nil else {
             messagesFolderStatus = .notGranted
@@ -72,7 +95,7 @@ final class SecurityScopedSetupModel: ObservableObject {
             try provider.beginAccess()
             defer { provider.endAccess() }
             _ = try provider.url(for: .messages)
-            messagesFolderStatus = .granted
+            messagesFolderStatus = .granted()
         } catch let error as MessagesFolderAccess.Error {
             messagesFolderStatus = .needsReauthorization(detail: error.description)
         } catch {
@@ -118,8 +141,8 @@ final class SecurityScopedSetupModel: ObservableObject {
 
     func refreshContactsStatus() {
         switch CNContactStore.authorizationStatus(for: .contacts) {
-        case .authorized, .limited:
-            contactsStatus = .granted
+        case .authorized:
+            contactsStatus = .granted()
         case .notDetermined:
             contactsStatus = .notGranted
         case .denied, .restricted:
@@ -169,7 +192,7 @@ final class SecurityScopedSetupModel: ObservableObject {
                                                                 typeWildCard, askUserIfNeeded)
             switch status {
             case noErr:
-                return .granted
+                return .granted()
             case OSStatus(errAEEventNotPermitted):
                 return .needsReauthorization(
                     detail: "denied in System Settings > Privacy & Security > Automation")

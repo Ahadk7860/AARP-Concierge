@@ -1,3 +1,4 @@
+import Contacts
 import CryptoKit
 import Foundation
 
@@ -306,12 +307,88 @@ public struct AddressBookDirectory: Sendable {
     }
 
     /// The first readable AddressBook among the default locations, or nil.
+    ///
+    /// Tries the direct SQLite read first — it is the fast path, and once the Contacts
+    /// TCC grant exists (`SecurityScopedSetupModel.grantContactsAccess`), the raw file
+    /// becomes readable too, same as any other TCC-gated file: the grant is what the
+    /// kernel checks, not which API asked. Falls back to `CNContactStore` only when
+    /// every direct read comes back empty or unreadable while Contacts access is
+    /// actually authorized — covering the case where the SQLite schema has drifted
+    /// (`ZABCDRECORD` etc. are Core Data internals, not a stable public schema) or the
+    /// database is otherwise unreadable despite the grant. Either path, the user ends
+    /// up with names instead of raw handles; this file never leaves that up to chance.
     public static func discover(
         home: URL = FileManager.default.homeDirectoryForCurrentUser
     ) -> AddressBookDirectory? {
         for path in defaultPaths(home: home) {
             if let directory = read(path: path), directory.recordCount > 0 { return directory }
         }
-        return nil
+        return discoverViaContactsFramework()
+    }
+
+    /// Reads names and handles through Apple's Contacts framework instead of the raw
+    /// AddressBook file.
+    ///
+    /// Only attempted when `CNContactStore.authorizationStatus(for: .contacts)` is
+    /// already `.authorized` or `.limited` — never `.notDetermined`, which would pop a
+    /// system prompt from inside what looks like an ordinary digest read, and never
+    /// `.denied`/`.restricted`, which would just fail. The prompt belongs to
+    /// `SecurityScopedSetupModel.grantContactsAccess`, on the setup screen, where the
+    /// user is looking at a button that says what it does.
+    ///
+    /// Record ids here are synthetic (`CNContact.identifier` is a string, not the
+    /// `Int64` `ZABCDRECORD.Z_PK` the direct reader uses) — fine, because
+    /// `addressBookRecordID` on `ContactResolver.Identity` is documented diagnostic-only
+    /// and is never serialized into a digest.
+    public static func discoverViaContactsFramework(
+        store: CNContactStore = CNContactStore()
+    ) -> AddressBookDirectory? {
+        // .limited exists on iOS only; macOS's CNAuthorizationStatus has no partial
+        // grant, so .authorized is the only status that means "can enumerate."
+        guard CNContactStore.authorizationStatus(for: .contacts) == .authorized else { return nil }
+
+        let keys: [CNKeyDescriptor] = [
+            CNContactGivenNameKey as CNKeyDescriptor,
+            CNContactFamilyNameKey as CNKeyDescriptor,
+            CNContactOrganizationNameKey as CNKeyDescriptor,
+            CNContactPhoneNumbersKey as CNKeyDescriptor,
+            CNContactEmailAddressesKey as CNKeyDescriptor,
+        ]
+        let request = CNContactFetchRequest(keysToFetch: keys)
+
+        var names: [Int64: String] = [:]
+        var handles: [String: Int64] = [:]
+        var nextRecord: Int64 = 0
+
+        do {
+            try store.enumerateContacts(with: request) { contact, _ in
+                let parts = [contact.givenName, contact.familyName]
+                    .filter { !$0.isEmpty }
+                let display = parts.isEmpty
+                    ? (contact.organizationName.isEmpty ? nil : contact.organizationName)
+                    : parts.joined(separator: " ")
+                guard let display else { return }
+
+                nextRecord += 1
+                let record = nextRecord
+                names[record] = display
+
+                for phone in contact.phoneNumbers {
+                    let normalized = ContactResolver.normalize(phone.value.stringValue)
+                    guard !normalized.isEmpty else { continue }
+                    if handles[normalized] == nil { handles[normalized] = record }
+                }
+                for email in contact.emailAddresses {
+                    let normalized = ContactResolver.normalize(email.value as String)
+                    guard !normalized.isEmpty else { continue }
+                    if handles[normalized] == nil { handles[normalized] = record }
+                }
+            }
+        } catch {
+            return nil
+        }
+
+        guard !names.isEmpty else { return nil }
+        return AddressBookDirectory(recordsByHandle: handles, namesByRecord: names)
     }
 }

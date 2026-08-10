@@ -123,29 +123,48 @@ enum HeadlessSync {
     }
 }
 
-/// Decides which onboarding flow a launch lands on. The Full Disk Access flow
-/// (`OnboardingView`/`PermissionModel`) is the one every existing user who has already
-/// granted FDA is on today, and requirement 4 of the picker-becomes-default decision is
-/// that those users must be completely unaffected — so the check is simply "does FDA
-/// already work," computed once at launch, the same probe `FullDiskAccess.swift` has
-/// always used for this. Only a Mac WITHOUT a working FDA grant — overwhelmingly a
-/// fresh install, since anyone who already has FDA takes the branch above — lands on
-/// the picker (`SecurityScopedSetupView`), which is what "the picker becomes the
-/// default onboarding entry point" means in practice: default for new installs, no
-/// change for old ones.
+/// Decides which onboarding flow a launch lands on.
 ///
-/// This is computed once per launch, not re-evaluated live: a user who grants FDA
-/// mid-session while looking at the picker screen sees the picker's own Messages
-/// Folder row go green (`SecurityScopedSetupModel` reads bookmarks and FDA-adjacent
-/// probes independently), and a relaunch is what would move them to the other flow —
-/// consistent with how `PermissionModel`'s own FDA grant flow already requires a
-/// relaunch to observe a fresh grant (see `FullDiskAccess.swift`'s Finding 4).
+/// The picker (`SecurityScopedSetupView`) is the primary path and Full Disk Access
+/// (`OnboardingView`/`PermissionModel`) is the documented fallback — so the setup
+/// screen must be reachable by everyone, not just fresh installs. It is reachable two
+/// ways:
+///
+/// 1. **Once, automatically, on the first launch that has never completed setup** —
+///    `hasCompletedSetupKey` is unset. An FDA-granted user sees this too, but every
+///    step that FDA already covers reports itself granted with nothing to click
+///    (`SecurityScopedSetupModel.refreshMessagesFolderStatus`), so clearing it is one
+///    "Continue to Boi" click, not new friction.
+/// 2. **On demand, afterwards**, via the "Boi Setup…" command (⌘,) that
+///    `BoiApplication.commands` installs — so a permission can be fixed and re-checked
+///    without relaunching, and without waiting for a fresh install to see the screen
+///    again.
+///
+/// Once `hasCompletedSetupKey` is set, later launches fall back to the FDA probe:
+/// granted → `OnboardingView`, unchanged from before this file learned about the
+/// picker — an existing FDA-granted user who has cleared setup once keeps landing on
+/// exactly the screen they always have. Not granted → the picker again, since that is
+/// the only path that can still do something for them.
 enum AppEntryFlow {
     case fullDiskAccess
     case securityScopedPicker
 
-    static func current(probe: () -> FullDiskAccess.Status = { FullDiskAccess.probe() }) -> AppEntryFlow {
-        probe().isGranted ? .fullDiskAccess : .securityScopedPicker
+    /// Set once the user has clicked through the setup screen (or it auto-completed
+    /// because every step FDA covers was already satisfied). Never set for a user who
+    /// has not seen the screen at all — that is what makes "reachable for everyone"
+    /// true rather than aspirational.
+    static let hasCompletedSetupKey = "app.boi.mac.setup.completed.v1"
+
+    static func current(probe: () -> FullDiskAccess.Status = { FullDiskAccess.probe() },
+                        defaults: UserDefaults = .standard) -> AppEntryFlow {
+        guard defaults.bool(forKey: hasCompletedSetupKey) else {
+            return .securityScopedPicker
+        }
+        return probe().isGranted ? .fullDiskAccess : .securityScopedPicker
+    }
+
+    static func markSetupCompleted(defaults: UserDefaults = .standard) {
+        defaults.set(true, forKey: hasCompletedSetupKey)
     }
 }
 
@@ -153,15 +172,19 @@ struct BoiApplication: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @StateObject private var model = PermissionModel()
     @StateObject private var setupModel = SecurityScopedSetupModel()
-    private let entryFlow = AppEntryFlow.current()
+    // @State, not `let`: unlike the one-time launch decision this replaces, the flow
+    // now has to change mid-session — both when setup completes and when the user
+    // reopens it from the "Boi Setup…" command below.
+    @State private var entryFlow = AppEntryFlow.current()
 
     var body: some Scene {
         WindowGroup("Boi") {
             Group {
                 switch entryFlow {
                 case .fullDiskAccess:
-                    // Unchanged. Every existing FDA-granted user's launch is byte-for-byte
-                    // what it was before this file learned about the picker at all.
+                    // Unchanged for a user who has already cleared setup once. Every
+                    // existing FDA-granted user's launch is byte-for-byte what it was
+                    // before this file learned about the picker at all.
                     OnboardingView(model: model)
                         .onAppear { model.start() }
                         .onReceive(NotificationCenter.default.publisher(
@@ -173,12 +196,28 @@ struct BoiApplication: App {
                             model.applicationDidBecomeActive()
                         }
                 case .securityScopedPicker:
-                    SecurityScopedSetupView(model: setupModel)
+                    SecurityScopedSetupView(model: setupModel, onContinue: {
+                        AppEntryFlow.markSetupCompleted()
+                        entryFlow = AppEntryFlow.current()
+                    })
                 }
             }
             .frame(minWidth: 560, minHeight: 460)
         }
         .windowResizability(.contentSize)
+        .commands {
+            // The way to reach setup again after first run. ⌘, is the standard
+            // Settings/Preferences shortcut, which is exactly what this screen is —
+            // where to go to check or fix a permission — for both a fresh-install user
+            // still working through it and an existing FDA user who has never needed
+            // to open it before.
+            CommandGroup(replacing: .appSettings) {
+                Button("Boi Setup…") {
+                    entryFlow = .securityScopedPicker
+                }
+                .keyboardShortcut(",", modifiers: .command)
+            }
+        }
     }
 }
 

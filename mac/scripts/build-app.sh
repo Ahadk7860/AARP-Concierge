@@ -76,6 +76,10 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>LSUIElement</key>               <true/>
     <!-- LSUIElement: menu-bar agent. Remove above to show Dock icon during onboarding. -->
     <key>NSHumanReadableCopyright</key>  <string>Boi</string>
+    <!-- Required for CNContactStore.requestAccess to prompt at all -- without this key
+         macOS never lists Boi under System Settings > Privacy & Security > Contacts,
+         and the request fails instead of prompting. -->
+    <key>NSContactsUsageDescription</key><string>Boi uses your contacts to show names instead of raw phone numbers and email addresses in your message reports.</string>
 </dict>
 </plist>
 PLIST
