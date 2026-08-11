@@ -41,6 +41,8 @@ import { enhanceRuntimeWithPhase2, type Phase2Config } from "../../phase2-runtim
 import { stubStreamPort } from "../../phase2-runtime/stub-stream-port.js";
 import { liveModelConfigFromEnv, ModelChatSelectorProvider } from "../../phase2-runtime/live-providers.js";
 import { liveSpectrumStreamPort } from "../../phase2-runtime/live-stream-port.js";
+import { DeviceGateway, attachDeviceGateway } from "../../device-search/src/gateway.js";
+import { installDeviceGateway } from "../../agent/src/runtime.js";
 
 export type SpectrumConfig = {
   projectId: string;
@@ -612,6 +614,21 @@ export async function startRuntime(
     if (config.card !== null) registerCardProxy(app, config.card, factories.fetch);
     registerHealthRoutes(app, status);
     cleanups.unshift(() => factories.closeApp(app));
+
+    // V3_ARCHITECTURE.md §4.3: the persistent cloud <-> Mac WebSocket `ask_device` runs
+    // over. `app.server` only exists once `buildServer` has returned, which is why this
+    // has to happen here rather than earlier alongside phase2 setup. `installDeviceGateway`
+    // (cloud/agent/src/runtime.ts) makes this one gateway reachable from
+    // `AgentClosedChatBridge.waitingOnMe()` (cloud/agent/src/inbound-bridge.ts) via
+    // `deviceSearchPortFor(scope)` without threading it through
+    // cloud/phase2-runtime/compose-runtime.ts's `AgentClosedChatBridge` construction call.
+    // Auth stays on: `attachDeviceGateway`'s default `resolveUserId` is
+    // `authenticateDeviceLinkRequest` (gateway.ts) — real `Authorization: Bearer
+    // <device_token>` + scope-match auth, never `insecureDevUserIdFromQueryParam`.
+    const deviceGateway = new DeviceGateway();
+    attachDeviceGateway(app.server, deviceGateway);
+    installDeviceGateway(deviceGateway);
+
     await factories.listen(app, { port: config.port, host: config.host });
 
     return {
