@@ -72,7 +72,12 @@ export async function processOneIngestJob(
     // next digest, not the digest ingest failed or retried forever (a retry would hit
     // DuplicateDigestError on insertDigest and never reach derivation again).
     try {
-      await deriveV3FromDigest(scope, { digest_id, digest });
+      const derived = await deriveV3FromDigest(scope, { digest_id, digest });
+      // "Did not throw" is not "wrote rows". Every relationship tool in production
+      // returns evidence_count=0 while derivation reports no failure, and nothing
+      // counts what it actually wrote — so the two indistinguishable explanations
+      // (writes nothing / writes something the store cannot find) stay indistinguishable.
+      workerLog("info", "v3_derived", { digest_id, ...derived });
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       process.stderr.write(
