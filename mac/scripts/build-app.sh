@@ -42,7 +42,13 @@ SIGN_IDENTITY="${BOI_CODESIGN_IDENTITY:--}"
 echo "building BoiApp ($CONFIGURATION)…"
 swift build --package-path mac --configuration "$CONFIGURATION" --arch arm64 --arch x86_64 --product BoiApp
 swift build --package-path mac --configuration "$CONFIGURATION" --arch arm64 --arch x86_64 --product BoiWakeHelper
-BIN_DIR="$(swift build --package-path mac --configuration "$CONFIGURATION" --show-bin-path)"
+# --show-bin-path MUST carry the same --arch flags as the build above. Without them it
+# returns the single-arch directory while the build wrote a universal binary elsewhere, so
+# the script packaged whatever stale binary happened to be sitting in that directory. That
+# is not hypothetical: it shipped an app whose Info.plist was freshly generated (this script
+# writes that every run) but whose executable predated the setup-screen work by a day, so a
+# rebuilt-and-reinstalled app kept showing the old onboarding.
+BIN_DIR="$(swift build --package-path mac --configuration "$CONFIGURATION" --arch arm64 --arch x86_64 --show-bin-path)"
 BINARY="$BIN_DIR/BoiApp"
 HELPER_BINARY="$BIN_DIR/BoiWakeHelper"
 [ -x "$BINARY" ] || { echo "no binary at $BINARY" >&2; exit 1; }
