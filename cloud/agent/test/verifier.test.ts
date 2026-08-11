@@ -459,3 +459,58 @@ describe("runVerifiedTurn — regenerate once, then degrade (I1, I2)", () => {
     }
   });
 });
+
+describe("runVerifiedTurn — pure-general echo fast path (the 'New York' ticket)", () => {
+  it("a pure general turn that restates the tool's own answer verbatim verifies on the FIRST pass, no degrade", async () => {
+    const answer = "New York in August averages 84 degrees.";
+    const outcome = await runVerifiedTurn(
+      answer,
+      [generalCall(answer)],
+      async () => { throw new Error("must not be called — this must not even attempt to regenerate"); },
+    );
+    expect(outcome).toEqual({ status: "verified", text: answer, attempt: "first" });
+  });
+
+  it("whitespace-only differences from the tool's answer still count as an echo", async () => {
+    const outcome = await runVerifiedTurn(
+      "  New York in August averages 84 degrees.  ",
+      [generalCall("New York in August averages 84 degrees.")],
+      async () => { throw new Error("must not be called"); },
+    );
+    expect(outcome.status).toBe("verified");
+  });
+
+  it("a draft that merely PARAPHRASES general's answer is not an echo and still goes through the strict pipeline", async () => {
+    const outcome = await runVerifiedTurn(
+      "New York gets pretty warm in August, around 84 degrees.",
+      [generalCall("New York in August averages 84 degrees.")],
+      async () => "New York in August averages 84 degrees.", // regenerate corrects it
+    );
+    // Falls through to the ordinary regenerate path rather than being fast-pathed — the
+    // echo check is exact-match only, by design (see isPureGeneralEcho's doc comment).
+    expect(outcome.status).toBe("verified");
+    if (outcome.status === "verified") expect(outcome.attempt).toBe("regenerated");
+  });
+
+  it("THE GUARANTEE: the fast path never fires for a mixed turn, so a relationship_state + general turn still refuses to let general ground a person name", async () => {
+    const outcome = await runVerifiedTurn(
+      "Maya is overdue for a reply and has been drifting from you.",
+      [relationshipCall(), generalCall("Maya Chen, born in 1990, is a notable public figure known for her writing.")],
+      async () => "Maya is overdue for a reply and has been drifting from you.",
+    );
+    // Not a verbatim echo of general's answer, and a person-scoped tool ran this turn, so
+    // this never qualifies for the fast path. "Maya" is grounded here legitimately (via
+    // relationship_state's `display`), so this one verifies — but through the ordinary
+    // strict pool, not the echo shortcut.
+    expect(outcome.status).toBe("verified");
+  });
+
+  it("THE ADVERSARIAL PIN (must never regress): a pure general turn whose draft is NOT an echo — it fabricates a relationship claim using a name general merely mentioned — still degrades, never verifies", async () => {
+    const outcome = await runVerifiedTurn(
+      "Maya is overdue for a reply and has been drifting from you.",
+      [generalCall("Maya Chen, born in 1990, is a notable public figure known for her writing.")],
+      async () => "Maya is overdue for a reply and has been drifting from you.", // model repeats the fabrication
+    );
+    expect(outcome.status).toBe("degraded");
+  });
+});

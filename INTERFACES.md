@@ -461,3 +461,48 @@ failure, with an adversarial control case pinning that the check isn't a no-op.
 `cloud/agent` test suite: 118 passed (118), up from the pre-existing 92 (26 new tests, zero
 existing tests changed in behavior/expectation beyond the two refusal-text assertions the changed
 strings themselves required).
+
+### 2026-08-11 · Claude · fix/h4-general — narrowed the `general`/degraded-status cost, did NOT implement the ticket's suggested design
+The ticket ("Fix a verifier rule that makes a working feature look broken") asked for: let
+`general` ground name-shaped tokens in turns where no person-scoped tool ran, implemented
+structurally in `buildEvidencePool`. **That literal design was evaluated and rejected** — it does
+not survive contact with this file's own pinned adversarial test. `test/verifier.test.ts`'s "THE
+POINT" case (`describe("the general tool must never ground a person-name or handle claim")`) is
+itself a pure-`general` turn (no person-scoped tool call anywhere in it) whose whole point is that
+a free-standing draft ("Maya is overdue for a reply and has been drifting from you.") must still
+fail verification even though nothing but `general` ran that turn. "No person-scoped tool ran" is
+exactly the condition that test is built on, not a condition disjoint from it — so making that the
+gate for loosening `names` would flip the pinned case from a correct rejection to a shipped
+fabrication, the exact exploit the original 2026-08-10 entry above already evaluated and rejected
+once. There is no lexical signal that distinguishes the safe case ("New York") from the unsafe one
+("Maya") at the claim-value level — `PROPER_NOUN_RE` cannot tell them apart, and the verifier's own
+documented "KNOWN CEILING" (checks atoms, not the relation asserted between them) means once a name
+is groundable at all, any sentence built around it verifies clean regardless of what it actually
+claims.
+
+**What shipped instead** (`verifier.ts`'s `isPureGeneralEcho`, called from `runVerifiedTurn` before
+building the evidence pool, on both the first draft and — symmetrically — the regenerated draft):
+a pure-`general` turn (every tool call is `general`, the same negative check `buildEvidencePool`'s
+`isGeneralSource` already uses, so a future non-`general` tool is excluded automatically with no
+hand-maintained "person-scoped" list anywhere) whose draft is, modulo whitespace, EXACTLY
+`general`'s own already-vetted answer text and nothing more, verifies on the spot. A verbatim echo
+cannot assert anything beyond what `general` already said — no new predicate, no name pulled in
+from elsewhere — so this adds zero laundering surface: it is the same text `defaultDegrade` already
+rendered verbatim, just delivered as `status: "verified"` on the first pass instead of after a
+wasted regenerate round-trip and a misleading `status: "degraded"`. `buildEvidencePool`/`isNameKey`
+are UNCHANGED — `general` still grounds zero name-kind claims, unconditionally, in every turn, no
+exception.
+
+**Residual risk, disclosed rather than narrowed away**: this only eliminates the round-trip/degrade
+cost for the subset of `general` answers the model restates verbatim. A paraphrase, an added
+wrapper sentence, or a multi-tool answer that combines `general` with anything else still pays the
+full verify → regenerate → degrade cost described in the 2026-08-10 entry above — that cost was
+narrowed, not eliminated. Pinned by `test/verifier.test.ts`'s "pure-general echo fast path" block
+(includes the adversarial pin re-run under the new code path) and two updated cases in
+`test/agent-loop.test.ts`'s `general`-tool describe block (one for the now-fast-pathed verbatim
+case, one for the still-degrading paraphrase case).
+
+`cloud/agent` test suite: 124 passed (124), up from 118 (6 new/changed tests: 5 new in
+`verifier.test.ts`'s echo-fast-path block, 1 existing `agent-loop.test.ts` case split into two —
+a verbatim-echo case with a new expectation and a new paraphrase case preserving the old one).
+`npm run typecheck`: 0 errors.
