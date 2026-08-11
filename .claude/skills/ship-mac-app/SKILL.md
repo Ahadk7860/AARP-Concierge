@@ -27,6 +27,48 @@ Boi is `LSUIElement` — **no Dock icon**. Closing the window only hides it. A s
 keeps running and relaunching just re-focuses it, which is how an old build survives
 "quit and reopen."
 
+## Diagnose, don't guess
+
+This applies well beyond the Mac app. It is here because it was learned the expensive way.
+
+**1. Draw the whole chain before touching anything.** List every place the thing could
+break, so the list is mutually exclusive and collectively exhaustive. Names reaching a chat
+reply pass through five links:
+
+| # | Link | How to test it |
+|---|---|---|
+| 1 | Mac can read contacts | `contacts.source record_count` in the log |
+| 2 | Mac binds the right source | `contacts.resolution directory_records` |
+| 3 | Digest gets names | read `digest.json` on disk and count |
+| 4 | Digest uploaded | `upload.dispatch accepted` |
+| 5 | Server processed it | `digest.enqueued` then worker log |
+
+Three separate contacts fixes landed correctly and none reached the user, because the break
+was at link 4 and then link 5. Every fix "worked". The symptom never moved. **Fixing the
+wrong link looks exactly like fixing nothing.**
+
+**2. Test each link with a command, not a theory.** "It should work now" is not a result.
+Read the artifact: the installed binary, the file on disk, the server log.
+
+**3. Silence is not evidence.** The ingest worker had `catch {}` and logged nothing on any
+path — start, per job, or error. A worker crashing every poll was indistinguishable from a
+worker with nothing to do. `build-app.sh` reported "Build succeeded" truthfully while
+packaging a day-old binary.
+
+Before concluding "X isn't running" or "X is fine", ask whether X **could** tell you either
+way. If it cannot, that is the bug to fix first.
+
+**4. When you cannot see inside, stop theorising and add observability.** Three guesses in a
+row about the same failure means the next commit should be a log line, not another fix.
+Instrumenting is faster than another wrong hypothesis, and it is permanent.
+
+**5. A contradiction is a gift.** The app said Contacts was "denied" while System Settings
+showed *"Applications that have requested access will appear here"* — empty. Both could not
+be true. That pointed straight at entitlements, which no amount of staring at the app's own
+status code would have revealed. When two sources disagree, that disagreement *is* the lead.
+
+---
+
 ## Steps
 
 Run from the repo root: `/Users/skylerluk/Dev/boi-imessage`
