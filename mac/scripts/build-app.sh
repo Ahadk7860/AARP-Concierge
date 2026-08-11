@@ -86,6 +86,12 @@ cat > "$APP/Contents/Info.plist" <<PLIST
          macOS never lists Boi under System Settings > Privacy & Security > Contacts,
          and the request fails instead of prompting. -->
     <key>NSContactsUsageDescription</key><string>Boi uses your contacts to show names instead of raw phone numbers and email addresses in your message reports.</string>
+    <!-- Automation needs BOTH this string and the apple-events entitlement, exactly like
+         Contacts needs both NSContactsUsageDescription and the addressbook entitlement.
+         The entitlement permits the prompt; this string is what the prompt says. With the
+         entitlement but no string, macOS denies silently and the app never appears in
+         System Settings > Privacy & Security > Automation. -->
+    <key>NSAppleEventsUsageDescription</key><string>Boi coordinates with Messages in the background so your reports stay current without you opening this app.</string>
 </dict>
 </plist>
 PLIST
@@ -112,10 +118,37 @@ if [ "$SIGN_IDENTITY" = "-" ]; then
   codesign --force --sign - --identifier "$BUNDLE_ID" "$APP"
 else
   echo "codesigning with Developer ID: $SIGN_IDENTITY"
+
+  # ENTITLEMENTS ARE REQUIRED UNDER HARDENED RUNTIME.
+  #
+  # `--options runtime` without an entitlements file is what shipped, and it is why
+  # Contacts and Automation could never be granted: hardened runtime denies a protected
+  # resource the app has not declared, WITHOUT prompting and WITHOUT listing the app in
+  # System Settings. The symptom is maximally confusing — the app reports "denied" while
+  # Privacy & Security shows "Applications that have requested access will appear here"
+  # with nothing in it, because no request ever reached TCC.
+  #
+  # NSContactsUsageDescription in Info.plist is necessary but NOT sufficient: the string
+  # is what the prompt says, the entitlement is what permits the prompt to happen.
+  ENTITLEMENTS="$(mktemp -t boi-entitlements).plist"
+  cat > "$ENTITLEMENTS" <<'ENT'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>com.apple.security.personal-information.addressbook</key>
+  <true/>
+  <key>com.apple.security.automation.apple-events</key>
+  <true/>
+</dict>
+</plist>
+ENT
+
   codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" \
     --identifier "$HELPER_ID" "$APP/Contents/Resources/BoiWakeHelper"
-  codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" \
-    --identifier "$BUNDLE_ID" "$APP"
+  codesign --force --options runtime --timestamp --entitlements "$ENTITLEMENTS" \
+    --sign "$SIGN_IDENTITY" --identifier "$BUNDLE_ID" "$APP"
+  rm -f "$ENTITLEMENTS"
 
   # Package for notarization. The .app inside is already Developer ID signed.
   # An unsigned pkg wrapper around a signed .app is what the notary expects.
