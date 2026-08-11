@@ -20,12 +20,19 @@ import { INTENTS, type Intent } from "../../shared/src/intents.js";
 export type PrecomputedBlock = { type: "text"; text: string };
 export type PrecomputedAnswer = { blocks: PrecomputedBlock[]; evidence: Array<{ source: string; id: string }> };
 
-/** Compute and store answers for all frozen intents. Call at the end of a sync. */
+/**
+ * Compute and store answers for all frozen intents. Call at the end of a sync.
+ *
+ * Returns the intents actually written, same reasoning as the v3 derivation
+ * counter in ingest-worker.ts: "did not throw" is not "wrote rows", so the
+ * caller gets something to log instead of a bare void.
+ */
 export async function precomputeAll(
   scope: UserScope,
   db: Queryable = getPool(),
-): Promise<void> {
+): Promise<{ intents: Intent[] }> {
   await Promise.all(INTENTS.map((intent) => precomputeOne(scope, intent, db)));
+  return { intents: [...INTENTS] };
 }
 
 async function precomputeOne(

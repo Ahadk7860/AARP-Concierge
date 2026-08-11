@@ -49,7 +49,7 @@ import {
   bootstrapLookups,
   DuplicateDigestError,
 } from "./repository.js";
-import { enqueue, dequeue, completeJob } from "./queue.js";
+import { enqueue, dequeue, completeJob, reclaimStuckJobs } from "./queue.js";
 import { deriveV3FromDigest, personIdForContact } from "./derive-v3.js";
 import { processOneIngestJob } from "./ingest-worker.js";
 
@@ -830,6 +830,118 @@ describe("v3 ingest queue", () => {
 });
 
 // ---------------------------------------------------------------------------
+// job lease reclaim — a worker that dies mid-job used to leave its row in
+// 'running' forever: no retry, no alert, no way back. This happened in
+// production; the user's data survived only because a later sync produced a
+// new job. reclaimStuckJobs (called from dequeue) closes that path.
+// ---------------------------------------------------------------------------
+
+describe("job lease reclaim", () => {
+  it("a job stuck in 'running' past its lease is reclaimed and becomes claimable again", async () => {
+    const { scope } = await createUser({ phone_e164: nextPhone() });
+    const pool = getPool();
+
+    await enqueue("ingest", scope, { marker: "stuck" });
+    const claimed = await dequeue<{ marker: string }>("ingest");
+    expect(claimed, "job claimed by the dead worker").not.toBeNull();
+    expect(claimed!.status).toBe("running");
+
+    // Simulate the worker dying: back-date started_at past any real lease so
+    // the next dequeue() call (with default lease settings) would reclaim it.
+    await pool.query(
+      `update jobs set started_at = now() - interval '1 hour' where job_id = $1`,
+      [claimed!.job_id],
+    );
+
+    // A different worker polls. dequeue() should reclaim the stuck job on its
+    // own — no separate cron, no manual intervention — and hand it right back out.
+    const newlyClaimed = await dequeue<{ marker: string }>("ingest", pool, { leaseMs: 1000 });
+    expect(newlyClaimed, "the reclaimed job was handed to the new worker").not.toBeNull();
+    expect(newlyClaimed!.job_id).toBe(claimed!.job_id);
+    expect(newlyClaimed!.payload.marker).toBe("stuck");
+
+    // It went through the pending state and back to running with attempts bumped.
+    const row = (await pool.query<{ status: string; attempts: number }>(
+      `select status, attempts from jobs where job_id = $1`,
+      [claimed!.job_id],
+    )).rows[0]!;
+    expect(row.status).toBe("running");
+    expect(row.attempts).toBe(1);
+
+    await completeJob(claimed!.job_id, { status: "done" });
+    await deleteUser(scope);
+  });
+
+  it("a reclaimed job that has exhausted its attempts goes terminal instead of retrying forever", async () => {
+    const { scope } = await createUser({ phone_e164: nextPhone() });
+    const pool = getPool();
+
+    await enqueue("ingest", scope, { marker: "exhausted" });
+    const claimed = await dequeue<{ marker: string }>("ingest");
+    expect(claimed).not.toBeNull();
+
+    // Already used up its attempts and is still stuck 'running' with an expired lease.
+    await pool.query(
+      `update jobs set started_at = now() - interval '1 hour', attempts = 3 where job_id = $1`,
+      [claimed!.job_id],
+    );
+
+    const reclaimed = await reclaimStuckJobs({ queue: "ingest", db: pool, leaseMs: 1000, maxAttempts: 3 });
+    expect(reclaimed).toHaveLength(1);
+    expect(reclaimed[0]!.outcome).toBe("terminal");
+
+    const row = (await pool.query<{ status: string; attempts: number; error: string | null }>(
+      `select status, attempts, error from jobs where job_id = $1`,
+      [claimed!.job_id],
+    )).rows[0]!;
+    expect(row.status).toBe("failed");
+    expect(row.attempts).toBe(4);
+    expect(row.error).toMatch(/lease_expired/);
+
+    // Terminal means gone for good — a further dequeue must not surface it.
+    const next = await dequeue<{ marker: string }>("ingest", pool, { leaseMs: 1000 });
+    expect(next).toBeNull();
+
+    await deleteUser(scope);
+  });
+
+  it("two workers racing a reclaim can never both claim the same stuck job", async () => {
+    const { scope } = await createUser({ phone_e164: nextPhone() });
+    const pool = getPool();
+
+    await enqueue("ingest", scope, { marker: "race" });
+    const claimed = await dequeue<{ marker: string }>("ingest");
+    expect(claimed).not.toBeNull();
+
+    await pool.query(
+      `update jobs set started_at = now() - interval '1 hour' where job_id = $1`,
+      [claimed!.job_id],
+    );
+
+    // Two "workers" poll concurrently against the same pool, racing the same
+    // stuck job through reclaim + claim.
+    const [a, b] = await Promise.all([
+      dequeue<{ marker: string }>("ingest", pool, { leaseMs: 1000 }),
+      dequeue<{ marker: string }>("ingest", pool, { leaseMs: 1000 }),
+    ]);
+
+    const winners = [a, b].filter((j) => j !== null);
+    expect(winners, "exactly one worker claims the reclaimed job").toHaveLength(1);
+    expect(winners[0]!.job_id).toBe(claimed!.job_id);
+
+    // attempts was bumped exactly once, not twice, by the losing race.
+    const row = (await pool.query<{ attempts: number }>(
+      `select attempts from jobs where job_id = $1`,
+      [claimed!.job_id],
+    )).rows[0]!;
+    expect(row.attempts).toBe(1);
+
+    await completeJob(claimed!.job_id, { status: "done" });
+    await deleteUser(scope);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // v3 derivation — proves the previously-orphaned pipeline: repository-v3.ts's write
 // functions (upsertPerson, upsertIdentity, insertInteractions, insertDailyMetrics)
 // had zero non-test callers before derive-v3.ts, so persons/identities/interactions/
@@ -1081,6 +1193,34 @@ describe("v3 derivation", () => {
       pool, scope, `select count(*)::text as count from persons where user_id = $1`, [scope.user_id],
     );
     expect(Number(personCount.rows[0]?.count)).toBe(digest.relationships.length);
+
+    await deleteUser(scope);
+  });
+
+  it("end to end: processOneIngestJob populates precomputed_answers for every frozen intent", async () => {
+    // precomputeAll/invalidatePrecomputed had zero callers — the cache-hit lane
+    // always missed and fell through to the agent. This proves ingest now wakes it.
+    const { scope } = await createUser({ phone_e164: nextPhone() });
+    const digest = await fixture<Digest>("digest", "healthy.json");
+    digest.user_id = scope.user_id;
+    const digestId = newDigestId();
+
+    await enqueue("ingest", scope, {
+      digest_id: digestId,
+      digest,
+      first: true,
+      received_at: new Date().toISOString(),
+    });
+
+    const processed = await processOneIngestJob();
+    expect(processed).toBe(true);
+
+    const rows = await scopedQuery<{ intent: string }>(
+      pool, scope, `select intent from precomputed_answers where user_id = $1 order by intent`, [scope.user_id],
+    );
+    expect(rows.rows.map((r) => r.intent)).toEqual(
+      ["drifting", "morning_brief", "overdue", "waiting_on_me"], // INTENTS, sorted
+    );
 
     await deleteUser(scope);
   });
