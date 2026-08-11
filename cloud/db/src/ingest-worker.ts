@@ -45,6 +45,23 @@ export async function processOneIngestJob(
     const existing = await latestDigest(scope);
     const first = existing === null;
 
+    // Does the digest that actually reached the server carry resolved names?
+    //
+    // The Mac's digest on disk had 251 of 423 relationships named while the chat kept
+    // answering with raw phone numbers, and every link in between — contacts read, source
+    // binding, digest write, upload, enqueue, worker — verified clean. There is no read
+    // endpoint for a stored digest, so "what did the server actually receive" was the one
+    // question nobody could answer from outside. One count settles it.
+    const rels = (digest as { relationships?: Array<{ display?: string }> }).relationships ?? [];
+    const named = rels.filter((r) => typeof r.display === "string"
+      && r.display !== "" && !r.display.startsWith("+")).length;
+    workerLog("info", "ingest_digest_names", {
+      digest_id,
+      relationships: rels.length,
+      named,
+      schema_version: (digest as { schema_version?: string }).schema_version,
+    });
+
     await insertDigest(scope, { digest_id, digest });
 
     // Populate the v3 person-centric tables (persons/identities/interactions/
