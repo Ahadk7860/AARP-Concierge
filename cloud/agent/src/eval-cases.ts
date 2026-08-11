@@ -16,6 +16,18 @@ import type { ToolCallRecord } from "./verifier.js";
 export type RouterEvalCase = { id: string; question: string; expected: RouterDecision };
 
 export const ROUTER_EVAL_CASES: readonly RouterEvalCase[] = [
+  // PRODUCTION REGRESSIONS. Every one of these was refused by the live router, which
+  // treated "not obviously a cache hit" as grounds to refuse. Routing to `agent` is not
+  // answering and is not a guess — the agent looks it up and the verifier checks every
+  // claim before it reaches the user. Refusing an unfamiliar question is not the safe
+  // choice, it is the useless one.
+  { id: "p01", question: "who is ahad khot", expected: { kind: "agent" } },
+  { id: "p02", question: "what's going on with Chris Dodla", expected: { kind: "agent" } },
+  { id: "p03", question: "what did chris dodla say to me last", expected: { kind: "agent" } },
+  { id: "p04", question: "what's the weather in ny", expected: { kind: "agent" } },
+  { id: "p05", question: "tell me what you can answer then", expected: { kind: "agent" } },
+  { id: "p06", question: "sure do that", expected: { kind: "agent" } },
+
   // cache_hit — one per frozen §4.2a intent, several phrasings each.
   { id: "r01", question: "who is waiting on me?", expected: { kind: "cache_hit", intent: "waiting_on_me" } },
   { id: "r02", question: "who should i reply to?", expected: { kind: "cache_hit", intent: "waiting_on_me" } },
