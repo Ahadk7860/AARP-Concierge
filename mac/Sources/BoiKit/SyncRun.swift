@@ -332,10 +332,34 @@ public struct SyncRun {
         // which propagates out of `--sync` as a non-zero exit — it is a strictly worse
         // state than `Deferred` and must not be flattened into it.
         let report = try uploader.dispatch(payloads, queue: queue, now: now)
-        guard report.isClean else {
+
+        // `queued` and `rejected` are opposites and must not be flattened together.
+        //
+        // `queued` means delivery failed and the payload is waiting — retrying helps, so
+        // the run is genuinely deferred and the user should be told.
+        //
+        // `rejected` means the server refused the payload outright (422). Retrying sends
+        // identical bytes and gets an identical refusal, forever. Failing the whole run on
+        // that turned one permanently-rejected voice pack into an error screen on EVERY
+        // sync, while the other 160 payloads had landed perfectly well. The user cannot
+        // act on it and neither can the Mac.
+        //
+        // So: defer only on `queued`. A rejection is logged per payload by the uploader
+        // and surfaced here as a warning, and the run still counts as a success for
+        // everything that did land.
+        if report.queued > 0 {
             throw Uploader.Deferred(queued: report.queued,
                                     rejected: report.rejected,
                                     endpoints: Array(Set(report.unlanded)).sorted())
+        }
+        if report.rejected > 0 {
+            StructuredLog.emit("upload.partial", level: .warn, fields: [
+                "rejected": "\(report.rejected)",
+                "accepted": "\(report.accepted)",
+                "endpoints": Array(Set(report.unlanded)).sorted().joined(separator: ", "),
+                "detail": "permanently refused by the server; retrying cannot change the "
+                    + "outcome, so the run is not failed for it",
+            ])
         }
         return report
     }

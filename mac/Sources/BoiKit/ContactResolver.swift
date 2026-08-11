@@ -320,8 +320,22 @@ public struct AddressBookDirectory: Sendable {
     public static func discover(
         home: URL = FileManager.default.homeDirectoryForCurrentUser
     ) -> AddressBookDirectory? {
-        for path in defaultPaths(home: home) {
-            if let directory = read(path: path), directory.recordCount > 0 { return directory }
+        // RICHEST source, not the first non-empty one.
+        //
+        // Taking the first was a real bug, not a hypothetical: a Mac with a 1-record local
+        // AddressBook and a 547-record iCloud source bound to the 1-record one, and every
+        // one of 424 relationships came back unresolved. The user saw raw phone numbers in
+        // every report and nothing anywhere said why — a thin directory and a wrong
+        // binding look identical from the outside, which is exactly what `survey()` above
+        // was written to expose.
+        //
+        // Picking by record count makes the common case (a small stale local store beside
+        // the real iCloud one) resolve correctly, and it cannot do worse than the old
+        // behaviour: with one source the choice is the same.
+        let directories = defaultPaths(home: home).compactMap { read(path: $0) }
+        if let richest = directories.filter({ $0.recordCount > 0 })
+            .max(by: { $0.recordCount < $1.recordCount }) {
+            return richest
         }
         return discoverViaContactsFramework()
     }
