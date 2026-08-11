@@ -119,6 +119,11 @@ export async function processOneIngestJob(
   }
 }
 
+/** One line per worker event. The worker used to be entirely silent — see startIngestWorker. */
+function workerLog(level: "info" | "error", msg: string, fields: Record<string, unknown> = {}): void {
+  process.stderr.write(JSON.stringify({ level, msg, ...fields }) + "\n");
+}
+
 /**
  * Start a polling loop that processes ingest jobs until stopped.
  * Returns a stop function. At <1k users polling is correct; at scale,
@@ -135,15 +140,24 @@ export function startIngestWorker(deps: IngestWorkerDeps = {}): () => Promise<vo
       for (let i = 0; i < 50; i++) {
         const hadWork = await processOneIngestJob(deps);
         if (!hadWork) break;
+        workerLog("info", "ingest_job_processed");
       }
-    } catch {
-      // Transient error — retry next interval.
+    } catch (err) {
+      // This used to be `catch {}` — a bare swallow with no log on any path, so a
+      // worker that threw on every poll was indistinguishable from one with nothing
+      // to do. A digest sat enqueued and unprocessed while the client saw a healthy
+      // 202, and there was no way to tell from outside whether the worker was even
+      // alive. A transient error is still non-fatal; it is no longer invisible.
+      workerLog("error", "ingest_worker_poll_failed", {
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
     if (!stopped) {
       timer = setTimeout(poll, intervalMs);
     }
   }
 
+  workerLog("info", "ingest_worker_started", { poll_interval_ms: intervalMs });
   timer = setTimeout(poll, 0);
   return async () => {
     stopped = true;
