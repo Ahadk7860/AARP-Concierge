@@ -8,6 +8,7 @@ import { getPool, type Queryable } from "./pool.js";
 import { dequeue, completeJob, retryJob } from "./queue.js";
 import { insertDigest, latestDigest, DuplicateDigestError } from "./repository.js";
 import { deriveV3FromDigest } from "./derive-v3.js";
+import { precomputeAll } from "./precompute.js";
 import { unsafeScopeFromUserId } from "./scope.js";
 import type { Digest, DigestV2, OutboundMessage, SendResult } from "../../shared/src/contracts.js";
 
@@ -84,6 +85,28 @@ export async function processOneIngestJob(
         JSON.stringify({
           level: "error",
           msg: "v3_derivation_failed",
+          job_id: job.job_id,
+          user_id: job.user_id,
+          digest_id,
+          error: errorMsg,
+        }) + "\n",
+      );
+    }
+
+    // Precompute the cache-hit answers (waiting_on_me, drifting, overdue, morning_brief)
+    // so the router's <800ms cache lane has something to hit instead of always falling
+    // through to the agent. Same posture as v3 derivation above: its own try/catch,
+    // deliberately swallowed on failure — the digest is the valuable thing here, a
+    // stale/missing cache is not worth losing it or retrying the whole ingest for.
+    try {
+      const precomputed = await precomputeAll(scope, db);
+      workerLog("info", "precomputed_answers_written", { digest_id, intents: precomputed.intents });
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      process.stderr.write(
+        JSON.stringify({
+          level: "error",
+          msg: "precompute_failed",
           job_id: job.job_id,
           user_id: job.user_id,
           digest_id,
