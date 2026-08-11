@@ -44,15 +44,40 @@ export function parseRouterOutput(value: unknown): RouterDecision {
   return { kind: "refuse" };
 }
 
-export async function routeQuestion(question: string, provider: RouterProvider): Promise<RouterDecision> {
-  if (question.trim() === "") return { kind: "refuse" };
+export async function routeQuestion(
+  question: string,
+  provider: RouterProvider,
+  log?: (event: string, fields: Record<string, unknown>) => void,
+): Promise<RouterDecision> {
+  if (question.trim() === "") {
+    log?.("router_empty_question", {});
+    return { kind: "refuse" };
+  }
   let output: unknown;
   try {
     output = await provider.classify(question);
-  } catch {
+  } catch (err) {
+    // This catch used to be silent. I3 says uncertainty routes to `refuse`, and it should
+    // — but "the model call threw" and "the model said refuse" are different facts, and
+    // collapsing them made a misconfigured provider indistinguishable from a working one
+    // declining. In production every question came back refused and nothing said why.
+    log?.("router_classify_threw", { error: err instanceof Error ? err.message : String(err) });
     return { kind: "refuse" };
   }
-  return parseRouterOutput(output);
+  const decision = parseRouterOutput(output);
+  if (decision.kind === "refuse") {
+    // Log the raw shape when we refuse, so an unparseable response (markdown-fenced JSON,
+    // prose, a different envelope) is distinguishable from a genuine refusal. Type and
+    // keys only — never the model's text, which can quote the user's message.
+    log?.("router_refused", {
+      output_type: typeof output,
+      output_keys: output !== null && typeof output === "object"
+        ? Object.keys(output as Record<string, unknown>).join(",") : "",
+      kind_value: output !== null && typeof output === "object"
+        ? String((output as Record<string, unknown>)["kind"]) : "",
+    });
+  }
+  return decision;
 }
 
 // ---------------------------------------------------------------------------

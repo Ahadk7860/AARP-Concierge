@@ -79,8 +79,19 @@ export async function startPhase2Runtime(deps: Phase2Dependencies): Promise<Phas
   // returned nothing, the verifier correctly found no evidence, and every single question
   // came back as an honest refusal. Indistinguishable, from the outside, from an agent
   // that cannot think.
+  // A logger, because the agent's decisions were completely invisible in production.
+  //
+  // The bridge has accepted `log` since it was written and nothing ever passed one. When
+  // every question came back as a refusal there was no way to tell whether the router had
+  // decided `refuse`, whether a tool had returned nothing, or whether the model's output
+  // simply failed to parse — parseRouterOutput fails closed to `refuse` on anything it
+  // does not recognise, so all three look identical from the outside.
+  const agentLog = (event: string, fields: Record<string, unknown>): void => {
+    process.stderr.write(JSON.stringify({ level: "info", msg: `agent_${event}`, ...fields }) + "\n");
+  };
+
   const chat: ClosedChatPort = agentPathEnabledFromEnv()
-    ? new AgentClosedChatBridge({ store: agentStoreFromEnv() })
+    ? new AgentClosedChatBridge({ store: agentStoreFromEnv(), log: agentLog })
     : new ClosedChatAdapter(deps.db, deps.selectorProvider);
 
   const router = new InboundRouter({

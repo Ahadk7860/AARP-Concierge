@@ -185,7 +185,7 @@ async function runToolCallingLoop(
  * loop or the verifier — they have nothing generated to verify.
  */
 export async function runAgentTurn(question: string, deps: AgentTurnDeps): Promise<AgentTurnResult> {
-  const decision: RouterDecision = await routeQuestion(question, deps.router);
+  const decision: RouterDecision = await routeQuestion(question, deps.router, deps.log);
   deps.log?.("router_decision", {
     lane: decision.kind,
     intent: decision.kind === "cache_hit" ? decision.intent : undefined,
