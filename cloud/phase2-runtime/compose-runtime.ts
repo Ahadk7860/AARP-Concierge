@@ -31,7 +31,7 @@ import type { HandleEnvelopeKeyProvider } from "../api/src/main.js";
 // wiring carries (multi-bubble collapse, ChatReply v1 downgrade, no real AgentStore yet).
 import { agentPathEnabledFromEnv } from "../agent/src/runtime.js";
 import { AgentClosedChatBridge } from "../agent/src/inbound-bridge.js";
-import { InMemoryAgentStore } from "../agent/src/ports.js";
+import { agentStoreFromEnv } from "../agent/src/runtime.js";
 import type { ClosedChatPort } from "../inbound/router.js";
 
 export type Phase2Dependencies = {
@@ -70,8 +70,17 @@ export async function startPhase2Runtime(deps: Phase2Dependencies): Promise<Phas
   // The agent path's AgentStore has no real backing until Track E's §4.1 tables merge —
   // see inbound-bridge.ts's third gap note — so this flag must stay unset in production
   // until then; it exists so the wiring is reachable and testable now.
+  // agentStoreFromEnv() — the Postgres-backed store — NOT InMemoryAgentStore.
+  //
+  // This was wired to the in-memory stub while the v3 tables were empty, with a comment
+  // saying the flag must stay unset until they were real. The tables are populated now
+  // (derive-v3 runs on every ingest), but the wiring was never switched, so enabling the
+  // flag gave a fully working agent reading an empty database: every relationship tool
+  // returned nothing, the verifier correctly found no evidence, and every single question
+  // came back as an honest refusal. Indistinguishable, from the outside, from an agent
+  // that cannot think.
   const chat: ClosedChatPort = agentPathEnabledFromEnv()
-    ? new AgentClosedChatBridge({ store: new InMemoryAgentStore() })
+    ? new AgentClosedChatBridge({ store: agentStoreFromEnv() })
     : new ClosedChatAdapter(deps.db, deps.selectorProvider);
 
   const router = new InboundRouter({
