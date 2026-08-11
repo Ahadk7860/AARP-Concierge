@@ -152,13 +152,29 @@ export async function deriveV3FromDigest(
       );
       identitiesWritten++;
 
-      if (r.last_contact_at !== null && r.last_contact_at !== undefined) {
+      // digest.v2 has NO `last_contact_at`. RelationshipV2 is not v1-plus-understanding —
+      // it DROPS eight v1 fields, `last_contact_at` among them (recorded in INTERFACES.md
+      // by the derivation port). This guard therefore never passed, `interactionRows` was
+      // always empty, and production wrote persons=423 identities=423 metrics=423
+      // interactions=0 on every sync while reporting success. Every relationship tool that
+      // reads `interactions` returned evidence_count=0, so the agent answered "I checked
+      // and found none" to every question — correct behaviour over a table nothing filled.
+      //
+      // v2 carries `as_of` and `days_since_last_contact`, which reconstruct the same
+      // instant. Prefer an explicit `last_contact_at` if a future digest reinstates it.
+      const lastContactAt = r.last_contact_at ?? (
+        r.days_since_last_contact !== null && r.days_since_last_contact !== undefined
+          ? new Date(new Date(r.as_of).getTime()
+              - r.days_since_last_contact * 24 * 60 * 60 * 1000).toISOString()
+          : undefined
+      );
+      if (lastContactAt !== null && lastContactAt !== undefined) {
         interactionRows.push({
-          interaction_id: deterministicInteractionId(person_id, new Date(r.last_contact_at)),
+          interaction_id: deterministicInteractionId(person_id, new Date(lastContactAt)),
           person_id,
           source: "imessage",
           direction: r.sent_count >= r.received_count ? "from_me" : "to_me",
-          occurred_at: new Date(r.last_contact_at),
+          occurred_at: new Date(lastContactAt),
           thread_ref: null,
           // NEVER the content itself — the digest carries none, and this file must
           // not read or log real message content even if it did.
