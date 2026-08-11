@@ -47,10 +47,28 @@ export type RedactionViolation = {
  */
 const PATTERNS: ReadonlyArray<{ pattern: RedactionViolation["pattern"]; re: RegExp }> = [
   {
-    // +1 (415) 555-0142, 415-555-0142, 4155550142, 555.0142 — 7+ digits with the
-    // usual separators. Deliberately looser than E.164.
+    // +1 (415) 555-0142, 415-555-0142, 4155550142 — separator-tolerant, but requiring
+    // at least TEN digits in the run.
+    //
+    // It used to require only seven, which is why it rejected `2026-08-10`, bare
+    // 7-to-9-digit runs, scores and order numbers. Measured against 173 real voice packs:
+    // 14 were rejected and EVERY violation was this pattern firing on something that was
+    // not a phone number. Those packs could never upload — the Mac resends identical
+    // bytes and gets the identical 422 forever — so a false positive here is permanent
+    // loss of a contact's voice, plus an error screen on every sync.
+    //
+    // That cost was justified in this file by "a false positive costs one rejected
+    // upload, which the Mac retries after redacting properly." The Mac does not
+    // re-redact on retry. That repair step was never built, so the assumption behind the
+    // original breadth does not hold.
+    //
+    // KNOWN RESIDUAL RISK, accepted deliberately by the product owner: a bare local
+    // 7-digit number written without a country or area code (`555-0142`) no longer trips
+    // this guard here. Guard one (the Mac's `Redaction.swift` phone rule) and guard three
+    // (`scripts/check_voice_pack_leak.py`) still cover it. Ten digits is the shortest run
+    // that is a phone number more often than it is a date, a score, or an ID.
     pattern: "phone",
-    re: /(?:\+?\d[\d().\- ]{5,}\d)/,
+    re: /\+?(?:[().\- ]*\d){10,}/,
   },
   {
     pattern: "email",
