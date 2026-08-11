@@ -4,6 +4,29 @@
 // Every R2 object is encrypted with a fresh 96-bit nonce. Without the master key,
 // a bucket compromise yields ciphertext. The pattern is the same HandleVaultKeyProvider
 // already used for contact handles and turn text; no new key material is introduced.
+//
+// This is intentionally the *same* envelope scheme as HandleVault/TurnVault, not a
+// second key hierarchy: one CONTACT_KEY_ENVELOPE_MASTER_KEY-backed key, addressed by
+// a `key_version`, with per-object data (user_id, object_key) bound in as AAD rather
+// than used to derive a distinct per-object key. That AAD binding is what stops one
+// user's key material from ever opening another user's object, and what stops an
+// object from being replayed under a different object_key.
+//
+// KEY ROTATION — what it requires:
+// Every envelope stores `key_version` (see EncryptedR2Envelope below), so an object
+// written today stays decryptable after the master key rotates, *provided* the
+// platform's HandleVaultKeyProvider keeps old key material reachable by version.
+// Today's `createHandleEnvelopeKeyProvider` (cloud/api/src/main.ts) only ever holds
+// one CONTACT_KEY_ENVELOPE_MASTER_KEY and derives a single `keyId` from it — it does
+// not yet retain prior versions. To rotate without orphaning data, platform wiring
+// must be extended (outside this file, in cloud/api/src/main.ts) to:
+//   1. keep every previously-active master key, indexed by the keyId it produces;
+//   2. answer `byVersion(oldKeyId)` with that retained key for as long as any object
+//      encrypted under it might still need to be read;
+//   3. answer `active()` with only the newest key, so all new writes roll forward.
+// Until that multi-version wiring exists, "rotate the master key" and "keep old R2
+// objects readable" are in tension — this file's envelope format is what makes that
+// wiring possible later without touching every object already written.
 
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import type { HandleVaultKeyProvider } from "../../inbound/handle-vault.js";
