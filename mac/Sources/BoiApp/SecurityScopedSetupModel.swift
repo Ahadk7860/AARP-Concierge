@@ -153,7 +153,17 @@ final class SecurityScopedSetupModel: ObservableObject {
         }
     }
 
+    /// macOS prompts for a TCC permission EXACTLY ONCE. After a denial `requestAccess`
+    /// returns immediately without showing anything, so a "Grant" button that only calls
+    /// it looks broken — you click, nothing happens, and the row still says denied. Once
+    /// the answer is already no, the only route back is System Settings, so send the user
+    /// there instead of calling an API that cannot prompt.
     func grantContactsAccess() {
+        let status = CNContactStore.authorizationStatus(for: .contacts)
+        if status == .denied || status == .restricted {
+            Self.openPrivacySettings(pane: "Privacy_Contacts")
+            return
+        }
         CNContactStore().requestAccess(for: .contacts) { [weak self] _, error in
             Task { @MainActor in
                 if let error {
@@ -177,7 +187,20 @@ final class SecurityScopedSetupModel: ObservableObject {
     }
 
     func grantAutomationAccess() {
+        // Same one-prompt-only rule as Contacts: once automation is denied,
+        // AEDeterminePermissionToAutomateTarget stops asking and just returns the denial.
+        if case .needsReauthorization = automationStatus {
+            Self.openPrivacySettings(pane: "Privacy_Automation")
+            return
+        }
         automationStatus = Self.probeAutomation(target: automationTarget, askUserIfNeeded: true)
+    }
+
+    /// Opens System Settings straight to the pane that actually holds the toggle, rather
+    /// than telling the user to go find it.
+    static func openPrivacySettings(pane: String) {
+        let url = "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?\(pane)"
+        if let u = URL(string: url) { NSWorkspace.shared.open(u) }
     }
 
     private static func probeAutomation(target: String, askUserIfNeeded: Bool) -> StepStatus {
