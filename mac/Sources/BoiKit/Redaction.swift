@@ -25,8 +25,11 @@ public struct Redactor: Sendable {
 
     public init(knownNames: [String] = []) {
         // Longest first, so "john smith" is consumed before the "john" inside it.
-        self.knownNames = Self.expand(knownNames)
+        let expanded: [String] = Self.expand(knownNames)
             .sorted { $0.count == $1.count ? $0 < $1 : $0.count > $1.count }
+        self.knownNames = expanded
+        self.compiledNames = Self.compileNames(expanded)
+        self.nameTokens = Self.tokenize(expanded)
     }
 
     /// A directory contributes both the full display name and each of its parts, because
@@ -163,14 +166,56 @@ public struct Redactor: Sendable {
             in: text, range: NSRange(text.startIndex..., in: text), withTemplate: " ")
     }
 
+    /// Every known name compiled ONCE, not once per message.
+    ///
+    /// This used to build an NSRegularExpression per name inside the per-message loop.
+    /// With an empty AddressBook the loop body never ran and nobody noticed. The moment
+    /// contacts resolved — 547 records expanding to ~1,000 name variants — it became
+    /// ~1,000 regex compilations plus ~1,000 full-string scans PER MESSAGE, across ~95,000
+    /// messages. Sync went from ~55 seconds to over 15 minutes and got killed before it
+    /// could upload, which read as "contacts still broken" rather than "redaction is
+    /// quadratic".
+    ///
+    /// Compiling once is the whole fix; the scan itself is unchanged, so redaction output
+    /// is byte-identical.
+    private let compiledNames: [NSRegularExpression]
+
+    private static func compileNames(_ knownNames: [String]) -> [NSRegularExpression] {
+        knownNames.compactMap { name in
+            let escaped = NSRegularExpression.escapedPattern(for: name)
+            return try? NSRegularExpression(pattern: "\\b\(escaped)\\b",
+                                            options: [.caseInsensitive])
+        }
+    }
+
+    /// The set of first tokens across every known name, lowercased.
+    ///
+    /// A cheap pre-filter: a message whose words share NOTHING with any known name cannot
+    /// match any of the compiled patterns, so it skips the scan entirely. Most messages in
+    /// a real corpus mention nobody, so most messages pay one tokenise instead of ~1,000
+    /// regex scans. Conservative by construction — it can only skip work that provably
+    /// could not have matched.
+    private let nameTokens: Set<String>
+
+    private static func tokenize(_ knownNames: [String]) -> Set<String> {
+        var tokens: Set<String> = []
+        for name in knownNames {
+            for part in name.lowercased().split(whereSeparator: { !$0.isLetter && !$0.isNumber }) {
+                tokens.insert(String(part))
+            }
+        }
+        return tokens
+    }
+
     /// Case-insensitive, on word boundaries, longest name first.
     private func redactKnownNames(in text: String) -> String {
+        if compiledNames.isEmpty { return text }
+        // Pre-filter: no shared token means no possible match.
+        let words = text.lowercased().split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+        guard words.contains(where: { nameTokens.contains(String($0)) }) else { return text }
+
         var result = text
-        for name in knownNames {
-            let escaped = NSRegularExpression.escapedPattern(for: name)
-            guard let regex = try? NSRegularExpression(pattern: "\\b\(escaped)\\b",
-                                                      options: [.caseInsensitive])
-            else { continue }
+        for regex in compiledNames {
             let range = NSRange(result.startIndex..., in: result)
             result = regex.stringByReplacingMatches(in: result, range: range,
                                                     withTemplate: Self.namePlaceholder)
