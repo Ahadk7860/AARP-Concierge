@@ -323,21 +323,53 @@ describe("runAgentTurn — the `general` tool cannot ground a person-name/handle
     expect(sink.delivered).toEqual([{ type: "text", text: "The tower was finished in 1889 and stands 330 meters tall." }]);
   });
 
-  it("a proper-noun-bearing general answer still reaches the user correctly, just via the degrade path (documented tradeoff, not a fabrication)", async () => {
-    // The counterpart to the case above: most real general-knowledge answers DO contain a
-    // proper noun ("Paris", "France", a brand or historical figure), which extractClaims
-    // flags as a candidate person-name claim that `general` can never ground (by design —
-    // see verifier.ts's RESIDUAL RISK note). The user still gets the right answer: the
-    // degrade path restates the TOOL'S OWN text verbatim (renderGroundedSummary's "general"
-    // case), never free model prose, so this is a categorization cost (status: "degraded",
-    // one extra escalation round-trip) — never a wrong or missing answer.
+  it("a proper-noun-bearing general answer that the model restates verbatim verifies on the first pass — no wasted escalation, no misleading degraded status", async () => {
+    // Most real general-knowledge answers DO contain a proper noun ("Paris", "France", a
+    // brand or historical figure), which extractClaims flags as a candidate person-name
+    // claim that `general` can never ground (by design — see verifier.ts's RESIDUAL RISK
+    // note). Previously that meant every such answer paid a wasted escalation round-trip
+    // and reported `status: "degraded"` even though the answer was correct. verifier.ts's
+    // `isPureGeneralEcho` fast path now recognizes this specific, fully-safe case — a
+    // pure-`general` turn whose draft is exactly `general`'s own already-vetted text — and
+    // verifies it directly. The user still gets the right answer, just without the
+    // round-trip or the misleading status. (The escalation model must not even be called.)
     const sink = new InMemoryBubbleSink();
     const generalProvider = { answer: async () => "Paris is the capital of France." };
     const model = new ScriptedAgentModel([
       { content: null, tool_calls: [toolCall("general", { query: "what is the capital of France?" })] },
       { content: "Paris is the capital of France.", tool_calls: null },
     ]);
-    const escalation = new ScriptedEscalation("Paris, France's capital, is a major city.");
+    const escalation = new ScriptedEscalation("must not be called");
+    const result = await runAgentTurn("what is the capital of France?", {
+      router: new ScriptedRouter({ kind: "agent" }),
+      agentModel: model,
+      escalation,
+      toolContext: ctx({ general: generalProvider }),
+      sink,
+    });
+    expect(result.kind).toBe("agent");
+    if (result.kind === "agent") {
+      expect(result.outcome.status).toBe("verified");
+      if (result.outcome.status === "verified") expect(result.outcome.attempt).toBe("first");
+    }
+    expect(sink.delivered).toHaveLength(1);
+    expect(sink.delivered[0]!.text).toContain("Paris is the capital of France.");
+  });
+
+  it("a proper-noun-bearing general answer the model does NOT restate verbatim (paraphrased) still degrades — the documented residual tradeoff, not a fabrication", async () => {
+    // Counterpart to the case above: the fast path is exact-echo only. A draft that merely
+    // paraphrases `general`'s answer is not an echo, so it still pays the full verify →
+    // regenerate → degrade pipeline, and still lands on `status: "degraded"` if the
+    // regenerated draft ALSO isn't a verbatim echo. The user still gets the right answer —
+    // the degrade path restates the TOOL'S OWN text verbatim (renderGroundedSummary's
+    // "general" case), never free model prose — this is a categorization cost only.
+    const sink = new InMemoryBubbleSink();
+    const generalProvider = { answer: async () => "Paris is the capital of France." };
+    const model = new ScriptedAgentModel([
+      { content: null, tool_calls: [toolCall("general", { query: "what is the capital of France?" })] },
+      { content: "Paris, France's capital, is a major city.", tool_calls: null },
+    ]);
+    const escalation = new ScriptedEscalation("Paris, France's capital, is a major and historic city.");
     const result = await runAgentTurn("what is the capital of France?", {
       router: new ScriptedRouter({ kind: "agent" }),
       agentModel: model,

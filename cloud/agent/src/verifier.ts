@@ -58,6 +58,22 @@
 // is Maya Chen" reintroduce exactly the exploit this file's tests pin — a real person's name
 // grounding an unrelated relationship claim purely because `general` said it. Precision over
 // recall, per this file's stated policy at the top of the file.
+//
+// PARTIAL MITIGATION (added alongside the "New York" ticket, without touching the rule
+// above): `runVerifiedTurn`'s `isPureGeneralEcho` fast-paths the ONE case that is fully safe
+// to skip atom-checking for — a pure-`general` turn whose draft is, byte-for-byte modulo
+// whitespace, `general`'s own already-vetted answer restated verbatim. That case can assert
+// nothing beyond what `general` already said, so it verifies on the first pass instead of
+// paying a wasted regenerate round-trip and a misleading `status: "degraded"`. It is
+// deliberately narrow: any paraphrase, added framing, or model-authored sentence that merely
+// reuses a name mentioned in `general`'s answer (the "Maya is overdue for a reply..." shape)
+// does NOT match and falls through to the exact rule above, unchanged. The residual cost
+// described in the paragraph above — an escalation round-trip and a `degraded` status for
+// general-knowledge answers the model paraphrases rather than echoes — still stands for that
+// remaining case; it was not eliminated, only narrowed to cases where eliminating it is
+// provably safe. See `isPureGeneralEcho`'s own doc comment for why the ticket's originally
+// suggested design (loosen `names` for any turn without a person-scoped tool call) was
+// evaluated and rejected — it breaks this file's own pinned "Maya" adversarial test.
 
 import type { EvidenceRef, ToolResult } from "./types.js";
 
@@ -522,6 +538,55 @@ function generalOnlyAnswer(calls: readonly ToolCallRecord[]): string | null {
   return texts.length > 0 ? texts.join(" ") : null;
 }
 
+function normalizeForEcho(text: string): string {
+  return text.trim().replace(/\s+/g, " ");
+}
+
+/**
+ * FAST PATH for I1's cost problem (added alongside the "New York" ticket), NOT a loosening
+ * of I2 (see the header's RESIDUAL RISK note and the rejected-alternative writeup there —
+ * that decision stands unchanged; `buildEvidencePool`/`isNameKey` still exclude `general`
+ * from `names` unconditionally, in every turn, with no exception carved out here).
+ *
+ * The ticket asked for something structurally different: "let `general` ground name-shaped
+ * tokens in turns where no person-scoped tool ran." That was evaluated and rejected — it
+ * does not survive contact with this file's own pinned adversarial case. `generalCall("Maya
+ * Chen, born in 1990, is a notable public figure...")` alone (no person-scoped tool call
+ * anywhere in the turn) is ITSELF a "no person-scoped tool ran" turn, and the whole point of
+ * that test is that a free-standing draft sentence ("Maya is overdue for a reply and has
+ * been drifting from you.") must still fail to verify even though nothing but `general` ran.
+ * "No person-scoped tool ran this turn" cannot be the safe condition, because it is exactly
+ * the condition the adversarial case is built on. Implementing the ticket's suggestion
+ * literally would flip that pinned test from failing (correct) to passing verification
+ * (a shipped fabrication) — see this file's own "KNOWN CEILING" note: the verifier checks
+ * atoms, not the relation asserted between them, so once a name is groundable, ANY sentence
+ * built around it (however unrelated to what `general` actually said) verifies clean. There
+ * is no lexical signal (`PROPER_NOUN_RE` cannot tell "Maya" from "New York") that
+ * distinguishes the safe case from the adversarial one at the claim-value level.
+ *
+ * What IS safe, and what this implements instead: a pure-`general` turn (every tool call
+ * this turn is `general`, checked the same negative way `buildEvidencePool`'s
+ * `isGeneralSource` already does — so a future non-`general` tool is excluded automatically,
+ * no hand-maintained "person-scoped" list anywhere) whose draft is, after whitespace
+ * normalization, EXACTLY `general`'s own already-vetted answer text and nothing more. A
+ * verbatim echo cannot assert anything beyond what `general` itself said — no new predicate,
+ * no new name pulled in from elsewhere in the model's context — so short-circuiting the
+ * atom-by-atom check for that one case adds no laundering surface: it is the same text
+ * `defaultDegrade`'s `generalOnlyAnswer` already renders verbatim today, just delivered as
+ * `status: "verified"` on the first pass instead of after a wasted regenerate round-trip and
+ * a misleading `status: "degraded"`. The moment the draft diverges from `general`'s text by
+ * even one added word — a paraphrase, a wrapper sentence, a name pulled in from elsewhere —
+ * this returns false and the full strict verify → regenerate → degrade pipeline runs exactly
+ * as it did before this change. See `test/verifier.test.ts`'s "general-only echo fast path"
+ * block for the pinned "New York" case, and INTERFACES.md for the residual-risk writeup this
+ * decision left in place unchanged.
+ */
+function isPureGeneralEcho(firstDraft: string, calls: readonly ToolCallRecord[]): boolean {
+  const generalText = generalOnlyAnswer(calls);
+  if (generalText === null) return false;
+  return normalizeForEcho(firstDraft) === normalizeForEcho(generalText);
+}
+
 export function defaultDegrade(calls: readonly ToolCallRecord[]): string {
   const generalOnly = generalOnlyAnswer(calls);
   if (generalOnly !== null) return generalOnly;
@@ -568,6 +633,17 @@ export async function runVerifiedTurn(
   regenerate: RegenerateFn,
   degrade: DegradeFn = defaultDegrade,
 ): Promise<VerifiedTurnOutcome> {
+  // See `isPureGeneralEcho`'s doc comment for why this is safe and why the alternative the
+  // ticket suggested (loosen `names` for any turn with no person-scoped tool call) is not:
+  // it would flip this file's own pinned adversarial "Maya" case from a correct rejection
+  // into a shipped fabrication. This check adds no new laundering path — checked first, but
+  // equivalent to short-circuiting `verify` with a result that would already be true whenever
+  // it fires (a verbatim restatement of already-vetted tool text carries zero unverifiable
+  // atoms of its own).
+  if (isPureGeneralEcho(firstDraft, calls)) {
+    return { status: "verified", text: firstDraft, attempt: "first" };
+  }
+
   const pool = buildEvidencePool(calls);
   const first = verify(firstDraft, pool);
   if (first.ok) return { status: "verified", text: firstDraft, attempt: "first" };
@@ -577,6 +653,15 @@ export async function runVerifiedTurn(
     secondDraft = await regenerate(summarizeViolations(first.violations));
   } catch {
     return { status: "degraded", text: degrade(calls), violations: first.violations };
+  }
+
+  // Same fast path, applied to the regenerated draft too: if the escalation model's retry
+  // lands on a verbatim echo of `general`'s own answer (the natural way to "fix" a violation
+  // whose only complaint is an ungroundable proper noun in a pure-general turn), that is just
+  // as safe to accept as it would have been on the first draft — same reasoning, no new
+  // laundering surface, see `isPureGeneralEcho`'s doc comment.
+  if (isPureGeneralEcho(secondDraft, calls)) {
+    return { status: "verified", text: secondDraft, attempt: "regenerated" };
   }
 
   const second = verify(secondDraft, pool);
