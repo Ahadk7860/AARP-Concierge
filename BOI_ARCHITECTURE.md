@@ -16,6 +16,8 @@ graph LR
     C <-->|reads & writes| D[🗄️ Postgres<br/>database]
     C <-->|syncs data| E[💻 Your Mac<br/>Boi desktop app]
     E -->|reads chat.db| F[📨 Messages.App<br/>on your Mac]
+    C -.->|future: stores encrypted<br/>message history| G[☁️ Cloudflare R2<br/>object storage]
+    D -.->|future: metadata only,<br/>payloads move to R2| G
 ```
 
 **In plain language**:
@@ -25,6 +27,7 @@ graph LR
 - **Boi Cloud** is a server running on Railway (like Heroku). It receives texts, thinks about them, and sends replies back. It also receives sync data from your Mac.
 - **Postgres** is the database. It stores everything: who you talk to, what your relationships look like, what Boi knows about each person.
 - **Your Mac** runs the Boi app. It reads your real iMessage history from Apple's Messages app database and sends summaries (not the actual texts) to the cloud. This is how Boi learns about your relationships.
+- **Cloudflare R2** (not yet live) is where we'll store the full message history — encrypted, organized by user, never readable by anyone without the master key. Today, Postgres stores everything. At scale, message data moves to R2 while Postgres keeps the structured relationship data that the agent needs to answer questions (counts, timestamps, patterns). R2 is like off-site archival storage: cheaper for bulk data, not used for fast lookups.
 
 **Why the Mac is necessary**: Apple won't let a cloud server read your iMessages. The only way to get message data is from a Mac that you've granted permission to. The Mac app reads your history locally, builds a summary (how many messages, who with, how often), and uploads just that summary — never the actual message content.
 
@@ -89,6 +92,24 @@ sequenceDiagram
 
 **Why we use a queue**: The Mac uploads data and moves on. If we processed it immediately, the Mac would have to wait — sometimes 30+ seconds for complex relationships. The queue lets us say "got it, we'll handle this" in under a second and process when convenient.
 
+### 3.1 Where data lives — Postgres vs R2
+
+Today, **everything is in Postgres**. Digest payloads (the full JSON summaries the Mac uploads) sit in a `payload` column alongside the metadata. This works fine at our current scale (under 100 users). But message history grows forever — each digest is a snapshot of your entire relationship history, and those JSON blobs add up.
+
+**Cloudflare R2** (not yet enabled) is our plan for this. Think of it like this:
+
+| | Postgres | Cloudflare R2 |
+|---|---|---|
+| **What it stores** | Structured data the agent queries: who you talk to, message counts, relationship patterns, open loops | Raw payload data: the full digest JSONs, and eventually the actual message corpus |
+| **What it's good at** | Fast queries. "Show me Maya's relationship state" → 50 milliseconds | Cheap bulk storage. 100,000 users' message history → ~$15/month |
+| **Is message text ever there?** | No. Never. Message content stays on your Mac | Yes — encrypted. Without the master key, it's unreadable ciphertext |
+| **How data gets there** | Every Mac sync writes to it | When enabled, the ingest worker writes digest payloads to R2 instead of Postgres |
+| **What happens on delete** | One SQL statement cascades through every table. Verified by tests | The R2 deletion module deletes the user's prefix and verifies it's gone. Fails loudly if anything survives |
+
+**The encryption layer**: Before anything touches R2, it's sealed with AES-256-GCM encryption. Each object gets a fresh random key-like nonce. The encryption uses the same master key that already protects contact handles and turn text — no new secrets to manage. If someone compromises the R2 bucket, they get ciphertext. They can't read whose messages are inside or what they say.
+
+**Why R2 isn't live yet**: We don't have a Cloudflare account or bucket set up. The code is written and tested — `cloud/db/src/r2-cipher.ts` (the encryption), `cloud/db/src/digest-r2.ts` (the store), and `cloud/shared/src/r2.ts` (the S3 client). There's even a safety check at server boot: if you enable R2 content storage without also enabling R2 deletion, the server refuses to start. We won't accidentally store data we can't delete. R2 goes live when we need it — not before.
+
 ---
 
 ## 4. The v3 agent — how Boi thinks (the new way)
@@ -133,11 +154,72 @@ graph TD
 
 This is the core innovation of v3: **the system doesn't trust the AI**. It verifies every claim before the user sees it.
 
-**Comparison to v2 (the old way)**: The old path sends the question directly to a model and sends back whatever it says. No verification. No tools. Just "here's a question, give me an answer." The v2 model is good but has no guardrails — it can and does make things up. The v3 path solves this.
+---
+
+## 5. v2 vs v3 — what we actually gained
+
+### The old way (v2) — what's live today
+
+Imagine you walk into a restaurant and ask the chef "who should I follow up with?" The chef doesn't check the pantry. They don't look at any records. They just answer from memory. Sometimes they're right. Sometimes they invent a person who doesn't exist, or a promise nobody made, or a date that's wrong. There is no one checking their work.
+
+That is v2. A single AI model (`gemma-4-31b-it`) receives your question, generates an answer, and we send it to you. No tools. No database lookups. No verification. The model is good — but it has no guardrails. When it doesn't know something, it guesses. When it's unsure, it sounds confident anyway.
+
+```mermaid
+graph LR
+    A[❓ Question] --> B[🤖 Single AI model]
+    B --> C[📤 Reply sent directly]
+    style B fill:#fbb,stroke:#c00
+```
+
+### The new way (v3) — built, tested, flagged off
+
+Now imagine the same restaurant, but with a different process:
+
+1. **A maître d' (Router)** looks at your question and decides which station can answer it. "Who should I follow up with?" → open loops station.
+2. **Kitchen stations (10 Tools)** each look up one specific thing from the database. The open-loops station checks: are there any unanswered questions or unfulfilled promises? It returns exactly what it found — nothing more.
+3. **The chef (Gemini model)** writes a natural reply using ONLY the ingredients from the stations. If station 2 returned "Maya asked about the trip, no response yet," the chef can say that. But if station 2 returned nothing about Jordan, the chef cannot mention Jordan.
+4. **A health inspector (Verifier)** checks every claim in the reply. Is Maya's name in the tool results? Yes. Is the promise about the trip in the tool results? Yes. Did the chef invent anything? If so → try again. If still wrong → send a grounded summary.
+
+```mermaid
+graph TD
+    A[❓ Question] --> B{🧭 Router<br/>classifies intent}
+    B --> C[🔧 Tools<br/>query database]
+    C --> D[🤖 Model<br/>drafts reply from evidence]
+    D --> E{🔍 Verifier<br/>checks every claim}
+    E -->|passes| F[📤 Reply sent]
+    E -->|fails, retry| D
+    E -->|fails again| G[⚠️ Grounded summary<br/>no fabrication]
+    style E fill:#bfb,stroke:#0a0
+```
+
+### What we actually gained — by the numbers
+
+| What changed | v2 (old) | v3 (new) |
+|---|---|---|
+| **Database access** | Model answers from memory | 10 tools query real data |
+| **Fabrication guard** | None — model can say anything | Verifier checks every name, date, number, handle against tool results |
+| **Source of truth** | The model's training data (frozen, unknown date) | Your actual Postgres database (live, updated every Mac sync) |
+| **Search your messages** | Not possible | `search_messages` tool asks your Mac via WebSocket |
+| **Refusal safety** | Model decides what's unsafe (inconsistent) | Router refuses unsafe questions before any tool runs |
+| **Degrade behavior** | Model guesses when unsure | System sends grounded summary: "here's what I actually know, nothing more" |
+| **Test coverage** | ~400 tests | 794 tests (118 on the agent alone) |
+| **Eval results** | Unknown — never measured | 0% router misclassification, 0% verifier fabrication leakage on curated eval set |
+
+### The three things that make v3 different in one sentence each
+
+1. **The router decides what tool to use** — it doesn't ask the model "what should we do?" It classifies the question itself, using a tiny cheap model (`gemini-2.5-flash-lite`), and the model cannot override it.
+
+2. **The verifier doesn't trust the model** — it's a separate piece of code (457 lines, 35 tests) that reads the model's output and checks: does every person-name appear in a tool result from THIS turn? Does every date? Every phone number? If anything was made up, the verifier catches it.
+
+3. **Degrade, never fabricate** — when the verifier catches a problem, the system doesn't guess. It sends a grounded summary that only restates what the tools actually returned. "I know Maya had an open question about the trip, but I couldn't verify the details" is better than a confident wrong answer.
+
+### Why we haven't turned it on yet
+
+The v3 agent reads from new database tables (`persons`, `identities`, `interactions`) that get populated when your Mac syncs. We've deployed all the code and migrations. We've run 794 tests. But we haven't confirmed that one real Mac sync fills those tables with real data. If we flip the switch and the tables are empty, the agent will say "I don't know" to every relationship question — which is worse than the v2 path that works today. One sync confirmation, then we flip.
 
 ---
 
-## 5. Where we're going — the roadmap
+## 6. Where we're going — the roadmap
 
 ### What's built and working
 
@@ -183,7 +265,7 @@ graph TD
 
 ---
 
-## 6. The backend — what actually runs where
+## 7. The backend — what actually runs where
 
 ### Railway (our cloud server)
 
@@ -215,7 +297,7 @@ The Mac is the **only place message content exists**. The cloud never sees your 
 
 ---
 
-## 7. Decisions you can make today
+## 8. Decisions you can make today
 
 These are ordered by what unblocks the most value:
 
@@ -252,7 +334,7 @@ These are ordered by what unblocks the most value:
 
 ---
 
-## 8. Glossary
+## 9. Glossary
 
 | Term | What it means |
 |---|---|
@@ -270,7 +352,7 @@ These are ordered by what unblocks the most value:
 
 ---
 
-## 9. This document
+## 10. This document
 
 To export as PDF with rendered diagrams:
 ```bash
