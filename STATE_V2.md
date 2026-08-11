@@ -1,6 +1,6 @@
 # Boi v3 — Build State Report
 
-**Updated**: 2026-08-10, after the first production deploy
+**Updated**: 2026-08-11, after the second production deploy
 **Audience**: an agent or engineer who has never seen this build
 **Purpose**: what exists, what is proven, what is broken, what needs a human
 
@@ -13,7 +13,7 @@ Read `V3_ARCHITECTURE.md` §4 for frozen interfaces, `INTERFACES.md` for the cro
 
 **v3 is deployed and running in production with the new agent path switched off.**
 
-`main` @ `d3dfe3a`. Seven of eight branches merged. Migrations 017–022 applied to production
+`main` @ `b8f181f`. Seven of eight branches merged. Deployed 2026-08-11 13:17. Migrations 017–022 applied to production
 Postgres. The old v2 chat path still answers real messages and is untouched.
 
 **The one thing that has never happened: the v3 agent has never answered a real question.**
@@ -26,7 +26,7 @@ half is unproven against live traffic.
 
 | Goal | Status |
 |---|---|
-| Shippable v3 behind a flag | **~90%** |
+| Shippable v3 behind a flag | **~92%** |
 | v3 complete, Swift derivation deleted | **~60%** |
 
 Remaining for the first: confirm a sync populates the v3 tables, then flip the flag.
@@ -83,27 +83,23 @@ Contacts is a separate TCC service; FDA does not cover it.
 
 Now: real `CNContactStore.requestAccess`, usage description confirmed in the built bundle.
 
-### ⚠️ 2. 14 voice packs rejected every sync — DECISION NEEDED
-`upload deferred: 0 queued, 15 rejected (/v1/voice-pack)`, `error: redaction_failed`, 422.
+### ✅ 2. Voice-pack rejections — FIXED (was 14/sync)
+The server's phone pattern required only 7 digits, so it rejected ISO dates (`2026-08-10`),
+scores, order numbers and bare digit runs. Measured on 173 real packs: 14 rejected, every
+violation a false positive.
 
-Ran the server's own patterns over 173 local packs: **14 rejected, every violation
-`phone in exemplars`**. Shapes of the matches, digits masked:
+Those packs could never upload — the Mac resends identical bytes and gets an identical 422
+forever. The file justified its breadth with *"a false positive costs one rejected upload,
+which the Mac retries after redacting properly."* **The Mac does not re-redact on retry.** That
+repair step was never built, so the assumption behind the breadth did not hold.
 
-```
-6x  #######      2x  #########    2x  ### ### ###
-2x  ######-#     1x  ####-##-##   1x  ##-####-##-##-#
-```
+Now requires ten digits. Real-pack rejections **14 → 1** (that one carries a genuine 11-digit
+run). Verified it still catches `415-555-0142`, `+1 (415) 555-0142`, `4155550142`,
+`+44 20 7946 0958` and clears dates/scores/order numbers.
 
-`####-##-##` is an ISO date. These are **false positives** — the server pattern
-`/(?:\+?\d[\d().\- ]{5,}\d)/` matches any 7+ digits with separators.
-
-The asymmetry is deliberate (`cloud/api/src/redaction.ts`: *"a false positive costs one
-rejected upload"*). The consequence is not: those packs are **permanently** rejected, the Mac
-retries forever, and the user sees an error screen every sync.
-
-Two options, both open: narrow the pattern to exclude dates, and/or make a rejected pack
-non-fatal so the other 159 still land. **That file says "do not weaken a pattern to make a
-checklist green" — this is a human's call.**
+**Residual risk accepted by the product owner**: a bare local 7-digit number with no area code
+no longer trips THIS guard. Guard one (`Redaction.swift`) and guard three
+(`check_voice_pack_leak.py`) still cover it.
 
 ### ⚠️ 3. `general` answers always route through degrade
 `extractClaims` treats every capitalized word as a name claim, and `general` deliberately
@@ -137,6 +133,11 @@ to the agent, which is correct but wastes the fast path.
 - **`swift test` POSTed to production.** Six unguarded `SyncRun` call sites resolved the real
   `.env`. Fixed with stub injection plus an XCTest process guard — whose first implementation
   was wrong and was caught by its own regression tests.
+- **`interaction_id` keyed on `digest_id`.** Every sync mints a fresh `digest_id`, so the
+  same "last contact" event got a new row on every sync and `on conflict do nothing` never
+  fired. `interactions` would have grown by one row per relationship per sync forever, drifting
+  every interaction count upward. Now keyed on `person_id + occurred_at`. The existing
+  idempotency test re-used one `digest_id`, which is why it passed. Found by external audit.
 - **The deploy blocker.** `Dockerfile:8` runs `npm run typecheck && tsc`; 8 errors in
   `inbound-adapter.test.ts` failed the build before `preDeployCommand` ever ran. That file had
   been on the "pre-existing, do not chase" list since the original handoff. **It was never
@@ -166,7 +167,7 @@ uses a clean container.
 ## 9. What needs a human
 
 1. **Install the rebuilt app**, then grant Contacts. Fixes phone-numbers-instead-of-names.
-2. **Decide the redaction question** (§6.2).
+2. ~~Decide the redaction question~~ — **done**, Option A, see §6.2.
 3. **Confirm a sync populates the v3 tables**, then flip `BOI_AGENT_PATH_ENABLED`.
    **Do not flip it before that** — the agent would read empty tables and degrade on every
    relationship question, which is worse than the v2 path that works today.
