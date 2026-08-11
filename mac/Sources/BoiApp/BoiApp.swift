@@ -222,6 +222,11 @@ struct BoiApplication: App {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    // Retained for the life of the app — an unretained `DeviceLinkClient` actor would be
+    // deallocated (and its reconnect loop cancelled) the moment `applicationDidFinishLaunching`
+    // returns.
+    private var deviceLinkClient: DeviceLinkClient?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         StructuredLog.emit("app.launched", fields: [
             "bundle": Bundle.main.bundleURL.path,
@@ -230,9 +235,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 !ResponsibleBundle.containsVersionedComponent(Bundle.main.bundleURL.path),
             "version": AppInfo.version,
         ])
+        startDeviceLink()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        let client = deviceLinkClient
+        Task { await client?.stop() }
+    }
+
+    /// V3_ARCHITECTURE.md §4.3: opens the persistent cloud <-> Mac WebSocket the
+    /// `ask_device` protocol runs over, so `search_messages` (cloud/agent/src/tools.ts)
+    /// has a live Mac to reach while this app is running.
+    ///
+    /// Not paired yet (no `DeviceIdentity`) or no `BOI_API_BASE` configured -> does not
+    /// start at all, rather than connecting to a guessed URL. The cloud gateway already
+    /// answers that honestly as `{ok:false, reason:"asleep"}` — there is nothing for this
+    /// side to fabricate either.
+    private func startDeviceLink() {
+        let identity = KeychainTokenStore().identity() ?? EnvironmentTokenStore().identity()
+        let apiBase = Uploader.Configuration.fromEnvironment()?.baseURL
+        guard let configuration = DeviceLinkClient.Configuration.discover(identity: identity, apiBase: apiBase) else {
+            StructuredLog.emit("device_link.not_configured", level: .warn, fields: [
+                "paired": identity != nil,
+                "api_base_configured": apiBase != nil,
+            ])
+            return
+        }
+        do {
+            let paths = SyncRun.Paths.installed()
+            let index = try SearchIndex(path: paths.mirror)
+            let handler = SearchRequestHandler(index: index, hasGrant: { FullDiskAccess.probe().isGranted })
+            let client = DeviceLinkClient(configuration: configuration, handler: handler)
+            deviceLinkClient = client
+            Task { await client.start() }
+        } catch {
+            // No mirror yet (e.g. first launch, before the first `--sync`) is not a
+            // reason to crash the app — search simply has nothing to serve until a sync
+            // has run once. Logged, not silent.
+            StructuredLog.emit("device_link.search_index_unavailable", level: .warn,
+                               fields: ["detail": String(describing: error)])
+        }
+    }
 }
 
 /// Registers the scheduled sync.

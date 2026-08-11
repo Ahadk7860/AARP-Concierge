@@ -51,15 +51,21 @@ import type { ChatReplyAny } from "../../shared/src/contracts.js";
 import type { ClosedChatPort } from "../../inbound/router.js";
 import { runAgentTurn, type AgentTurnDeps, type AgentTurnLogger } from "./agent-loop.js";
 import { InMemoryBubbleSink } from "./in-memory-bubble-sink.js";
-import type { AgentStore } from "./ports.js";
-import { DegradedDeviceSearchPort } from "./ports.js";
+import type { AgentStore, DeviceSearchPort } from "./ports.js";
 import { DegradedGeneralKnowledgeProvider, NullApprovalTokenStore, type GeneralKnowledgeProvider } from "./tools.js";
-import { buildAgentRuntime } from "./runtime.js";
+import { buildAgentRuntime, deviceSearchPortFor } from "./runtime.js";
 
 export type AgentClosedChatBridgeDeps = {
   store: AgentStore;
   env?: NodeJS.ProcessEnv;
   log?: AgentTurnLogger;
+  /** Test-only override for the device-search port, bypassing the installed
+   * `DeviceGateway` singleton (runtime.ts's `installDeviceGateway`/`deviceSearchPortFor`).
+   * Real production callers never set this: `cloud/api/src/main.ts` installs the live
+   * gateway once at boot and every bridge instance reaches it automatically through
+   * `deviceSearchPortFor(scope)`. Exists so a test can hand `search_messages` a scripted
+   * device response without standing up a real `DeviceGateway` + socket pair. */
+  deviceSearch?: DeviceSearchPort;
   /** Test-only override for the model-facing seams, bypassing `buildAgentRuntime(env)`.
    * Real production callers never set this — `env` alone selects live vs. offline. Exists
    * because the offline fallback (no live key) never produces tool calls, so it cannot
@@ -92,7 +98,7 @@ export class AgentClosedChatBridge implements ClosedChatPort {
       toolContext: {
         scope,
         store: this.deps.store,
-        deviceSearch: new DegradedDeviceSearchPort(),
+        deviceSearch: this.deps.deviceSearch ?? deviceSearchPortFor(scope),
         approvals: new NullApprovalTokenStore(),
         general: runtime.general ?? new DegradedGeneralKnowledgeProvider(),
       },

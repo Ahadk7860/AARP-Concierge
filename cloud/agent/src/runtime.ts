@@ -13,6 +13,8 @@ import type { AgentStore } from "./ports.js";
 import { DegradedDeviceSearchPort, type DeviceSearchPort } from "./ports.js";
 import { DegradedGeneralKnowledgeProvider, NullApprovalTokenStore, type ApprovalTokenStore, type GeneralKnowledgeProvider, type SendPort } from "./tools.js";
 import { PostgresAgentStore } from "./postgres-agent-store.js";
+import type { UserScope } from "../../db/src/scope.js";
+import type { DeviceGateway } from "../../device-search/src/gateway.js";
 
 /** BOI_AGENT_PATH_ENABLED=1 gates the v3 agent path. Absent or any other value = disabled,
  * so a misconfigured deploy fails closed to the proven-live selector/reply/waiting-on-me
@@ -70,6 +72,46 @@ export type UnwiredPorts = {
 
 export function unwiredPorts(): UnwiredPorts {
   return { deviceSearch: new DegradedDeviceSearchPort(), approvals: new NullApprovalTokenStore() };
+}
+
+// ---------------------------------------------------------------------------
+// Device gateway singleton — the same "install once at boot, read anywhere" shape
+// cloud/db/src/index.ts already uses for the Postgres pool (installPool/isInstalledPool).
+//
+// Why a singleton instead of threading `DeviceGateway` through every constructor: the one
+// production call site that builds `AgentClosedChatBridge` (cloud/phase2-runtime/
+// compose-runtime.ts) is out of this track's edit boundary, so the port cannot be passed
+// in as an explicit constructor argument without editing a file this track does not own.
+// `cloud/api/src/main.ts` (in-boundary) calls `installDeviceGateway()` once, right after
+// `attachDeviceGateway()` wires the WS upgrade onto the real HTTP server; every
+// `AgentClosedChatBridge.waitingOnMe()` call afterwards reaches the live gateway through
+// `deviceSearchPortFor()` with no further wiring required. Never installed (tests, or a
+// process that never called main.ts's startRuntime) -> `deviceSearchPortFor` falls back to
+// `DegradedDeviceSearchPort`, which answers `no_grant` rather than fabricating a result —
+// the same honest-degradation convention `ports.ts` documents.
+// ---------------------------------------------------------------------------
+
+let installedDeviceGateway: DeviceGateway | null = null;
+
+/** Called once at boot (cloud/api/src/main.ts) after the real HTTP server exists and
+ * `attachDeviceGateway` has wired the `/v1/device-link` upgrade onto it. */
+export function installDeviceGateway(gateway: DeviceGateway): void {
+  installedDeviceGateway = gateway;
+}
+
+/** Test-only: clears the singleton so one test's installed gateway cannot leak into
+ * another's. Production code never calls this. */
+export function uninstallDeviceGatewayForTest(): void {
+  installedDeviceGateway = null;
+}
+
+/**
+ * The `DeviceSearchPort` `AgentClosedChatBridge` reaches for by default (inbound-bridge.ts)
+ * when no test override is supplied. Bound to `scope` via `DeviceGateway.portFor`
+ * (gateway.ts) when a gateway has been installed; otherwise the honest degraded stub.
+ */
+export function deviceSearchPortFor(scope: UserScope): DeviceSearchPort {
+  return installedDeviceGateway?.portFor(scope) ?? new DegradedDeviceSearchPort();
 }
 
 /**
