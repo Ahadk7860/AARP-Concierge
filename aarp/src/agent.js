@@ -2,6 +2,8 @@
 // Providers: "anthropic" (live, needs ANTHROPIC_API_KEY) | "fake" (deterministic, for tests).
 import { searchBenefits, benefitCard, loadCatalog } from "./benefits.js";
 import { MemberStore } from "./memory.js";
+import { searchLocalRestaurants } from "./local_restaurants.js";
+import { getRewards } from "./rewards.js";
 
 const MODEL = process.env.AARP_MODEL || "claude-sonnet-5";
 
@@ -33,6 +35,18 @@ confidence 0.5-0.7, and don't assert them back as facts ("It looks like you migh
 Reference memory naturally and sparingly: "Since you mentioned…", "I remembered…".
 If asked "what do you remember about me", list it plainly and note they can ask you to
 change or forget anything.
+
+For "near me" requests use search_local_restaurants — it needs a ZIP code; if you
+don't know theirs (check home_location in memory), ask for it, then remember it.
+Local offers redeem in person or by printed coupon — say so.
+
+For AARP Rewards questions (points, expiring, redeeming, earning) use get_rewards.
+For "what am I missing?" / "anything good for me?" use get_opportunities and frame the
+answer around what you know about them.
+
+Member controls (honor immediately, confirm briefly): "don't send restaurant offers" →
+mute_category. "stop watching X" → remove_watch. "forget X" → forget. A savings goal
+("help me save $500 this year") → set_savings_goal; report progress when asked.
 
 If the member says they used a benefit and what they spent, record it with
 record_benefit_used and tell them their running total. If they ask to watch for
@@ -84,13 +98,60 @@ export const TOOLS = [
       benefit_id: { type: "string" }, amount_saved: { type: "number" }, bill_amount: { type: "number" },
     }, required: ["benefit_id", "amount_saved"] } },
   { name: "get_savings",
-    description: "The member's savings summary (total + by category).",
+    description: "The member's savings summary (total + by category + goal progress).",
     input_schema: { type: "object", properties: {} } },
+  { name: "search_local_restaurants",
+    description: "LIVE nearby restaurant offers from AARP's local network (memberoffers.aarp.org). Requires a 5-digit ZIP. Optional keyword ('pizza', 'steakhouse') and distance in miles (default 5). Offers redeem in person/print.",
+    input_schema: { type: "object", properties: {
+      zip: { type: "string" }, keyword: { type: "string" },
+      distance: { type: "number" } }, required: ["zip"] } },
+  { name: "get_rewards",
+    description: "AARP Rewards summary: points balance, points expiring soon, best redemption options (ranked by the member's learned preference), quick earning opportunities.",
+    input_schema: { type: "object", properties: {} } },
+  { name: "get_opportunities",
+    description: "'What am I missing?' / 'anything good for me?' — the member's biggest unused opportunities: benefits matching their remembered preferences in categories they haven't redeemed in yet.",
+    input_schema: { type: "object", properties: {} } },
+  { name: "set_savings_goal",
+    description: "Member set a savings goal, e.g. 'help me save $500 this year'.",
+    input_schema: { type: "object", properties: { target: { type: "number" } }, required: ["target"] } },
+  { name: "mute_category",
+    description: "Member asked to stop a category ('don't send restaurant offers'). Category slugs: restaurants, travel, entertainment, insurance, healthandwellness, shoppingandgroceries, autoservice, finances, home-tech.",
+    input_schema: { type: "object", properties: { category: { type: "string" } }, required: ["category"] } },
 ];
 
-/** Execute one tool call against the member's store. */
-export function invokeTool(name, input, store, now) {
+/** Execute one tool call against the member's store. May return a promise. */
+export function invokeTool(name, input, store, now, deps = {}) {
   switch (name) {
+    case "search_local_restaurants": {
+      const fn = deps.searchLocal || searchLocalRestaurants;
+      return fn({ zip: input.zip, keyword: input.keyword || "", distance: input.distance || 5, limit: 6 })
+        .then((r) => (r.offers.length ? r : { ...r, note: "No local offers found in that area — say so plainly." }))
+        .catch((e) => ({ error: `local search unavailable (${e.message}) — offer the national restaurant benefits instead` }));
+    }
+    case "get_rewards": return getRewards(store, now);
+    case "get_opportunities": {
+      const ctx = store.rankingContext(now);
+      const redeemedCats = new Set(store.state.savings_events.map((e) =>
+        loadCatalog().benefits.find((b) => b.id === e.benefit_id)?.category).filter(Boolean));
+      const mems = store.activeMemories(now).filter((m) => m.confidence >= 0.5);
+      const queries = mems.map((m) => String(m.value)).slice(0, 6);
+      const picks = [];
+      for (const q of queries.length ? queries : ["travel", "restaurants"]) {
+        const hits = searchBenefits(q, ctx, { limit: 2 });
+        for (const h of hits) {
+          if (!redeemedCats.has(h.benefit.category) && !picks.some((p) => p.id === h.benefit.id)) {
+            picks.push({ ...benefitCard(h.benefit), because: q });
+          }
+        }
+      }
+      return { unused_opportunities: picks.slice(0, 4),
+        note: picks.length ? "Frame each around the memory in 'because'." : "Nothing strong — say so honestly." };
+    }
+    case "set_savings_goal":
+      store.state.savings_goal = { target: input.target, set_at: now };
+      store.save();
+      return { ok: true, target: input.target, saved_so_far: store.totalSaved() };
+    case "mute_category": { store.muteCategory(input.category); return { ok: true, muted: store.state.muted_categories }; }
     case "search_benefits": {
       const results = searchBenefits(input.query, store.rankingContext(now),
         input.category ? { categories: [input.category] } : {});
@@ -115,7 +176,10 @@ export function invokeTool(name, input, store, now) {
     case "get_savings": {
       const byId = Object.fromEntries(loadCatalog().benefits.map((b) => [b.id, b]));
       return { total_saved: store.totalSaved(), by_category: store.savingsByCategory(byId),
-        benefits_used: store.state.savings_events.length };
+        benefits_used: store.state.savings_events.length,
+        goal: store.state.savings_goal
+          ? { target: store.state.savings_goal.target, progress: store.totalSaved() }
+          : null };
     }
     default: return { error: `unknown tool ${name}` };
   }
@@ -151,10 +215,12 @@ async function anthropicTurn(store, userText, now, history) {
       return msg.content.filter((c) => c.type === "text").map((c) => c.text).join("\n").trim();
     }
     messages.push({ role: "assistant", content: msg.content });
-    messages.push({ role: "user", content: toolUses.map((tu) => ({
-      type: "tool_result", tool_use_id: tu.id,
-      content: JSON.stringify(invokeTool(tu.name, tu.input, store, now)),
-    })) });
+    const results = [];
+    for (const tu of toolUses) {
+      results.push({ type: "tool_result", tool_use_id: tu.id,
+        content: JSON.stringify(await invokeTool(tu.name, tu.input, store, now)) });
+    }
+    messages.push({ role: "user", content: results });
   }
   return "Sorry — I hit a snag looking that up. Try me again?";
 }

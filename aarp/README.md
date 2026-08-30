@@ -13,7 +13,10 @@ wired to Photon, per [IMESSAGE_AGENT_PLAYBOOK.md](../IMESSAGE_AGENT_PLAYBOOK.md)
 | `src/benefits.js` | Catalog load, intent→category mapping, search + BenefitScore ranking, brand dedup. | §7, §30 |
 | `src/memory.js` | Member memory store — profile/behavioral/episodic memories with confidence, reinforcement, expiry, forget; trips, watches, saved benefits, interactions, savings. JSON-per-member for P0; same interface swaps to Postgres at pilot. | §8-12, §43 |
 | `src/agent.js` | The concierge: persona, tool specs (search/remember/forget/trips/watches/save/savings), Anthropic tool loop (`claude-sonnet-5`) + deterministic `fake` provider for offline tests. | §40, §42, §44 |
-| `src/proactive.js` | Proactive sweep: watches + trips + temporal moments × memory → candidates → interruption score → frequency cap (7d) + subject cooldown (30d) + repeat suppression. Most sweeps send nothing, by design. | §15-16, §31-33, §45 |
+| `src/proactive.js` | Proactive sweep: watches + trips + temporal moments × memory → candidates → interruption score → frequency cap (7d) + subject cooldown (30d) + repeat suppression + muted-category filter. Most sweeps send nothing, by design. | §15-16, §31-33, §45 |
+| `src/local_restaurants.js` | **Source 2, live** — reverse-engineered Augeo/Kigo offerwall: scrape the per-render anonymous token from memberoffers.aarp.org, send it raw as `Authorization` to `offersv2-api.p.augeocms.com/api/v2/kigo/offers?postalCode=…`. Queried live per ZIP with keyword + distance; token cached 30 min, re-scraped on 401. | §5, §21 |
+| `src/rewards.js` | AARP Rewards conversational surface — balance, expiring points, preference-ranked redemptions, earning activities. Mock data behind the real interface (swap at pilot). | §23-25 |
+| `src/server.js` | The Photon seam: HTTP bridge (`POST /inbound`, `POST /sweep`, `GET /health`) with message-id dedupe (at-least-once inbound) and per-member turn serialization, per the playbook. | §41 |
 | `src/demo.js` | Exec-demo harness with **simulated dates** to prove persistence (§49). |
 | `test/` | `node --test aarp/test/*.test.js` — 11 offline tests, no network, no key. |
 
@@ -52,12 +55,19 @@ node aarp/src/demo.js --member you --provider fake --date 2026-08-30 "dinner ton
 6. "what do you remember about me?" → plain list + how to forget.
 7. "how much have I saved?" → savings tracker total.
 
-## Not built yet (P0 gaps)
+## Agent tools (16)
 
-- **Source 2 (memberoffers.aarp.org local restaurants)** — the offerwall is a client-side
-  Augeo widget; its API needs a browser-session capture to reverse. National restaurant
-  chains are already in the main catalog.
-- **Photon wiring** — the agent's `converse(memberId, text, {now})` is the seam; connect
-  it behind `cloud/inbound/router.ts` (idempotency) + `cloud/channel` once Photon
-  credentials for the AARP line exist.
-- **ZIP/proximity search, screenshot search, Rewards** (mock data only), member auth.
+search_benefits · search_local_restaurants (live, ZIP + keyword + distance) · remember ·
+forget · add_trip · create_watch · remove_watch · save_benefit · record_benefit_used ·
+get_savings (incl. goal progress) · set_savings_goal · get_rewards · get_opportunities
+("what am I missing?" / "anything good for me?") · mute_category
+
+Member controls honored end-to-end: mute a category (search, ranking, and proactive all
+respect it), stop a watch, forget a memory, savings goals.
+
+## Not built yet (P1)
+
+- **Photon credentials** — `src/server.js` is the wire-in point; connect the provider
+  webhook (via `cloud/channel` + `cloud/inbound/router.ts`) once the AARP line exists.
+- **Real Rewards API** (mock today), AARP member authentication, screenshot search,
+  redemption-confirmed tracking beyond self-report, analytics dashboard.

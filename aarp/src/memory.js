@@ -23,6 +23,8 @@ const EMPTY = () => ({
   interactions: [],    // {benefit_id, action: shown|clicked|saved|redeemed|dismissed, at}
   savings_events: [],  // {benefit_id, amount_saved, bill_amount, at}
   message_log: [],     // {role, text, at} — conversation history (last N)
+  muted_categories: [],// §34: "don't send restaurant offers"
+  savings_goal: null,  // §38: {target, set_at}
 });
 
 export class MemberStore {
@@ -108,6 +110,7 @@ export class MemberStore {
       shownIds: this.state.interactions.filter((i) => i.action === "shown").map((i) => i.benefit_id),
       ignoredIds: this.state.interactions.filter((i) => i.action === "dismissed").map((i) => i.benefit_id),
       state: this.state.home_location?.match(/\b([A-Z]{2})\b/)?.[1] || null,
+      mutedCategories: this.state.muted_categories || [],
     };
   }
 
@@ -147,6 +150,16 @@ export class MemberStore {
     const w = { id: randomUUID().slice(0, 8), watch_type, subject, trigger, active: true,
       created_at: now || new Date().toISOString() };
     this.state.watches.push(w); this.save(); return w;
+  }
+
+  muteCategory(cat) {
+    if (!this.state.muted_categories.includes(cat)) this.state.muted_categories.push(cat);
+    this.save();
+  }
+
+  unmuteCategory(cat) {
+    this.state.muted_categories = this.state.muted_categories.filter((c) => c !== cat);
+    this.save();
   }
 
   removeWatch(text) {

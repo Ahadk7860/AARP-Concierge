@@ -106,8 +106,10 @@ export function searchBenefits(query, memberContext = {}, opts = {}) {
     return { benefit: b, score, intent };
   });
 
+  const muted = new Set(memberContext.mutedCategories || []);
   const gate = intentCats.length ? 0.3 : 0.15;
   const ranked = scored
+    .filter((s) => ![s.benefit.category, ...(s.benefit.categories || [])].some((c) => muted.has(c)))
     .filter((s) => s.intent > gate && s.score > 0.2)
     .sort((a, b) => b.score - a.score);
   // One result per brand — the catalog carries quarterly LTO variants of evergreen offers.

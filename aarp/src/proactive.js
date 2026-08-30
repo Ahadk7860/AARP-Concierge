@@ -30,7 +30,7 @@ function daysSince(iso, now) {
 
 /** Generate scored candidates for one member. Pure — does not send. */
 export function generateCandidates(store, now) {
-  const candidates = [];
+  let candidates = [];
   const ctx = store.rankingContext(now);
   const mems = store.activeMemories(now);
   const month = new Date(now).getUTCMonth() + 1;
@@ -80,6 +80,10 @@ export function generateCandidates(store, now) {
       });
     }
   }
+
+  // §34: never send proactive messages in muted categories.
+  const muted = new Set(store.state.muted_categories || []);
+  candidates = candidates.filter((c) => !muted.has(c.benefit.category));
 
   // Interruption score (§32): value × relevance × urgency.
   for (const c of candidates) c.score = c.value * c.relevance * c.urgency * 4; // scale to ~0..1
