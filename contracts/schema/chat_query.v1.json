@@ -1,1 +1,0 @@
-{"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"https://boi.app/schema/chat_query.v1.json","title":"Closed chat query v1","type":"object","additionalProperties":false,"required":["schema_version","name"],"properties":{"schema_version":{"const":"chat_query.v1"},"name":{"const":"waiting_on_me"},"limit":{"type":"integer","minimum":1,"maximum":5}}}

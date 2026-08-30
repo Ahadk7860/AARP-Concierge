@@ -1,54 +1,19 @@
 {
-  "name": "boi-imessage",
+  "name": "aarp-concierge",
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "Boi — the assistant that reads the room. Cloud half.",
-  "notify": [
-    "bash scripts/notify-user.sh"
-  ],
-  "engines": {
-    "node": ">=20"
-  },
+  "description": "AARP iMessage personal benefits concierge",
+  "engines": { "node": ">=22" },
   "scripts": {
-    "test": "vitest run --passWithNoTests",
-    "lint": "eslint .",
-    "typecheck": "tsc --noEmit -p tsconfig.json",
-    "fixtures": "python3 scripts/validate_fixtures.py",
-    "chatdb": "python3 scripts/make_synthetic_chatdb.py",
-    "test:c": "vitest run cloud/channel cloud/mock-linq",
-    "test:d": "vitest run cloud/api cloud/brief cloud/card cloud/db",
-    "lint:py": "ruff check intelligence && ruff format --check intelligence",
-    "e2e": "vite-node cloud/e2e/src/main.ts",
-    "card": "vite-node cloud/card/src/main.ts",
-    "scheduler": "vite-node cloud/scheduler/src/main.ts",
-    "notify:user": "bash scripts/notify-user.sh"
-  },
-  "devDependencies": {
-    "@types/js-yaml": "^4.0.9",
-    "@types/node": "^22.0.0",
-    "@types/pg": "^8.11.0",
-    "@types/ws": "^8.18.1",
-    "@typescript-eslint/eslint-plugin": "^8.0.0",
-    "@typescript-eslint/parser": "^8.0.0",
-    "ajv": "^8.17.1",
-    "eslint": "^9.0.0",
-    "js-yaml": "^4.1.0",
-    "typescript": "^5.5.0",
-    "vitest": "^2.0.0",
-    "yaml": "^2.9.0"
+    "test": "node --test aarp/test/*.test.js",
+    "start": "node aarp/src/server.js",
+    "demo": "node aarp/src/demo.js",
+    "refresh": "node -e \"import('./aarp/src/refresh.js').then(m=>m.refreshCatalog())\"",
+    "ingest": "python3 aarp/ingestion/ingest_benefits.py"
   },
   "dependencies": {
-    "@aws-sdk/client-s3": "^3.1106.0",
-    "@aws-sdk/s3-request-presigner": "^3.1106.0",
-    "@resvg/resvg-js": "^2.6.2",
-    "fastify": "^5.0.0",
-    "node-cron": "^3.0.3",
-    "pg": "^8.12.0",
-    "pino": "^9.0.0",
-    "spectrum-ts": "^12.7.0",
-    "undici": "^6.19.0",
-    "ws": "^8.21.3",
-    "zod": "^3.23.0"
+    "@spectrum-ts/core": "^12.8.0",
+    "@spectrum-ts/imessage": "^12.8.0"
   }
 }

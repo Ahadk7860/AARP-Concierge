@@ -1,8 +1,0 @@
-{
-  "note": "The case the mapping exists for. Photon reports service 'unknown'; SendResult.protocol must be null, NEVER 'sms'. Collapsing it drives the handle-mismatch flag and tells a user their number is not on iMessage on the strength of a value that says we do not know.",
-  "request": {
-    "space": { "id": "any;-;+15551230000", "phone": "shared" },
-    "parts": [{ "kind": "text", "text": "one person worth a message today:" }]
-  },
-  "response": { "message_id": "msg_01J8ZK5RX", "service": "unknown", "phone": "+16465792868" }
-}

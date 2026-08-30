@@ -1,6 +1,5 @@
-// The Photon seam — an HTTP bridge between the iMessage provider webhook and the
-// concierge. Zero-dep node http. Wire cloud/channel's webhook here when the AARP
-// line's Photon credentials exist (see IMESSAGE_AGENT_PLAYBOOK.md §2).
+// HTTP surface: onboarding, analytics, click-through tracking, and a JSON bridge
+// for driving the concierge without iMessage (demos, smoke tests).
 //
 //   POST /inbound  {member_id, text, message_id?, now?}   → {reply}
 //   POST /sweep    {now?}                                 → proactive results, all members
@@ -72,6 +71,28 @@ export function createApp({ photonRef = { current: null } } = {}) {
         } catch { /* click logging is best-effort; the redirect must still happen */ }
         res.writeHead(302, { location: benefit.redemption_url });
         return res.end();
+      }
+
+      // §37 (mock): "linked member" flow — the agent hands out /link/<memberHash>;
+      // opening it flips the member to linked mode (real AARP OAuth at pilot).
+      const lMatch = req.method === "GET" && req.url?.match(/^\/link\/([0-9a-f]{12})$/);
+      if (lMatch) {
+        let linked = false;
+        try {
+          mkdirSync(MEMBERS_DIR, { recursive: true });
+          for (const f of readdirSync(MEMBERS_DIR).filter((f) => f.endsWith(".json"))) {
+            const id = f.replace(/\.json$/, "");
+            if (memberHash(id) === lMatch[1]) {
+              const st = new MemberStore(id, MEMBERS_DIR);
+              st.state.linked = true; st.save(); linked = true; break;
+            }
+          }
+        } catch { /* fall through to the page either way */ }
+        return html(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<body style="font:17px -apple-system,system-ui;max-width:420px;margin:3rem auto;padding:0 1rem;text-align:center">
+<h2 style="color:#8b0000">AARP account ${linked ? "linked ✓" : "link"}</h2>
+<p>${linked ? "You're set — head back to iMessage. Your Rewards and saved benefits are now personalized." : "We couldn't match this link to a conversation. Text the concierge first, then tap the link it sends you."}</p>
+<p style="color:#777;font-size:.85em">Prototype — demo linking only; no AARP credentials involved.</p></body>`);
       }
 
       if (req.method === "POST" && req.url === "/onboard") {

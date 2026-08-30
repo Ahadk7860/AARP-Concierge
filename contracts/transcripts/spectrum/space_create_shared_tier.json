@@ -1,6 +1,0 @@
-{
-  "note": "OBSERVED against the real project on 4 Aug, not reconstructed. space.create is LOCAL on the shared tier: one millisecond, an id derived from the handle, and phone is the literal string 'shared'. Two consequences recorded in NOTES.md: it consumes no new-conversation quota, and Registrar.lineFor cannot read space.phone.",
-  "request": { "handle": "+16465792868" },
-  "response": { "id": "any;-;+16465792868", "phone": "shared", "elapsed_ms": 1 },
-  "repeated": { "same_id": true }
-}

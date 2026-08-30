@@ -1,8 +1,7 @@
 # AARP Concierge — P0 track
 
-The AARP iMessage benefits concierge ([PRD.md](../PRD.md)). This track is the new
-product layer; it reuses Boi's delivery spine (`cloud/channel`, `cloud/inbound`) when
-wired to Photon, per [IMESSAGE_AGENT_PLAYBOOK.md](../IMESSAGE_AGENT_PLAYBOOK.md).
+The AARP iMessage benefits concierge ([PRD.md](../PRD.md)). Self-contained: the only
+runtime dependency is the `@spectrum-ts` SDK for the Photon iMessage line.
 
 ## What's here
 
@@ -16,7 +15,7 @@ wired to Photon, per [IMESSAGE_AGENT_PLAYBOOK.md](../IMESSAGE_AGENT_PLAYBOOK.md)
 | `src/proactive.js` | Proactive sweep: watches + trips + temporal moments × memory → candidates → interruption score → frequency cap (7d) + subject cooldown (30d) + repeat suppression + muted-category filter. Most sweeps send nothing, by design. | §15-16, §31-33, §45 |
 | `src/local_restaurants.js` | **Source 2, live** — reverse-engineered Augeo/Kigo offerwall: scrape the per-render anonymous token from memberoffers.aarp.org, send it raw as `Authorization` to `offersv2-api.p.augeocms.com/api/v2/kigo/offers?postalCode=…`. Queried live per ZIP with keyword + distance; token cached 30 min, re-scraped on 401. | §5, §21 |
 | `src/rewards.js` | AARP Rewards conversational surface — balance, expiring points, preference-ranked redemptions, earning activities. Mock data behind the real interface (swap at pilot). | §23-25 |
-| `src/server.js` | The Photon seam: HTTP bridge (`POST /inbound`, `POST /sweep`, `GET /health`) with message-id dedupe (at-least-once inbound) and per-member turn serialization, per the playbook. | §41 |
+| `src/server.js` | The Photon seam: HTTP bridge (`POST /inbound`, `POST /sweep`, `GET /health`) with message-id dedupe (at-least-once inbound) and per-member turn serialization. | §41 |
 | `src/demo.js` | Exec-demo harness with **simulated dates** to prove persistence (§49). |
 | `test/` | `node --test aarp/test/*.test.js` — 11 offline tests, no network, no key. |
 
@@ -67,7 +66,7 @@ respect it), stop a watch, forget a memory, savings goals.
 
 ## Not built yet (P1)
 
-- **Photon credentials** — `src/server.js` is the wire-in point; connect the provider
-  webhook (via `cloud/channel` + `cloud/inbound/router.ts`) once the AARP line exists.
-- **Real Rewards API** (mock today), AARP member authentication, screenshot search,
-  redemption-confirmed tracking beyond self-report, analytics dashboard.
+- **Real Rewards API** (mock today) and real AARP member authentication (`/link` is a
+  demo stub).
+- **Voice-note transcription** — audio attachments are acknowledged but not transcribed.
+- **Personalization-lift A/B measurement** (§47/§53) — needs traffic.

@@ -1,8 +1,0 @@
-{
-  "note": "The allowlist rejection on the Free tier. Outbound-only: a shared line will only message recipients registered as project Users. This is why signup registers BOTH the phone and the Apple Account email — an unregistered handle fails here, long after signup, with nothing on the signup page having gone wrong.",
-  "request": {
-    "space": { "id": "any;-;+15559999999", "phone": "shared" },
-    "parts": [{ "kind": "text", "text": "hello" }]
-  },
-  "error": { "message": "Target not allowed for this project", "retryable": false }
-}

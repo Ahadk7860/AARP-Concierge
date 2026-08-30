@@ -1,6 +1,6 @@
 // AARP Concierge agent — tool loop + persona (PRD §§40, 42, 44).
 // Providers: "anthropic" (live, needs ANTHROPIC_API_KEY) | "fake" (deterministic, for tests).
-import { searchBenefits, benefitCard, loadCatalog } from "./benefits.js";
+import { searchBenefits, benefitCard, loadCatalog, memberHash } from "./benefits.js";
 import { MemberStore } from "./memory.js";
 import { searchLocalRestaurants } from "./local_restaurants.js";
 import { getRewards } from "./rewards.js";
@@ -49,7 +49,9 @@ If the member asks for a human ("talk to someone"), give AARP member support:
 1-888-687-2277, and don't make them fight the bot.
 
 Rewards balances, saved-benefit history and member-specific eligibility need a linked
-AARP account. This prototype uses demo Rewards data — say so when asked about points.
+AARP account: if the member isn't linked yet (see profile), offer the get_link_url tool's
+link ("I can show you that once I securely connect this number to your AARP account —
+tap: <url>"). This prototype uses demo Rewards data — say so when asked about points.
 Never request passwords over iMessage.
 
 Light onboarding (§36): after you've delivered first value to a new member, you may ask
@@ -134,6 +136,9 @@ export const TOOLS = [
   { name: "set_savings_goal",
     description: "Member set a savings goal, e.g. 'help me save $500 this year'.",
     input_schema: { type: "object", properties: { target: { type: "number" } }, required: ["target"] } },
+  { name: "get_link_url",
+    description: "The member's secure account-linking URL (§37). Offer it when they want Rewards/saved history and aren't linked yet.",
+    input_schema: { type: "object", properties: {} } },
   { name: "set_weekly_digest",
     description: "Turn the opt-in weekly savings digest on or off (§38). Only enable when the member clearly asks for a weekly summary.",
     input_schema: { type: "object", properties: { enabled: { type: "boolean" } }, required: ["enabled"] } },
@@ -174,6 +179,11 @@ export function invokeTool(name, input, store, now, deps = {}) {
       store.state.savings_goal = { target: input.target, set_at: now };
       store.save();
       return { ok: true, target: input.target, saved_so_far: store.totalSaved() };
+    case "get_link_url": {
+      const pub = process.env.AARP_PUBLIC_URL || "";
+      return { url: `${pub.replace(/\/$/, "")}/link/${memberHash(store.state.member_id)}`,
+        linked: !!store.state.linked };
+    }
     case "set_weekly_digest": {
       store.state.weekly_digest = !!input.enabled; store.save();
       return { ok: true, weekly_digest: store.state.weekly_digest };
@@ -215,6 +225,7 @@ export function invokeTool(name, input, store, now, deps = {}) {
 function systemPrompt(store, now) {
   const p = store.profileSummary(now);
   const profile = [
+    `Account: ${p.linked ? "linked" : "NOT linked"}`,
     p.home_location ? `Home: ${p.home_location}` : null,
     ...p.memory_lines, ...p.trip_lines, ...p.watch_lines,
     p.saved_benefits.length ? `Saved benefits: ${p.saved_benefits.join(", ")}` : null,

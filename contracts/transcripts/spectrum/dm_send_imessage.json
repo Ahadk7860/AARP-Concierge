@@ -1,8 +1,0 @@
-{
-  "note": "One outbound text into an existing space, delivered blue. Recorded shape, not a live capture: the shared tier's send response is what SpectrumPort.send returns.",
-  "request": {
-    "space": { "id": "any;-;+16465792868", "phone": "shared" },
-    "parts": [{ "kind": "text", "text": "3 people worth a message today:" }]
-  },
-  "response": { "message_id": "msg_01J8ZK4QW", "service": "iMessage", "phone": "+16465792868" }
-}

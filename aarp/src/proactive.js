@@ -4,7 +4,7 @@
 // × memories), generate candidate recommendations, score each candidate
 // (expected value × relevance × urgency vs. frequency/annoyance), and send only
 // what clears the threshold. Most sweeps should send nothing — that is by design.
-import { searchBenefits, benefitCard } from "./benefits.js";
+import { searchBenefits, benefitCard, loadCatalog } from "./benefits.js";
 import { MemberStore } from "./memory.js";
 
 const MIN_DAYS_BETWEEN_PROACTIVE = 7;   // §33: high relevance, LOW frequency
@@ -85,7 +85,39 @@ export function generateCandidates(store, now) {
   const muted = new Set(store.state.muted_categories || []);
   candidates = candidates.filter((c) => !muted.has(c.benefit.category));
 
-  // 4. Reminders (§34: "remind me about this in December") — episodic memories the
+  // 4. Savings milestone (§31): celebrate crossing each $50 mark, once.
+  const saved = store.totalSaved();
+  const milestone = Math.floor(saved / 50) * 50;
+  const celebrated = new Set((store.state.proactive_log || [])
+    .filter((e) => e.kind === "milestone").map((e) => e.subject));
+  if (milestone >= 50 && !celebrated.has(`milestone-${milestone}`)) {
+    candidates.push({
+      kind: "milestone", subject: `milestone-${milestone}`,
+      benefit: { id: `milestone-${milestone}`, category: "milestone", redemption_url: "" },
+      relevance: 0.8, urgency: 0.4, value: 0.6,
+      message: `Nice one — you've now saved over $${milestone} with AARP this year 🎉 Ask me "what am I missing?" if you want to push that higher.`,
+    });
+  }
+
+  // 5. New benefit in a frequently-used category (§31): catalog entries first seen in
+  // the last 7 days that land in a category this member actually engages with.
+  const freq = new Set(store.state.interactions.map((i) =>
+    loadCatalog().benefits.find((b) => b.id === i.benefit_id)?.category).filter(Boolean));
+  if (freq.size) {
+    const weekAgo = new Date(new Date(now) - 7 * 86400000).toISOString();
+    const fresh = loadCatalog().benefits.filter((b) =>
+      b.first_seen > weekAgo && freq.has(b.category));
+    if (fresh.length) {
+      const b = fresh[0];
+      candidates.push({
+        kind: "new_benefit", subject: `new-${b.id}`, benefit: benefitCard(b, store.state.member_id),
+        relevance: 0.6, urgency: 0.5, value: 0.6,
+        message: `New AARP benefit in a category you use: ${b.brand} — ${b.title}. Want the link?`,
+      });
+    }
+  }
+
+  // 6. Reminders (§34: "remind me about this in December") — episodic memories the
   // agent stored with key "reminder" and an expiration = when to fire (fire in the
   // final 30 days before expiry, i.e. once the reminder window has arrived).
   for (const m of mems.filter((m) => m.key === "reminder" && m.expiration_date)) {

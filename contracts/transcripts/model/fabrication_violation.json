@@ -1,9 +1,0 @@
-{
-  "note": "Recorded model output for FakeProvider replay. The two violation records exist so the validator's gates can be tested without a live model.",
-  "match": {
-    "gist_id_contains": "g_99ff00aa"
-  },
-  "model_id": "gemini-2.5-flash-lite",
-  "prompt_version": "draft.v1",
-  "response": "{\"candidates\":[{\"stance\":\"answer\",\"text\":\"yes im free thursday at 7, lets do it\"},{\"stance\":\"defer\",\"text\":\"ill get back to u\"}]}"
-}

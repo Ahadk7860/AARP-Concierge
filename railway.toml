@@ -1,5 +1,3 @@
-# AARP Concierge bridge (aarp/src/server.js). Boi's original cloud deploy config was
-# replaced when this repo became the AARP fork — see git history if you need it back.
 [build]
 builder = "DOCKERFILE"
 dockerfilePath = "Dockerfile"

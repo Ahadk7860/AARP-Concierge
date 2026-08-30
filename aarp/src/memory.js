@@ -93,6 +93,7 @@ export class MemberStore {
     const watches = this.state.watches.filter((w) => w.active).map(
       (w) => `- watch: ${w.watch_type} — ${w.subject}`);
     return {
+      linked: !!this.state.linked,
       home_location: this.state.home_location,
       memory_lines: lines,
       trip_lines: trips,

@@ -1,9 +1,8 @@
 // Tester onboarding for the shared Photon pool.
 //
-// On the shared tier the line number is a PROJECT CONSTANT (see
-// cloud/channel/src/spectrum-registrar.ts: space.phone reads the literal
-// "shared", so the number comes from config — SPECTRUM_LINE_E164, copied from
-// the Photon dashboard). Onboarding therefore:
+// On the shared Photon tier the line number is a PROJECT CONSTANT (space.phone
+// reads back the literal "shared", so the number comes from config —
+// SPECTRUM_LINE_E164, copied from the Photon dashboard). Onboarding therefore:
 //   1. collects the tester's phone number,
 //   2. registers/allowlists it with Photon (space.create — required on the
 //      shared tier so outbound replies to them are legal),
