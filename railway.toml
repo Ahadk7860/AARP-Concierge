@@ -2,7 +2,7 @@
 # replaced when this repo became the AARP fork — see git history if you need it back.
 [build]
 builder = "DOCKERFILE"
-dockerfilePath = "aarp/Dockerfile"
+dockerfilePath = "Dockerfile"
 
 [deploy]
 startCommand = "node aarp/src/server.js"
