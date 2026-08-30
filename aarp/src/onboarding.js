@@ -24,6 +24,12 @@ export function lineNumber() {
   return /^\+[1-9][0-9]{6,14}$/.test(line) ? line : null;
 }
 
+/** Human-readable US line for display; the sms: link always uses E.164. */
+export function prettyLine(line) {
+  const m = /^\+1(\d{3})(\d{3})(\d{4})$/.exec(line || "");
+  return m ? `(${m[1]}) ${m[2]}-${m[3]}` : line || "";
+}
+
 export function normalizePhone(raw) {
   const digits = String(raw || "").replace(/[^\d+]/g, "");
   if (/^\+[1-9]\d{6,14}$/.test(digits)) return digits;
@@ -82,7 +88,7 @@ button,.btn{font:inherit;font-weight:600;display:inline-block;width:100%;box-siz
   <div class="card" id="done">
     <b>2 · Text the concierge</b>
     <p>You're registered. Save this number as <b>AARP</b> and send your first message:</p>
-    <p class="num">${line || "(line number pending)"}</p>
+    <p class="num">${line ? prettyLine(line) : "(line number pending)"}</p>
     ${line ? `<a class="btn" href="${smsHref}">Open iMessage →</a>` : `<p class="muted">The line number will appear here once configured.</p>`}
   </div>
 

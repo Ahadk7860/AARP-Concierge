@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { normalizePhone, onboardingHTML } from "../src/onboarding.js";
+import { normalizePhone, onboardingHTML, prettyLine } from "../src/onboarding.js";
 import { computeAnalytics, dashboardHTML } from "../src/analytics.js";
 import { MemberStore } from "../src/memory.js";
 import { createApp } from "../src/server.js";
@@ -24,7 +24,8 @@ test("onboarding page renders with and without a configured line", () => {
   assert.match(onboardingHTML(), /line number pending/);
   process.env.SPECTRUM_LINE_E164 = "+15550100123";
   const html = onboardingHTML();
-  assert.match(html, /\+15550100123/);
+  assert.equal(prettyLine("+15550100123"), "(555) 010-0123");
+  assert.match(html, /\(555\) 010-0123/, "displays a human-readable number");
   assert.match(html, /sms:\+15550100123/);
   assert.match(html, /not an official/i);
   delete process.env.SPECTRUM_LINE_E164;
