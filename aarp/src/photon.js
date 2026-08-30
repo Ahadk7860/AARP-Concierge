@@ -7,7 +7,7 @@
 // new conversation — proactive sends go only to members who have texted first
 // (their space id is persisted on their member record).
 import { converse } from "./agent.js";
-import { evaluateProactive } from "./proactive.js";
+import { evaluateProactive, weeklyDigest } from "./proactive.js";
 import { MemberStore } from "./memory.js";
 
 const SWEEP_INTERVAL_MS = Number(process.env.AARP_SWEEP_INTERVAL_MS || 6 * 3600 * 1000);
@@ -117,6 +117,9 @@ export async function startPhoton({ log = console.log } = {}) {
         if (r.sent) {
           await app.send(space, text(r.message));
           log(`photon: proactive → ${memberId}: ${r.candidate.subject}`);
+        } else {
+          const digest = weeklyDigest(new MemberStore(memberId), new Date().toISOString());
+          if (digest) { await app.send(space, text(digest)); log(`photon: digest → ${memberId}`); }
         }
       } catch (e) {
         log(`photon: sweep failed for ${memberId}: ${e.message}`);

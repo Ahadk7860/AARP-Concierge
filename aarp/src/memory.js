@@ -25,6 +25,8 @@ const EMPTY = () => ({
   message_log: [],     // {role, text, at} — conversation history (last N)
   muted_categories: [],// §34: "don't send restaurant offers"
   savings_goal: null,  // §38: {target, set_at}
+  weekly_digest: false,// §38: opt-in weekly savings digest
+  last_digest_at: null,
 });
 
 export class MemberStore {

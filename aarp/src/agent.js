@@ -134,6 +134,9 @@ export const TOOLS = [
   { name: "set_savings_goal",
     description: "Member set a savings goal, e.g. 'help me save $500 this year'.",
     input_schema: { type: "object", properties: { target: { type: "number" } }, required: ["target"] } },
+  { name: "set_weekly_digest",
+    description: "Turn the opt-in weekly savings digest on or off (§38). Only enable when the member clearly asks for a weekly summary.",
+    input_schema: { type: "object", properties: { enabled: { type: "boolean" } }, required: ["enabled"] } },
   { name: "mute_category",
     description: "Member asked to stop a category ('don't send restaurant offers'). Category slugs: restaurants, travel, entertainment, insurance, healthandwellness, shoppingandgroceries, autoservice, finances, home-tech.",
     input_schema: { type: "object", properties: { category: { type: "string" } }, required: ["category"] } },
@@ -160,7 +163,7 @@ export function invokeTool(name, input, store, now, deps = {}) {
         const hits = searchBenefits(q, ctx, { limit: 2 });
         for (const h of hits) {
           if (!redeemedCats.has(h.benefit.category) && !picks.some((p) => p.id === h.benefit.id)) {
-            picks.push({ ...benefitCard(h.benefit), because: q });
+            picks.push({ ...benefitCard(h.benefit, store.state.member_id), because: q });
           }
         }
       }
@@ -171,11 +174,15 @@ export function invokeTool(name, input, store, now, deps = {}) {
       store.state.savings_goal = { target: input.target, set_at: now };
       store.save();
       return { ok: true, target: input.target, saved_so_far: store.totalSaved() };
+    case "set_weekly_digest": {
+      store.state.weekly_digest = !!input.enabled; store.save();
+      return { ok: true, weekly_digest: store.state.weekly_digest };
+    }
     case "mute_category": { store.muteCategory(input.category); return { ok: true, muted: store.state.muted_categories }; }
     case "search_benefits": {
       const results = searchBenefits(input.query, store.rankingContext(now),
         input.category ? { categories: [input.category] } : {});
-      const cards = results.map((r) => benefitCard(r.benefit));
+      const cards = results.map((r) => benefitCard(r.benefit, store.state.member_id));
       for (const c of cards) store.recordInteraction(c.id, "shown", now);
       return cards.length ? { results: cards } : { results: [], note: "No verified AARP benefit matches. Say so plainly — do not invent one." };
     }

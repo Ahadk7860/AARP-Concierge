@@ -15,6 +15,7 @@ import { converse } from "./agent.js";
 import { evaluateProactive } from "./proactive.js";
 import { MemberStore } from "./memory.js";
 import { computeAnalytics, dashboardHTML } from "./analytics.js";
+import { loadCatalog, memberHash } from "./benefits.js";
 import { onboardingHTML, normalizePhone, registerTester, lineNumber } from "./onboarding.js";
 import { refreshCatalog } from "./refresh.js";
 import { fileURLToPath } from "node:url";
@@ -55,6 +56,23 @@ export function createApp({ photonRef = { current: null } } = {}) {
       if (req.method === "GET" && (req.url === "/" || req.url === "/onboard")) return html(onboardingHTML());
       if (req.method === "GET" && req.url === "/analytics") return send(200, computeAnalytics(MEMBERS_DIR));
       if (req.method === "GET" && req.url === "/dashboard") return html(dashboardHTML(computeAnalytics(MEMBERS_DIR)));
+
+      // §46: click-tracked redemption redirect — /r/<memberHash>/<benefitId>
+      const rMatch = req.method === "GET" && req.url?.match(/^\/r\/([0-9a-f]{12})\/([a-z0-9-]+)$/);
+      if (rMatch) {
+        const [, hash, benefitId] = rMatch;
+        const benefit = loadCatalog().benefits.find((b) => b.id === benefitId);
+        if (!benefit) return send(404, { error: "unknown benefit" });
+        try {
+          mkdirSync(MEMBERS_DIR, { recursive: true });
+          for (const f of readdirSync(MEMBERS_DIR).filter((f) => f.endsWith(".json"))) {
+            const id = f.replace(/\.json$/, "");
+            if (memberHash(id) === hash) { new MemberStore(id, MEMBERS_DIR).recordInteraction(benefitId, "clicked"); break; }
+          }
+        } catch { /* click logging is best-effort; the redirect must still happen */ }
+        res.writeHead(302, { location: benefit.redemption_url });
+        return res.end();
+      }
 
       if (req.method === "POST" && req.url === "/onboard") {
         const { phone } = await readBody(req);

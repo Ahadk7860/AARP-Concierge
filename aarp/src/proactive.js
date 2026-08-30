@@ -85,6 +85,21 @@ export function generateCandidates(store, now) {
   const muted = new Set(store.state.muted_categories || []);
   candidates = candidates.filter((c) => !muted.has(c.benefit.category));
 
+  // 4. Reminders (§34: "remind me about this in December") — episodic memories the
+  // agent stored with key "reminder" and an expiration = when to fire (fire in the
+  // final 30 days before expiry, i.e. once the reminder window has arrived).
+  for (const m of mems.filter((m) => m.key === "reminder" && m.expiration_date)) {
+    const daysLeft = (new Date(m.expiration_date) - new Date(now)) / 86400000;
+    if (daysLeft > 0 && daysLeft < 30) {
+      candidates.push({
+        kind: "reminder", subject: `reminder-${m.id}`,
+        benefit: { id: `reminder-${m.id}`, category: "reminder", redemption_url: "" },
+        relevance: 0.95, urgency: 0.7, value: 0.5,
+        message: `You asked me to remind you: ${m.value}. Want me to look into it?`,
+      });
+    }
+  }
+
   // Interruption score (§32): value × relevance × urgency.
   for (const c of candidates) c.score = c.value * c.relevance * c.urgency * 4; // scale to ~0..1
   return candidates.sort((a, b) => b.score - a.score);
@@ -95,6 +110,22 @@ export function generateCandidates(store, now) {
  * proactive send so frequency caps hold. Deterministic message composition — the
  * anti-spam guarantee is easier to keep when no model can pad the copy.
  */
+/** §38 weekly digest — opt-in, at most weekly, only when there is something to say. */
+export function weeklyDigest(store, now) {
+  if (!store.state.weekly_digest) return null;
+  if (daysSince(store.state.last_digest_at, now) < 7) return null;
+  const weekAgo = new Date(new Date(now) - 7 * 86400000).toISOString();
+  const saved = store.state.savings_events.filter((e) => e.at >= weekAgo)
+    .reduce((a, e) => a + (e.amount_saved || 0), 0);
+  const candidates = generateCandidates(store, now);
+  if (!saved && !candidates.length) return null;
+  const lines = [`Your AARP savings this week: $${saved.toFixed(0)}.`];
+  if (candidates[0]) lines.push(`I also found something that matches what you've told me you care about — ${candidates[0].benefit.brand ?? candidates[0].subject}. Want to see it?`);
+  store.state.last_digest_at = now;
+  store.save();
+  return lines.join(" ");
+}
+
 export function evaluateProactive(memberId, { now = new Date().toISOString(), membersDir } = {}) {
   const store = new MemberStore(memberId, membersDir);
   const since = daysSince(store.state.last_proactive_at, now);

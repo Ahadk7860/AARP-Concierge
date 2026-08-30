@@ -132,8 +132,21 @@ export function searchBenefits(query, memberContext = {}, opts = {}) {
   return deduped.slice(0, opts.limit ?? 5);
 }
 
-/** Compact card for a benefit — what the agent gets as tool output. */
-export function benefitCard(b) {
+import { createHash } from "node:crypto";
+
+/** Privacy-safe member hash for tracked links — never the raw handle in a URL. */
+export function memberHash(memberId) {
+  return createHash("sha256").update(String(memberId)).digest("hex").slice(0, 12);
+}
+
+/** Compact card for a benefit — what the agent gets as tool output.
+ * When AARP_PUBLIC_URL is set, redemption_url routes through GET /r/<hash>/<id>
+ * so clicks land in the funnel (§46) before the 302 to AARP. */
+export function benefitCard(b, memberId = null) {
+  const pub = process.env.AARP_PUBLIC_URL;
+  const tracked = pub && memberId
+    ? `${pub.replace(/\/$/, "")}/r/${memberHash(memberId)}/${b.id}`
+    : b.redemption_url;
   return {
     id: b.id,
     brand: b.brand,
@@ -142,7 +155,7 @@ export function benefitCard(b) {
     category: b.category,
     discount: b.discount_value ? `${b.discount_value}${b.discount_type === "percentage" ? "%" : " USD"}` : null,
     redemption: b.redemption_method || null,
-    redemption_url: b.redemption_url,   // PRD §5: always send a tappable link
+    redemption_url: tracked,   // PRD §5: always send a tappable link (§46: click-tracked when public URL configured)
     outlink_url: b.outlink_url || null,
     in_person_only: b.in_person_only || false,
     restrictions_note: b.state_blacklist?.length ? `Not available in: ${b.state_blacklist.join(", ")}` : null,
