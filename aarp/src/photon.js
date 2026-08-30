@@ -28,6 +28,30 @@ function textOf(message) {
   return typeof c.text === "string" ? c.text : "";
 }
 
+/** Image attachments → base64 blocks for the agent's vision path (PRD §38 screenshot search). */
+async function imagesOf(message) {
+  const c = message.content;
+  const atts = c?.type === "attachment" ? [c] : [];
+  const images = [];
+  for (const a of atts) {
+    try {
+      if (!/^image\//.test(a.mimeType || "") || typeof a.read !== "function") continue;
+      const buf = await a.read();
+      if (buf?.length > 4.5 * 1024 * 1024) continue; // API limit headroom
+      images.push({ media_type: a.mimeType, data: Buffer.from(buf).toString("base64") });
+    } catch { /* attachment fetch failed — treat as text-only */ }
+  }
+  return images;
+}
+
+const WELCOME = `Hi! I'm your AARP Concierge \u{1F44B}
+I can help you find benefits and savings you already have through AARP \u2014 and I get better over time as I learn what you care about.
+
+Try: \u201CGoing out to dinner tonight\u201D \u00B7 \u201CI'm going to Hawaii next month\u201D \u00B7 \u201CWhat discounts do I have near me?\u201D
+Or just tell me what you're about to buy.
+
+Tip: before you spend, ask AARP.`;
+
 /** A stable member id from the sender (iMessage address) or the space. */
 function memberIdOf(message, space) {
   return message.sender?.id || space?.id || "unknown";
@@ -54,7 +78,8 @@ export async function startPhoton({ log = console.log } = {}) {
         try {
           if (message.direction === "outbound" || message.sender?.kind === "agent") continue;
           const body = textOf(message).trim();
-          if (!body) continue;
+          const images = await imagesOf(message);
+          if (!body && !images.length) continue;
           if (seenIds.has(message.id)) continue;
           seenIds.add(message.id);
           if (seenIds.size > 2000) seenIds.delete(seenIds.values().next().value);
@@ -65,9 +90,12 @@ export async function startPhoton({ log = console.log } = {}) {
           store.state.space_id = space.id;
           store.save();
 
-          log(`photon: inbound from ${memberId}: ${body.slice(0, 80)}`);
+          const isFirstContact = store.state.message_log.length === 0;
+          log(`photon: inbound from ${memberId}: ${body.slice(0, 80)}${images.length ? ` [+${images.length} img]` : ""}`);
           await enqueue(memberId, async () => {
-            const reply = await app.responding(space, () => converse(memberId, body));
+            if (isFirstContact) await app.send(space, text(WELCOME));  // PRD §48
+            const reply = await app.responding(space, () =>
+              converse(memberId, body || "(the member sent an image)", { images }));
             await app.send(space, text(reply));
             log(`photon: replied to ${memberId} (${reply.length} chars)`);
           });
@@ -96,5 +124,5 @@ export async function startPhoton({ log = console.log } = {}) {
     }
   }, SWEEP_INTERVAL_MS);
 
-  return { app, stop: async () => { clearInterval(sweep); await app.stop(); } };
+  return { app, liveSpaces, stop: async () => { clearInterval(sweep); await app.stop(); } };
 }

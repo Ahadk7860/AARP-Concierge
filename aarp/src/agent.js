@@ -36,6 +36,26 @@ Reference memory naturally and sparingly: "Since you mentioned…", "I remembere
 If asked "what do you remember about me", list it plainly and note they can ask you to
 change or forget anything.
 
+If the member sends a screenshot or photo of something they're about to buy or book
+(a hotel page, a rental quote, a product), identify the merchant/product and check
+benefits for it before they spend (search_benefits / search_local_restaurants).
+If they paste a quote like "Hertz rental $384", same thing — check before they book.
+
+Household questions ("does this work for my husband too?"): AARP membership covers the
+member and, for most discounts, their household — but eligibility varies per offer, so
+point at the offer's terms via its link rather than promising.
+
+If the member asks for a human ("talk to someone"), give AARP member support:
+1-888-687-2277, and don't make them fight the bot.
+
+Rewards balances, saved-benefit history and member-specific eligibility need a linked
+AARP account. This prototype uses demo Rewards data — say so when asked about points.
+Never request passwords over iMessage.
+
+Light onboarding (§36): after you've delivered first value to a new member, you may ask
+ONE short personalization question ("Want me to personalize what I find? What matters
+most — travel, restaurants, shopping?"). Never a questionnaire.
+
 For "near me" requests use search_local_restaurants — it needs a ZIP code; if you
 don't know theirs (check home_location in memory), ask for it, then remember it.
 Local offers redeem in person or by printed coupon — say so.
@@ -197,10 +217,14 @@ function systemPrompt(store, now) {
 }
 
 /** Anthropic Messages API tool loop. */
-async function anthropicTurn(store, userText, now, history) {
+async function anthropicTurn(store, userText, now, history, images = []) {
   const key = process.env.ANTHROPIC_API_KEY;
   if (!key) throw new Error("ANTHROPIC_API_KEY not set — use AARP_PROVIDER=fake or supply a key");
-  const messages = [...history, { role: "user", content: userText }];
+  const userContent = images.length
+    ? [...images.map((img) => ({ type: "image", source: { type: "base64", media_type: img.media_type, data: img.data } })),
+       { type: "text", text: userText }]
+    : userText;
+  const messages = [...history, { role: "user", content: userContent }];
   for (let round = 0; round < 6; round++) {
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -250,14 +274,14 @@ function fakeTurn(store, userText, now) {
  * One conversational turn. now: ISO timestamp (simulated dates for the demo, PRD §49).
  * Returns the reply text; persists memory + message log.
  */
-export async function converse(memberId, userText, { now = new Date().toISOString(), provider = process.env.AARP_PROVIDER || "anthropic", membersDir } = {}) {
+export async function converse(memberId, userText, { now = new Date().toISOString(), provider = process.env.AARP_PROVIDER || "anthropic", membersDir, images = [] } = {}) {
   const store = new MemberStore(memberId, membersDir);
   store.logMessage("member", userText, now);
   const history = store.state.message_log.slice(0, -1).slice(-12)
     .map((m) => ({ role: m.role === "member" ? "user" : "assistant", content: m.text }));
   const reply = provider === "fake"
     ? fakeTurn(store, userText, now)
-    : await anthropicTurn(store, userText, now, history);
+    : await anthropicTurn(store, userText, now, history, images);
   store.logMessage("concierge", reply, now);
   return reply;
 }

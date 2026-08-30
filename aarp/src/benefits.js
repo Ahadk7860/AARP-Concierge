@@ -5,12 +5,21 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const CATALOG_PATH = join(HERE, "..", "data", "benefits.json");
+const BAKED_PATH = join(HERE, "..", "data", "benefits.json");
+
+/** Where the LIVE catalog lives: a refresh-writable path (volume in prod) if
+ * configured, else the baked fixture. The daily refresher writes here. */
+export function catalogPath() {
+  return process.env.AARP_CATALOG_PATH || BAKED_PATH;
+}
 
 let _catalog = null;
-export function loadCatalog(path = CATALOG_PATH) {
+export function invalidateCatalog() { _catalog = null; }
+export function loadCatalog(path) {
   if (!_catalog) {
-    const raw = JSON.parse(readFileSync(path, "utf8"));
+    let p = path || catalogPath();
+    try { readFileSync(p, "utf8"); } catch { p = BAKED_PATH; }  // fresh volume → baked fallback
+    const raw = JSON.parse(readFileSync(p, "utf8"));
     _catalog = { ...raw, benefits: raw.benefits.filter((b) => b.active) };
   }
   return _catalog;

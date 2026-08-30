@@ -14,6 +14,9 @@ import { readdirSync, mkdirSync } from "node:fs";
 import { converse } from "./agent.js";
 import { evaluateProactive } from "./proactive.js";
 import { MemberStore } from "./memory.js";
+import { computeAnalytics, dashboardHTML } from "./analytics.js";
+import { onboardingHTML, normalizePhone, registerTester, lineNumber } from "./onboarding.js";
+import { refreshCatalog } from "./refresh.js";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
@@ -37,14 +40,31 @@ async function readBody(req) {
   return raw ? JSON.parse(raw) : {};
 }
 
-export function createApp() {
+export function createApp({ photonRef = { current: null } } = {}) {
   return createServer(async (req, res) => {
     const send = (code, obj) => {
       res.writeHead(code, { "content-type": "application/json" });
       res.end(JSON.stringify(obj));
     };
+    const html = (body) => {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(body);
+    };
     try {
-      if (req.method === "GET" && req.url === "/health") return send(200, { ok: true });
+      if (req.method === "GET" && req.url === "/health") return send(200, { ok: true, line: lineNumber(), photon: !!photonRef.current });
+      if (req.method === "GET" && (req.url === "/" || req.url === "/onboard")) return html(onboardingHTML());
+      if (req.method === "GET" && req.url === "/analytics") return send(200, computeAnalytics(MEMBERS_DIR));
+      if (req.method === "GET" && req.url === "/dashboard") return html(dashboardHTML(computeAnalytics(MEMBERS_DIR)));
+
+      if (req.method === "POST" && req.url === "/onboard") {
+        const { phone } = await readBody(req);
+        const e164 = normalizePhone(phone);
+        if (!e164) return send(400, { ok: false, error: "That doesn't look like a phone number." });
+        const reg = await registerTester(e164, photonRef.current);
+        // A registration failure on the shared tier is worth surfacing but not fatal —
+        // the tester can still text first, which registers the space implicitly.
+        return send(200, { ok: true, line: lineNumber(), registered: reg.registered, note: reg.reason });
+      }
 
       if (req.method === "POST" && req.url === "/inbound") {
         const { member_id, text, message_id, now } = await readBody(req);
@@ -78,7 +98,15 @@ export function createApp() {
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  createApp().listen(PORT, () => console.log(`AARP concierge bridge on :${PORT}`));
-  import("./photon.js").then(({ startPhoton }) => startPhoton().catch(
-    (e) => console.log(`photon: failed to start: ${e.message}`)));
+  const photonRef = { current: null };
+  createApp({ photonRef }).listen(PORT, () => console.log(`AARP concierge bridge on :${PORT}`));
+  import("./photon.js").then(({ startPhoton }) =>
+    startPhoton().then((p) => { photonRef.current = p; }).catch(
+      (e) => console.log(`photon: failed to start: ${e.message}`)));
+  // Daily benefit refresh (PRD §6) — jittered start so a fleet doesn't stampede AARP.
+  const day = 24 * 3600 * 1000;
+  setTimeout(() => {
+    refreshCatalog().catch((e) => console.log(`refresh: failed: ${e.message}`));
+    setInterval(() => refreshCatalog().catch((e) => console.log(`refresh: failed: ${e.message}`)), day);
+  }, 60_000 + Math.floor(Math.random() * 600_000));
 }
