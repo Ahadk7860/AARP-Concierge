@@ -88,3 +88,18 @@ test("every catalog id is URL-safe and every benefit has a link", () => {
     assert.ok(b.redemption_url || b.offer_page_url, `no link: ${b.id}`);
   }
 });
+
+test("reset wipes learned state but keeps identity (§34)", () => {
+  const s = new MemberStore("c9", tmp);
+  s.remember({ kind: "profile", key: "destination_preference", value: "Hawaii", source: "explicit" });
+  s.addWatch({ watch_type: "travel", subject: "Hawaii" });
+  s.recordSavings("outback-steakhouse", 8, 80);
+  s.state.space_id = "space-123"; s.save();
+  assert.ok(s.activeMemories().length > 0);
+  invokeTool("reset_everything", {}, s, "2026-09-01T00:00:00Z");
+  assert.equal(s.activeMemories().length, 0);
+  assert.equal(s.state.watches.length, 0);
+  assert.equal(s.totalSaved(), 0);
+  assert.equal(s.state.member_id, "c9", "identity preserved");
+  assert.equal(s.state.space_id, "space-123", "iMessage space preserved so replies still route");
+});

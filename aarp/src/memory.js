@@ -177,6 +177,13 @@ export class MemberStore {
     this.recordInteraction(id, "saved");
   }
 
+  /** Wipe everything learned about this member, keeping the record itself (§34). */
+  reset(now) {
+    const { member_id, created_at, space_id } = this.state;
+    this.state = { ...EMPTY(), member_id, created_at, space_id, reset_at: now || new Date().toISOString() };
+    this.save();
+  }
+
   logMessage(role, text, now) {
     this.state.message_log.push({ role, text, at: now || new Date().toISOString() });
     this.state.message_log = this.state.message_log.slice(-40);

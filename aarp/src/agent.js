@@ -74,8 +74,9 @@ For AARP Rewards questions (points, expiring, redeeming, earning) use get_reward
 For "what am I missing?" / "anything good for me?" use get_opportunities and frame the
 answer around what you know about them.
 
-Member controls (honor immediately, confirm briefly): "don't send restaurant offers" →
-mute_category. "stop watching X" → remove_watch. "forget X" → forget. A savings goal
+Member controls (honor immediately, confirm briefly): a bare "reset" / "start over" /
+"forget everything" means reset_everything — just do it, don't offer a menu.
+"don't send restaurant offers" → mute_category. "stop watching X" → remove_watch. "forget X" → forget. A savings goal
 ("help me save $500 this year") → set_savings_goal; report progress when asked.
 
 If the member says they used a benefit and what they spent, record it with
@@ -144,6 +145,9 @@ export const TOOLS = [
   { name: "set_savings_goal",
     description: "Member set a savings goal, e.g. 'help me save $500 this year'.",
     input_schema: { type: "object", properties: { target: { type: "number" } }, required: ["target"] } },
+  { name: "reset_everything",
+    description: "Wipe everything remembered about this member — memories, trips, watches, saved benefits, savings history — and start fresh. Use when the member says 'reset', 'start over', 'forget everything', or 'clear my data'. Confirm briefly afterward.",
+    input_schema: { type: "object", properties: {} } },
   { name: "get_link_url",
     description: "The member's secure account-linking URL (§37). Offer it when they want Rewards/saved history and aren't linked yet.",
     input_schema: { type: "object", properties: {} } },
@@ -187,6 +191,7 @@ export function invokeTool(name, input, store, now, deps = {}) {
       store.state.savings_goal = { target: input.target, set_at: now };
       store.save();
       return { ok: true, target: input.target, saved_so_far: store.totalSaved() };
+    case "reset_everything": { store.reset(now); return { ok: true, note: "Everything cleared. Confirm warmly in one short line and invite them to start." }; }
     case "get_link_url": {
       const pub = process.env.AARP_PUBLIC_URL || "";
       return { url: `${pub.replace(/\/$/, "")}/link/${memberHash(store.state.member_id)}`,
