@@ -45,3 +45,7 @@ review-capture-*.md
 # of prompt 04, not a project artifact: derived from somebody's corpus, different every
 # run, and large. Same rule as review-capture-*.md, and for the same reason.
 cloud/e2e/runs/
+
+# AARP track — per-member demo state and run bookkeeping
+aarp/data/members/
+aarp/data/refresh_log.jsonl
