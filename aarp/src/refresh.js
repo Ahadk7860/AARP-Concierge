@@ -34,7 +34,10 @@ function inferDiscount(...texts) {
 
 function normalize(dbr, api, card, now) {
   api = api || {}; card = card || {};
-  const slug = (card.offerid || api.analytics_offerid || dbr).replace(/-\d+$/, "");
+  // URL-safe slug: ids land in redirect links, so lowercase and strip anything
+  // that is not [a-z0-9-] (the feed ships "…-Q12026" and one id with an "&").
+  const slug = (card.offerid || api.analytics_offerid || dbr)
+    .replace(/-\d+$/, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
   const title = clean(api.offer_title), short = clean(api.offer_short_description);
   const [dt, dv] = inferDiscount(title, short, clean(api.offer_description));
   const page = strip(api.offer_deeplink_url || card.href || "");

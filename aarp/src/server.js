@@ -57,9 +57,13 @@ export function createApp({ photonRef = { current: null } } = {}) {
       if (req.method === "GET" && req.url === "/dashboard") return html(dashboardHTML(computeAnalytics(MEMBERS_DIR)));
 
       // §46: click-tracked redemption redirect — /r/<memberHash>/<benefitId>
-      const rMatch = req.method === "GET" && req.url?.match(/^\/r\/([0-9a-f]{12})\/([a-z0-9-]+)$/);
+      const rMatch = req.method === "GET" && req.url?.match(/^\/r\/([0-9a-f]{12})\/(.+)$/);
       if (rMatch) {
-        const [, hash, benefitId] = rMatch;
+        const [, hash] = rMatch;
+        // Ids carry uppercase (…-Q12026) and, historically, "&" — decode and match the
+        // catalog rather than constraining the charset, which silently 404'd 9% of links.
+        let benefitId = rMatch[2];
+        try { benefitId = decodeURIComponent(benefitId); } catch { /* use raw */ }
         const benefit = loadCatalog().benefits.find((b) => b.id === benefitId);
         if (!benefit) return send(404, { error: "unknown benefit" });
         try {

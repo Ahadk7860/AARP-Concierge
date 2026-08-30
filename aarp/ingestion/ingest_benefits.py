@@ -146,6 +146,8 @@ def normalize(dbr_id: str, api: dict | None, card: dict | None, now: str) -> dic
     card = card or {}
     slug = (card.get("analytics_offerid") or api.get("analytics_offerid") or dbr_id)
     slug = re.sub(r"-\d+$", "", slug)  # outback-steakhouse-10087 → outback-steakhouse
+    # URL-safe: ids appear in redirect links; the feed ships "…-Q12026" and one "&".
+    slug = re.sub(r"^-|-$", "", re.sub(r"[^a-z0-9]+", "-", slug.lower()))
     title = clean_html(api.get("offer_title", ""))
     short = clean_html(api.get("offer_short_description", ""))
     desc = clean_html(api.get("offer_description", ""))

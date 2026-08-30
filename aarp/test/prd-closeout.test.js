@@ -64,3 +64,27 @@ test("get_link_url + /link flips linked (§37)", async () => {
   assert.equal(r.linked, false);
   delete process.env.AARP_PUBLIC_URL;
 });
+
+test("redirect route handles uppercase and punctuated benefit ids (regression)", async () => {
+  const app = createApp();
+  await new Promise((r) => app.listen(0, r));
+  const base = `http://127.0.0.1:${app.address().port}`;
+  const catalog = loadCatalog();
+  // Every id in the catalog must resolve — 9% used to 404 on the [a-z0-9-] route.
+  const samples = ["outback-steakhouse",
+    ...catalog.benefits.filter((b) => /[^a-z0-9-]/.test(b.id)).slice(0, 3).map((b) => b.id),
+    ...catalog.benefits.slice(0, 3).map((b) => b.id)];
+  for (const id of samples) {
+    const r = await fetch(`${base}/r/000000000000/${encodeURIComponent(id)}`, { redirect: "manual" });
+    assert.equal(r.status, 302, `benefit id ${id} must redirect, not 404`);
+    assert.match(r.headers.get("location"), /^https:\/\//);
+  }
+  app.close();
+});
+
+test("every catalog id is URL-safe and every benefit has a link", () => {
+  for (const b of loadCatalog().benefits) {
+    assert.match(b.id, /^[a-z0-9-]+$/, `id not URL-safe: ${b.id}`);
+    assert.ok(b.redemption_url || b.offer_page_url, `no link: ${b.id}`);
+  }
+});
