@@ -10,7 +10,7 @@
 // SAME reply for a duplicate; per-member turns are serialized so two texts arriving
 // together can't interleave memory writes.
 import { createServer } from "node:http";
-import { readdirSync } from "node:fs";
+import { readdirSync, mkdirSync } from "node:fs";
 import { converse } from "./agent.js";
 import { evaluateProactive } from "./proactive.js";
 import { MemberStore } from "./memory.js";
@@ -18,8 +18,8 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const MEMBERS_DIR = join(HERE, "..", "data", "members");
-const PORT = Number(process.env.AARP_PORT || 3055);
+const MEMBERS_DIR = process.env.AARP_MEMBERS_DIR || join(HERE, "..", "data", "members");
+const PORT = Number(process.env.PORT || process.env.AARP_PORT || 3055);
 
 const seen = new Map();           // message_id → reply (canonical outcome for dupes)
 const queues = new Map();         // member_id → promise chain
@@ -60,6 +60,7 @@ export function createApp() {
       }
 
       if (req.method === "POST" && req.url === "/sweep") {
+        mkdirSync(MEMBERS_DIR, { recursive: true });
         const { now } = await readBody(req);
         const results = {};
         for (const f of readdirSync(MEMBERS_DIR).filter((f) => f.endsWith(".json"))) {

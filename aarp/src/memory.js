@@ -10,7 +10,7 @@ import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const MEMBERS_DIR = join(HERE, "..", "data", "members");
+const MEMBERS_DIR = process.env.AARP_MEMBERS_DIR || join(HERE, "..", "data", "members");
 
 const EMPTY = () => ({
   member_id: null,

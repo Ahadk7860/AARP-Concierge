@@ -1,11 +1,12 @@
+# AARP Concierge bridge (aarp/src/server.js). Boi's original cloud deploy config was
+# replaced when this repo became the AARP fork — see git history if you need it back.
 [build]
 builder = "DOCKERFILE"
-dockerfilePath = "Dockerfile"
+dockerfilePath = "aarp/Dockerfile"
 
 [deploy]
-preDeployCommand = ["node dist/cloud/db/src/deploy.js"]
-startCommand = "node deploy/start.mjs"
-healthcheckPath = "/readyz"
+startCommand = "node aarp/src/server.js"
+healthcheckPath = "/health"
 healthcheckTimeout = 30
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 5
