@@ -137,6 +137,7 @@ export function createApp({ photonRef = { current: null } } = {}) {
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  mkdirSync(MEMBERS_DIR, { recursive: true });
   const photonRef = { current: null };
   createApp({ photonRef }).listen(PORT, () => console.log(`AARP concierge bridge on :${PORT}`));
   import("./photon.js").then(({ startPhoton }) =>

@@ -6,8 +6,8 @@ COPY aarp/package.json aarp/package-lock.json ./aarp/
 RUN cd aarp && npm install --omit=dev --no-audit --no-fund && npm cache clean --force
 COPY aarp/src ./aarp/src
 COPY aarp/data/benefits.json ./aarp/data/benefits.json
-RUN mkdir -p /data/members && chown -R node:node /app /data
+# Railway volumes mount root-owned at runtime, so the process stays root and
+# fixes ownership of /data at boot (prototype tier; single-purpose container).
 ENV AARP_MEMBERS_DIR=/data/members
-USER node
 EXPOSE 3055
 CMD ["node", "aarp/src/server.js"]
