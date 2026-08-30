@@ -79,4 +79,6 @@ export function createApp() {
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   createApp().listen(PORT, () => console.log(`AARP concierge bridge on :${PORT}`));
+  import("./photon.js").then(({ startPhoton }) => startPhoton().catch(
+    (e) => console.log(`photon: failed to start: ${e.message}`)));
 }

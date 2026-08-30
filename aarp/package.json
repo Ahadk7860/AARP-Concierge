@@ -1,0 +1,11 @@
+{
+  "name": "aarp-concierge",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "AARP iMessage benefits concierge",
+  "dependencies": {
+    "@spectrum-ts/core": "^12.8.0",
+    "@spectrum-ts/imessage": "^12.8.0"
+  }
+}

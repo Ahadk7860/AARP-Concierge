@@ -49,3 +49,4 @@ cloud/e2e/runs/
 # AARP track — per-member demo state and run bookkeeping
 aarp/data/members/
 aarp/data/refresh_log.jsonl
+aarp/node_modules/
