@@ -92,6 +92,10 @@ export async function startPhoton({ log = console.log } = {}) {
 
           const isFirstContact = store.state.message_log.length === 0;
           log(`photon: inbound from ${memberId}: ${body.slice(0, 80)}${images.length ? ` [+${images.length} img]` : ""}`);
+          // Read receipt: mark the thread read the moment we pick the message up —
+          // the member sees "Read" while the typing indicator runs. Fire-and-forget;
+          // an unsupported transport (SMS) just no-ops.
+          try { message.read?.().catch?.(() => {}); } catch { /* never blocks the turn */ }
           await enqueue(memberId, async () => {
             if (isFirstContact) await app.send(space, text(WELCOME));  // PRD §48
             const reply = await app.responding(space, () =>
