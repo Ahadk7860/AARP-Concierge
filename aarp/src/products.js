@@ -51,10 +51,17 @@ async function exaSearch(query, budget) {
   });
   if (!r.ok) throw new Error(`exa ${r.status}`);
   const d = await r.json();
-  return (d.results || []).map((x) => ({
-    name: x.title, price: null, merchant: new URL(x.url).hostname.replace(/^www\./, ""),
-    url: x.url, snippet: (x.text || "").slice(0, 200), source: "exa",
-  }));
+  return (d.results || []).map((x) => {
+    // best-effort price from page text — the agent must NEVER invent one
+    const m = /\$\s?(\d{1,4}(?:\.\d{2})?)/.exec(x.text || "");
+    return {
+      name: (x.title || "").trim().slice(0, 90),
+      price: m ? Number(m[1]) : null,
+      price_note: m ? "extracted from page — verify at checkout" : "price not visible — do NOT guess; ask the member or pick an option with a price",
+      merchant: new URL(x.url).hostname.replace(/^www\./, ""),
+      url: x.url, snippet: (x.text || "").replace(/\s+/g, " ").slice(0, 200), source: "exa",
+    };
+  });
 }
 
 /** Same shape either way: [{name, price, merchant, url, discount_pct?, source}] */
