@@ -1,6 +1,7 @@
 // AARP Concierge agent — tool loop + persona (PRD §§40, 42, 44).
 // Providers: "anthropic" (live, needs ANTHROPIC_API_KEY) | "fake" (deterministic, for tests).
 import { searchBenefits, benefitCard, loadCatalog, memberHash } from "./benefits.js";
+import { getConfig, renderConfigPrompt } from "./agent-config.js";
 import { MemberStore } from "./memory.js";
 import { searchLocalRestaurants } from "./local_restaurants.js";
 import { getRewards } from "./rewards.js";
@@ -271,7 +272,9 @@ export function invokeTool(name, input, store, now, deps = {}) {
   }
 }
 
-function systemPrompt(store, now) {
+function systemPrompt(store, now, configWhich = "published") {
+  let configSection = "";
+  try { configSection = "\n\n" + renderConfigPrompt(getConfig(configWhich)); } catch { /* config optional */ }
   const p = store.profileSummary(now);
   const profile = [
     `Account: ${p.linked ? "linked" : "NOT linked"}`,
@@ -280,11 +283,11 @@ function systemPrompt(store, now) {
     p.saved_benefits.length ? `Saved benefits: ${p.saved_benefits.join(", ")}` : null,
     p.total_saved ? `Total saved this year: $${p.total_saved.toFixed(0)}` : null,
   ].filter(Boolean).join("\n") || "(new member — nothing learned yet)";
-  return PERSONA.replace("{{TODAY}}", now.slice(0, 10)).replace("{{PROFILE}}", profile);
+  return PERSONA.replace("{{TODAY}}", now.slice(0, 10)).replace("{{PROFILE}}", profile) + configSection;
 }
 
 /** Anthropic Messages API tool loop. */
-async function anthropicTurn(store, userText, now, history, images = []) {
+async function anthropicTurn(store, userText, now, history, images = [], opts = {}) {
   const key = process.env.ANTHROPIC_API_KEY;
   if (!key) throw new Error("ANTHROPIC_API_KEY not set — use AARP_PROVIDER=fake or supply a key");
   const userContent = images.length
@@ -296,7 +299,7 @@ async function anthropicTurn(store, userText, now, history, images = []) {
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "content-type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" },
-      body: JSON.stringify({ model: MODEL, max_tokens: 2048, system: systemPrompt(store, now),
+      body: JSON.stringify({ model: MODEL, max_tokens: 2048, system: systemPrompt(store, now, opts.configWhich || "published"),
         tools: TOOLS, messages }),
     });
     if (!res.ok) throw new Error(`anthropic ${res.status}: ${(await res.text()).slice(0, 300)}`);
@@ -318,8 +321,10 @@ async function anthropicTurn(store, userText, now, history, images = []) {
     messages.push({ role: "assistant", content: msg.content });
     const results = [];
     for (const tu of toolUses) {
-      results.push({ type: "tool_result", tool_use_id: tu.id,
-        content: JSON.stringify(await invokeTool(tu.name, tu.input, store, now)) });
+      const out = await invokeTool(tu.name, tu.input, store, now);
+      opts.trace?.tool_calls.push({ tool: tu.name, input: tu.input,
+        result_summary: JSON.stringify(out).slice(0, 300) });
+      results.push({ type: "tool_result", tool_use_id: tu.id, content: JSON.stringify(out) });
     }
     messages.push({ role: "user", content: results });
   }
@@ -351,18 +356,27 @@ function fakeTurn(store, userText, now) {
  * One conversational turn. now: ISO timestamp (simulated dates for the demo, PRD §49).
  * Returns the reply text; persists memory + message log.
  */
-export async function converse(memberId, userText, { now = new Date().toISOString(), provider = process.env.AARP_PROVIDER || "anthropic", membersDir, images = [] } = {}) {
+export async function converse(memberId, userText, { now = new Date().toISOString(), provider = process.env.AARP_PROVIDER || "anthropic", membersDir, images = [], useDraft = false, withTrace = false } = {}) {
   const store = new MemberStore(memberId, membersDir);
+  const memIdsBefore = new Set(store.activeMemories(now).map((m) => m.id));
+  const trace = withTrace ? { tool_calls: [], memories_used: store.profileSummary(now).memory_lines } : null;
   store.logMessage("member", userText, now);
   const history = store.state.message_log.slice(0, -1).slice(-12)
     .filter((m) => m.text && m.text.trim())
     .map((m) => ({ role: m.role === "member" ? "user" : "assistant", content: m.text }));
   let reply = provider === "fake"
     ? fakeTurn(store, userText, now)
-    : await anthropicTurn(store, userText, now, history, images);
+    : await anthropicTurn(store, userText, now, history, images,
+        { configWhich: useDraft ? "draft" : "published", trace });
   if (!reply || !reply.trim()) {
     reply = "Got it — noted! What else can I help you find?";
   }
   store.logMessage("concierge", reply, now);
-  return reply;
+  if (!withTrace) return reply;
+  const fresh = new MemberStore(memberId, membersDir);
+  const memories_created = fresh.activeMemories(now)
+    .filter((m) => !memIdsBefore.has(m.id))
+    .map((m) => `${m.key}: ${m.value}`);
+  return { reply, trace: { ...trace, memories_created,
+    config: useDraft ? "draft" : "published" } };
 }

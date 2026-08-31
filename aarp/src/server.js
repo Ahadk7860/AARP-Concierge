@@ -16,6 +16,8 @@ import { MemberStore } from "./memory.js";
 import { computeAnalytics, dashboardHTML } from "./analytics.js";
 import { loadCatalog, memberHash } from "./benefits.js";
 import { onboardingHTML, normalizePhone, registerTester, lineNumber } from "./onboarding.js";
+import { getState, getConfig, updateDraftStep, updateDraftMemoryField, pendingChanges, publish } from "./agent-config.js";
+import { builderHTML } from "./builder-ui.js";
 import { refreshCatalog } from "./refresh.js";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -55,12 +57,69 @@ export function createApp({ photonRef = { current: null } } = {}) {
       if (req.method === "GET" && req.url === "/health") return send(200, { ok: true, line: lineNumber(), photon: !!photonRef.current });
       if (req.method === "GET" && (req.url === "/" || req.url === "/onboard")) return html(onboardingHTML());
 
-      // Agent Builder MVP — visual control-plane prototype (its own PRD), served
-      // as a static bundle at /builder.
+      // Agent Builder — the functional control plane (Builder MVP PRD).
       if (req.method === "GET" && (req.url === "/builder" || req.url === "/builder/")) {
+        return html(builderHTML());
+      }
+      // The original static design mockup, kept for reference.
+      if (req.method === "GET" && req.url === "/builder/mockup") {
         const p = join(HERE, "..", "builder", "index.html");
         if (existsSync(p)) return html(readFileSync(p, "utf8"));
         return send(404, { error: "builder bundle not found" });
+      }
+
+      // ---- Builder API ----
+      if (req.url === "/api/builder/config" && req.method === "GET") {
+        const st = getState();
+        return send(200, { draft: st.draft, published_at: st.published_at,
+          draft_updated_at: st.draft_updated_at, pending_changes: pendingChanges() });
+      }
+      if (req.url?.match(/^\/api\/builder\/flows\/[\w-]+\/steps\/[\w-]+$/) && req.method === "PUT") {
+        const parts = req.url.split("/");           // ["", "api", "builder", "flows", <flow>, "steps", <step>]
+        const flowId = parts[4], stepId = parts[6];
+        const patch = await readBody(req);
+        try { return send(200, { step: updateDraftStep(flowId, stepId, patch) }); }
+        catch (e) { return send(400, { error: e.message }); }
+      }
+      if (req.url?.match(/^\/api\/builder\/memory\/[\w.]+$/) && req.method === "PUT") {
+        const key = req.url.split("/").pop();
+        const patch = await readBody(req);
+        try { return send(200, { field: updateDraftMemoryField(key, patch) }); }
+        catch (e) { return send(400, { error: e.message }); }
+      }
+      if (req.url === "/api/builder/publish" && req.method === "POST") {
+        return send(200, publish());
+      }
+      if (req.url === "/api/builder/users" && req.method === "GET") {
+        mkdirSync(MEMBERS_DIR, { recursive: true });
+        const users = readdirSync(MEMBERS_DIR).filter((f) => f.endsWith(".json")).map((f) => {
+          const id = f.replace(/\.json$/, "");
+          const st = new MemberStore(id, MEMBERS_DIR);
+          return { id, memories: st.activeMemories().length,
+            last_active: st.state.message_log.at(-1)?.at || null };
+        });
+        return send(200, { users });
+      }
+      if (req.url?.match(/^\/api\/builder\/users\/[^/]+$/) && req.method === "GET") {
+        const id = decodeURIComponent(req.url.split("/").pop());
+        const st = new MemberStore(id, MEMBERS_DIR);
+        return send(200, { id, memories: st.activeMemories(),
+          saved_benefits: st.state.saved_benefits, watches: st.state.watches.filter((w) => w.active),
+          trips: st.state.trips.filter((t) => t.active), total_saved: st.totalSaved() });
+      }
+      if (req.url?.match(/^\/api\/builder\/users\/[^/]+\/forget$/) && req.method === "POST") {
+        const id = decodeURIComponent(req.url.split("/")[4]);
+        const { text } = await readBody(req);
+        const st = new MemberStore(id, MEMBERS_DIR);
+        return send(200, { forgotten: st.forget(text) });
+      }
+      if (req.url === "/api/builder/test" && req.method === "POST") {
+        const { member_id, text } = await readBody(req);
+        if (!text) return send(400, { error: "text required" });
+        const mid = member_id || "builder-test-user";
+        const result = await enqueue(mid, () =>
+          converse(mid, text, { useDraft: true, withTrace: true }));
+        return send(200, result);
       }
       if (req.method === "GET" && req.url === "/analytics") return send(200, computeAnalytics(MEMBERS_DIR));
       if (req.method === "GET" && req.url === "/dashboard") return html(dashboardHTML(computeAnalytics(MEMBERS_DIR)));
