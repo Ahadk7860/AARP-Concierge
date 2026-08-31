@@ -100,6 +100,7 @@ export async function searchProducts({ query, budget = null, limit = 5 }) {
         const price = extractPrice(x.text);
         const meta = attach(domain);
         return { name: (x.title || "").trim().slice(0, 90), price,
+          image_url: x.image || null,
           price_note: price ? "extracted from page — verify with get_product_details before checkout"
             : "price not visible — call get_product_details on this url before proposing",
           merchant: meta.aarp_brand || domain, url: x.url,
@@ -135,9 +136,10 @@ export async function getProductDetails(url) {
     const d = await exa("contents", { urls: [url], text: { maxCharacters: 2000 } });
     const r = (d.results || [])[0];
     if (!r) return { error: "page could not be read" };
+    const image_url = r.image || null;
     const text = (r.text || "").replace(/\s+/g, " ");
     const prices = [...text.matchAll(/\$\s?(\d{1,4}(?:\.\d{2})?)/g)].map((m) => Number(m[1])).slice(0, 6);
-    return { url, title: (r.title || "").slice(0, 120),
+    return { url, image_url, title: (r.title || "").slice(0, 120),
       prices_seen: prices, best_price_guess: prices.length ? Math.min(...prices.filter((p) => p >= 5)) || prices[0] : null,
       details: text.slice(0, 1200),
       note: "Use a price the page actually shows. If none is clear, tell the member you couldn't confirm the price." };

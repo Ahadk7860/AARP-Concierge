@@ -234,13 +234,15 @@ export function createApp({ photonRef = { current: null } } = {}) {
         const { member_id, text, message_id, now } = await readBody(req);
         if (!member_id || !text) return send(400, { error: "member_id and text required" });
         if (message_id && seen.has(message_id)) return send(200, { reply: seen.get(message_id), deduped: true });
-        const reply = await enqueue(member_id, () =>
-          converse(member_id, text, now ? { now } : {}));
+        const result = await enqueue(member_id, () =>
+          converse(member_id, text, { ...(now ? { now } : {}), withMeta: true }));
+        const reply = typeof result === "string" ? result : result.reply;
+        const images = (typeof result === "object" && result.images) || [];
         if (message_id) {
           seen.set(message_id, reply);
           if (seen.size > 500) seen.delete(seen.keys().next().value);
         }
-        return send(200, { reply });
+        return send(200, images.length ? { reply, images } : { reply });
       }
 
       if (req.method === "POST" && req.url === "/sweep") {

@@ -119,6 +119,34 @@ Member controls (honor immediately, confirm briefly): a bare "reset" / "start ov
 "don't send restaurant offers" → mute_category. "stop watching X" → remove_watch. "forget X" → forget. A savings goal
 ("help me save $500 this year") → set_savings_goal; report progress when asked.
 
+PERSONAL SHOPPER — you have an OPINION. Never dump search results. The shape of every
+shopping recommendation:
+  1. At most 3 numbered options — name + price + AARP discount + ONE-line reason each
+     (a natural spread: best match / best value / different style). Attach their images
+     with send_images (same order as your numbers) when image_url is available.
+  2. Then AARP's Pick: "I think #2 is best for <name> because…" with 2-3 SPECIFIC
+     reasons drawn ONLY from real memory, this conversation, product facts, or the
+     AARP benefit — recipient preference, budget fit, occasion, past gifts, savings,
+     a concrete attribute. Briefly say why it beats the runner-up. Never generic
+     ("strong value and relevance"), never invented facts, never mechanical
+     ("based on your profile").
+  3. Confidence language tracks memory strength: confirmed → "You told me Michael
+     likes reds"; inferred → "Based on the red-wine preference you mentioned, I'd
+     lean…". Never overstate ("Michael LOVES Cabernet").
+Recipient profiles: retrieve memory BEFORE asking anything — never re-ask a known name,
+age, or interest. Refresh stale child interests instead: "Emma was into gymnastics last
+time — still true?" Ask at most ONE high-value question, and only if it materially
+changes the recommendation (budget when unknown, occasion when unclear).
+Refinements reuse everything learned — never restart: "cheaper" → lower budget, same
+recipient/occasion; "nicer" → gift-worthiness up; "more unique" → novelty up, no
+duplicates; "those feel too fancy" → simpler style (remember it if repeated). "I don't
+think he'd like that" is a memory signal — ask what feels wrong, store the dislike,
+re-rank. If the member prefers a different option than your pick, go with theirs
+gracefully ("#1 works too — and it's $15 cheaper"): never argue.
+When they choose ("get #2"): verify with get_product_details (price/availability),
+then prepare_checkout. At the confirmation step, re-send the chosen product's image
+with send_images so they see exactly what they're approving.
+
 BUY IT FOR ME — you can find real products, prepare checkout, and place orders, but
 NEVER without explicit approval for that exact purchase. The platform enforces this:
 submit_checkout fails with PURCHASE_NOT_AUTHORIZED unless the member replied BUY (or
@@ -216,6 +244,10 @@ export const TOOLS = [
   { name: "reset_everything",
     description: "Wipe everything remembered about this member — memories, trips, watches, saved benefits, savings history — and start fresh. Use when the member says 'reset', 'start over', 'forget everything', or 'clear my data'. Confirm briefly afterward.",
     input_schema: { type: "object", properties: {} } },
+  { name: "send_images",
+    description: "Attach up to 3 product images to THIS reply (visual shortlist). Pass the image_url values returned by search_products/get_product_details, in the same order as your numbered options. Only real image urls from tool results — never construct one.",
+    input_schema: { type: "object", properties: {
+      urls: { type: "array", items: { type: "string" } } }, required: ["urls"] } },
   { name: "search_products",
     description: "Find purchasable products at AARP-DISCOUNT MERCHANTS ONLY (the search is restricted to partner domains; every result carries the applying AARP benefit and discount_pct). Query with need + recipient context + budget. If it returns none, no AARP merchant fits — say so; never recommend a non-AARP merchant.",
     input_schema: { type: "object", properties: {
@@ -258,6 +290,12 @@ export const TOOLS = [
 /** Execute one tool call against the member's store. May return a promise. */
 export function invokeTool(name, input, store, now, deps = {}) {
   switch (name) {
+    case "send_images": {
+      const urls = (input.urls || []).filter((u) => /^https:\/\//.test(u)).slice(0, 3);
+      if (deps.outbox) deps.outbox.images.push(...urls);
+      return { ok: true, attached: urls.length,
+        note: urls.length ? "Images will be delivered with your reply — refer to them as 1/2/3 in order." : "No valid image urls." };
+    }
     case "search_local_restaurants": {
       const fn = deps.searchLocal || searchLocalRestaurants;
       return fn({ zip: input.zip, keyword: input.keyword || "", distance: input.distance || 5, limit: 6 })
@@ -381,6 +419,7 @@ function systemPrompt(store, now, configWhich = "published") {
 
 /** Anthropic Messages API tool loop. */
 async function anthropicTurn(store, userText, now, history, images = [], opts = {}) {
+  const outbox = opts.outbox || { images: [] };
   const key = process.env.ANTHROPIC_API_KEY;
   if (!key) throw new Error("ANTHROPIC_API_KEY not set — use AARP_PROVIDER=fake or supply a key");
   const userContent = images.length
@@ -414,7 +453,7 @@ async function anthropicTurn(store, userText, now, history, images = [], opts = 
     messages.push({ role: "assistant", content: msg.content });
     const results = [];
     for (const tu of toolUses) {
-      const out = await invokeTool(tu.name, tu.input, store, now);
+      const out = await invokeTool(tu.name, tu.input, store, now, { outbox });
       opts.trace?.tool_calls.push({ tool: tu.name, input: tu.input,
         result_summary: JSON.stringify(out).slice(0, 300) });
       results.push({ type: "tool_result", tool_use_id: tu.id, content: JSON.stringify(out) });
@@ -449,7 +488,7 @@ function fakeTurn(store, userText, now) {
  * One conversational turn. now: ISO timestamp (simulated dates for the demo, PRD §49).
  * Returns the reply text; persists memory + message log.
  */
-export async function converse(memberId, userText, { now = new Date().toISOString(), provider = process.env.AARP_PROVIDER || "anthropic", membersDir, images = [], useDraft = false, withTrace = false } = {}) {
+export async function converse(memberId, userText, { now = new Date().toISOString(), provider = process.env.AARP_PROVIDER || "anthropic", membersDir, images = [], useDraft = false, withTrace = false, withMeta = false } = {}) {
   const store = new MemberStore(memberId, membersDir);
   // §§4-5, hard-coded: an explicit BUY on a pending proposal mints the single-use
   // authorization HERE, from the member's raw message — never from the model.
@@ -465,19 +504,21 @@ export async function converse(memberId, userText, { now = new Date().toISOStrin
   const history = store.state.message_log.slice(0, -1).slice(-12)
     .filter((m) => m.text && m.text.trim())
     .map((m) => ({ role: m.role === "member" ? "user" : "assistant", content: m.text }));
+  const outbox = { images: [] };
   let reply = provider === "fake"
     ? fakeTurn(store, userText, now)
     : await anthropicTurn(store, userText, now, history, images,
-        { configWhich: useDraft ? "draft" : "published", trace });
+        { configWhich: useDraft ? "draft" : "published", trace, outbox });
   if (!reply || !reply.trim()) {
     reply = "Got it — noted! What else can I help you find?";
   }
   store.logMessage("concierge", reply, now);
+  if (withMeta && !withTrace) return { reply, images: outbox.images.slice(0, 3) };
   if (!withTrace) return reply;
   const fresh = new MemberStore(memberId, membersDir);
   const memories_created = fresh.activeMemories(now)
     .filter((m) => !memIdsBefore.has(m.id))
     .map((m) => `${m.key}: ${m.value}`);
-  return { reply, trace: { ...trace, memories_created,
+  return { reply, images: outbox.images.slice(0, 3), trace: { ...trace, memories_created,
     config: useDraft ? "draft" : "published" } };
 }

@@ -111,3 +111,14 @@ test("no AARP merchant match → empty with honest note, never a random merchant
   assert.equal(r.products.length, 0);
   assert.match(r.note, /No AARP-discount merchant/);
 });
+
+test("send_images collects into the turn outbox, capped at 3 (§7, §13)", () => {
+  const s = new MemberStore("b8", tmp);
+  const outbox = { images: [] };
+  const r = invokeTool("send_images", { urls: [
+    "https://cdn.ftd.com/a.jpg", "https://cdn.ftd.com/b.jpg",
+    "http://insecure.example/c.jpg", "https://cdn.ftd.com/d.jpg", "https://cdn.ftd.com/e.jpg",
+  ] }, s, new Date().toISOString(), { outbox });
+  assert.equal(r.attached, 3, "https only, max 3");
+  assert.equal(outbox.images.length, 3);
+});

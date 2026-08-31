@@ -64,7 +64,7 @@ export async function startPhoton({ log = console.log } = {}) {
     log("photon: SPECTRUM_PROJECT_ID/SECRET not set — iMessage loop disabled (HTTP bridge only)");
     return null;
   }
-  const { Spectrum, text } = await import("@spectrum-ts/core");
+  const { Spectrum, text, attachment } = await import("@spectrum-ts/core");
   const { imessage } = await import("@spectrum-ts/imessage");
   const app = await Spectrum({ projectId, projectSecret, providers: [imessage.config()] });
   log("photon: connected");
@@ -98,10 +98,21 @@ export async function startPhoton({ log = console.log } = {}) {
           try { message.read?.().catch?.(() => {}); } catch { /* never blocks the turn */ }
           await enqueue(memberId, async () => {
             if (isFirstContact) await app.send(space, text(WELCOME));  // PRD §48
-            const reply = await app.responding(space, () =>
-              converse(memberId, body || "(the member sent an image)", { images }));
+            const result = await app.responding(space, () =>
+              converse(memberId, body || "(the member sent an image)", { images, withMeta: true }));
+            const reply = typeof result === "string" ? result : result.reply;
+            const productImages = (typeof result === "object" && result.images) || [];
             await app.send(space, text(reply));
-            log(`photon: replied to ${memberId} (${reply.length} chars)`);
+            // visual shortlist: product images ride behind the text (mime is a guess —
+            // og-images rarely carry extensions; jpeg is the safe default)
+            for (const u of productImages) {
+              try {
+                const name = (new URL(u).pathname.split("/").pop() || "product").slice(0, 60) || "product.jpg";
+                const mime = /\.png(\?|$)/i.test(u) ? "image/png" : /\.webp(\?|$)/i.test(u) ? "image/webp" : "image/jpeg";
+                await app.send(space, attachment(new URL(u), { mimeType: mime, name }));
+              } catch (e) { log(`photon: image send failed: ${e.message}`); }
+            }
+            log(`photon: replied to ${memberId} (${reply.length} chars${productImages.length ? `, +${productImages.length} images` : ""})`);
           });
         } catch (e) {
           log(`photon: turn failed: ${e.message}`);
