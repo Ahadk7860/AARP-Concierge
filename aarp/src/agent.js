@@ -296,14 +296,24 @@ async function anthropicTurn(store, userText, now, history, images = []) {
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "content-type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" },
-      body: JSON.stringify({ model: MODEL, max_tokens: 1024, system: systemPrompt(store, now),
+      body: JSON.stringify({ model: MODEL, max_tokens: 2048, system: systemPrompt(store, now),
         tools: TOOLS, messages }),
     });
     if (!res.ok) throw new Error(`anthropic ${res.status}: ${(await res.text()).slice(0, 300)}`);
     const msg = await res.json();
     const toolUses = msg.content.filter((c) => c.type === "tool_use");
-    if (!toolUses.length || msg.stop_reason !== "tool_use") {
-      return msg.content.filter((c) => c.type === "text").map((c) => c.text).join("\n").trim();
+    if (msg.stop_reason === "max_tokens" && toolUses.length) {
+      // Truncated mid-tool-call (e.g. many remember calls in one turn): drop the
+      // incomplete calls, keep any complete ones, and let the loop continue.
+      msg.content = msg.content.filter((c) => c.type !== "tool_use" || c.input !== undefined);
+    }
+    if (!toolUses.length || (msg.stop_reason !== "tool_use" && msg.stop_reason !== "max_tokens")) {
+      const text = msg.content.filter((c) => c.type === "text").map((c) => c.text).join("\n").trim();
+      if (text) return text;
+      // A tool-heavy turn can end with no prose — one more round to compose the reply.
+      messages.push({ role: "assistant", content: msg.content.length ? msg.content : [{ type: "text", text: "…" }] });
+      messages.push({ role: "user", content: "(Reply to the member now in plain text — summarize what you found or noted.)" });
+      continue;
     }
     messages.push({ role: "assistant", content: msg.content });
     const results = [];
@@ -345,10 +355,14 @@ export async function converse(memberId, userText, { now = new Date().toISOStrin
   const store = new MemberStore(memberId, membersDir);
   store.logMessage("member", userText, now);
   const history = store.state.message_log.slice(0, -1).slice(-12)
+    .filter((m) => m.text && m.text.trim())
     .map((m) => ({ role: m.role === "member" ? "user" : "assistant", content: m.text }));
-  const reply = provider === "fake"
+  let reply = provider === "fake"
     ? fakeTurn(store, userText, now)
     : await anthropicTurn(store, userText, now, history, images);
+  if (!reply || !reply.trim()) {
+    reply = "Got it — noted! What else can I help you find?";
+  }
   store.logMessage("concierge", reply, now);
   return reply;
 }
