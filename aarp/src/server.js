@@ -71,8 +71,11 @@ export function createApp({ photonRef = { current: null } } = {}) {
       // ---- Builder API ----
       if (req.url === "/api/builder/config" && req.method === "GET") {
         const st = getState();
+        const cat = loadCatalog();
         return send(200, { draft: st.draft, published_at: st.published_at,
-          draft_updated_at: st.draft_updated_at, pending_changes: pendingChanges() });
+          draft_updated_at: st.draft_updated_at, pending_changes: pendingChanges(),
+          knowledge: { benefits_total: cat.counts?.total ?? cat.benefits.length,
+            refreshed: (cat.generated_at || "").slice(0, 10) } });
       }
       if (req.url?.match(/^\/api\/builder\/flows\/[\w-]+\/steps\/[\w-]+$/) && req.method === "PUT") {
         const parts = req.url.split("/");           // ["", "api", "builder", "flows", <flow>, "steps", <step>]
@@ -106,6 +109,15 @@ export function createApp({ photonRef = { current: null } } = {}) {
         return send(200, { id, memories: st.activeMemories(),
           saved_benefits: st.state.saved_benefits, watches: st.state.watches.filter((w) => w.active),
           trips: st.state.trips.filter((t) => t.active), total_saved: st.totalSaved() });
+      }
+      if (req.url?.match(/^\/api\/builder\/users\/[^/]+\/memory$/) && req.method === "POST") {
+        const id = decodeURIComponent(req.url.split("/")[4]);
+        const { key, value, replace } = await readBody(req);
+        if (!key || !value) return send(400, { error: "key and value required" });
+        const st = new MemberStore(id, MEMBERS_DIR);
+        if (replace) st.forget(String(replace));
+        st.remember({ kind: "profile", key, value, source: "explicit", confidence: 1 });
+        return send(200, { ok: true });
       }
       if (req.url?.match(/^\/api\/builder\/users\/[^/]+\/forget$/) && req.method === "POST") {
         const id = decodeURIComponent(req.url.split("/")[4]);
