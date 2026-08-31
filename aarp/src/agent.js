@@ -2,7 +2,7 @@
 // Providers: "anthropic" (live, needs ANTHROPIC_API_KEY) | "fake" (deterministic, for tests).
 import { searchBenefits, benefitCard, loadCatalog, memberHash } from "./benefits.js";
 import { getConfig, renderConfigPrompt } from "./agent-config.js";
-import { searchProducts } from "./products.js";
+import { searchProducts, getProductDetails } from "./products.js";
 import { createProposal, pendingProposal, recordAuthorization, submitCheckout, proposalDisplay, blockedCategory } from "./purchases.js";
 import { walletSummary } from "./wallet.js";
 import { MemberStore } from "./memory.js";
@@ -123,8 +123,14 @@ BUY IT FOR ME — you can find real products, prepare checkout, and place orders
 NEVER without explicit approval for that exact purchase. The platform enforces this:
 submit_checkout fails with PURCHASE_NOT_AUTHORIZED unless the member replied BUY (or
 "place the order" / "confirm purchase") after seeing the exact proposal. The flow:
-  1. search_products to find real options (respect remembered budgets/interests);
-     recommend 2-3 with prices, ask "Want me to prepare one?"
+  1. search_products to find real options — results come ONLY from merchants where an
+     AARP benefit applies, each tagged with its discount. Recommend 2-3 with prices AND
+     the AARP discount ("25% off with your AARP benefit"), ask "Want me to prepare one?"
+     If nothing comes back, no AARP merchant fits — say so honestly; never suggest
+     Amazon/Target/other non-AARP merchants for purchase.
+  1b. Before prepare_checkout, confirm the price with get_product_details on the chosen
+     url unless the price was already clearly shown. Compute discount = price ×
+     discount_pct. Never guess a price.
   2. When they pick one: get_wallet first if you don't know their setup. If they have
      no card/address, send their wallet link and stop.
   3. prepare_checkout → the tool returns the exact display block. Send it VERBATIM as
@@ -211,9 +217,12 @@ export const TOOLS = [
     description: "Wipe everything remembered about this member — memories, trips, watches, saved benefits, savings history — and start fresh. Use when the member says 'reset', 'start over', 'forget everything', or 'clear my data'. Confirm briefly afterward.",
     input_schema: { type: "object", properties: {} } },
   { name: "search_products",
-    description: "Find real purchasable products (Buy It For Me). Query with need + recipient context + budget (e.g. 'birthday gift gymnastics girl age 7'). Returns products with prices/merchants; some carry an AARP discount_pct.",
+    description: "Find purchasable products at AARP-DISCOUNT MERCHANTS ONLY (the search is restricted to partner domains; every result carries the applying AARP benefit and discount_pct). Query with need + recipient context + budget. If it returns none, no AARP merchant fits — say so; never recommend a non-AARP merchant.",
     input_schema: { type: "object", properties: {
       query: { type: "string" }, budget: { type: "number" } }, required: ["query"] } },
+  { name: "get_product_details",
+    description: "Scrape ONE chosen product page (AARP partner merchants only) for confirmed price and details. Call this BEFORE prepare_checkout when the listed price was extracted loosely or missing. Use a price the page actually shows.",
+    input_schema: { type: "object", properties: { url: { type: "string" } }, required: ["url"] } },
   { name: "get_wallet",
     description: "The member's purchasing setup: saved cards, saved addresses (with labels like Home/Emma), whether they're ready to buy, and their wallet setup link to send if not.",
     input_schema: { type: "object", properties: {} } },
@@ -284,6 +293,7 @@ export function invokeTool(name, input, store, now, deps = {}) {
       if (blocked) return { error: `Agent purchasing is not available for ${blocked} (MVP policy). Offer an eligible alternative category.` };
       return searchProducts({ query: input.query, budget: input.budget || null });
     }
+    case "get_product_details": return getProductDetails(input.url);
     case "get_wallet": {
       const w = walletSummary(store);
       const pub = (process.env.AARP_PUBLIC_URL || "").replace(/\/$/, "");

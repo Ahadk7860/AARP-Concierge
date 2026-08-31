@@ -98,9 +98,16 @@ test("no wallet → proposal refuses with setup guidance (§8)", () => {
   assert.equal(walletSummary(s).ready, false);
 });
 
-test("product discovery returns eligible retail goods with budget respect (§12, §28)", async () => {
-  const r = await searchProducts({ query: "gift for granddaughter gymnastics crafts", budget: 50 });
-  assert.ok(r.products.length >= 2);
-  assert.ok(r.products.every((p) => p.price <= 65));
-  assert.match(r.products[0].name, /gym/i);
+test("product discovery: AARP merchants only, benefit attached (§12, user rule)", async () => {
+  const r = await searchProducts({ query: "birthday gift flowers for my wife", budget: 60 });
+  assert.ok(r.merchants.length >= 1, "AARP merchants identified");
+  assert.ok(r.merchants.every((m) => m.benefit_id), "every merchant tied to a real benefit");
+  assert.ok(!r.merchants.some((m) => /laithwaites/.test(m.domain)), "blocked categories excluded");
+  for (const p of r.products) assert.ok(p.aarp_benefit_id, "every product carries its AARP benefit");
+});
+
+test("no AARP merchant match → empty with honest note, never a random merchant", async () => {
+  const r = await searchProducts({ query: "zzqx quantum flux capacitor" });
+  assert.equal(r.products.length, 0);
+  assert.match(r.note, /No AARP-discount merchant/);
 });
