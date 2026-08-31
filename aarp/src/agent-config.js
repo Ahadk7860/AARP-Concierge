@@ -1,6 +1,6 @@
 // Agent configuration as data — Builder MVP PRD §§6, 30-31.
 //
-// v2: the config carries the design's exact model — five flows with typed steps
+// v3 (adds purchase steps to Gifts): the config carries the design's exact model — five flows with typed steps
 // (Memory / Ask / Search / Respond / Action) and five memory groups — so the
 // builder UI is one-to-one with the approved design. Draft is edited/tested;
 // published powers the live Photon agent; publish copies draft → published.
@@ -10,7 +10,7 @@ import { dirname, join } from "node:path";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CONFIG_PATH = () => process.env.AARP_CONFIG_PATH || join(HERE, "..", "data", "agent-config.json");
-const VERSION = 2;
+const VERSION = 3;
 
 export const DEFAULT_CONFIG = {
   agent: { name: "AARP Concierge", description: "Concierge agent for AARP members, connected to iMessage." },
@@ -46,8 +46,12 @@ export const DEFAULT_CONFIG = {
         { id: "age", type: "Ask", label: "Ask age if needed", question: "How old are they?", choices: ["Under 5", "5–12", "Teen", "Adult"], ask_when: "Only if we do not already know their age", remember: true, save_to: "Family → Person → Age" },
         { id: "interests", type: "Ask", label: "Ask interests", question: "What are they into right now?", choices: ["Sports", "Arts & crafts", "Science", "Games"], ask_when: "Only if we do not already know their interests", remember: true, save_to: "Family → Person → Interests" },
         { id: "budget", type: "Ask", label: "Ask budget", question: "Roughly what budget?", choices: ["Under $25", "$25–50", "$50–100", "No limit"], ask_when: "Always", remember: true, save_to: "Shopping → Budget" },
-        { id: "search", type: "Search", label: "Search relevant offers", sub: "Searches AARP Benefits", field: "AARP Benefits", note: "" },
+        { id: "search", type: "Search", label: "Search relevant offers", sub: "Searches AARP Benefits + products", field: "AARP Benefits", note: "search_products finds real purchasable items; some carry AARP discounts." },
         { id: "respond", type: "Respond", label: "Recommend gifts", sub: "Three options with reasoning", field: "Three options", note: "Be honest when the catalog has nothing gift-specific." },
+        { id: "checkout", type: "Action", label: "Prepare checkout", sub: "Calls prepare_checkout", field: "prepare_checkout", note: "Builds the immutable purchase proposal with exact totals, card, and destination." },
+        { id: "confirm", type: "Action", label: "Request confirmation — LOCKED ON", sub: "Reply BUY to place this exact order", field: "request_purchase_confirmation", note: "Always shows exact total, merchant, quantity, payment method, and shipping destination. Explicit confirmation cannot be disabled." },
+        { id: "purchase", type: "Action", label: "Purchase after BUY", sub: "Calls submit_checkout", field: "submit_checkout", note: "Fails with PURCHASE_NOT_AUTHORIZED unless the member explicitly approved this exact proposal." },
+        { id: "track", type: "Action", label: "Track order", sub: "Calls get_order_status", field: "get_order_status", note: "Order, savings, and delivery estimate are recorded." },
         { id: "write", type: "Memory", label: "Remember recipient preferences", sub: "Writes Family → Person", field: "Family → Person → Interests", note: "One atomic memory per fact: relationship, name, age, each interest, budget." },
       ] },
     { id: "car", name: "Car Rental", status: "Live",

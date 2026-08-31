@@ -17,6 +17,7 @@ import { computeAnalytics, dashboardHTML } from "./analytics.js";
 import { loadCatalog, memberHash } from "./benefits.js";
 import { onboardingHTML, normalizePhone, registerTester, lineNumber } from "./onboarding.js";
 import { getState, getConfig, updateDraftStep, updateDraftMemoryField, pendingChanges, publish } from "./agent-config.js";
+import { walletHTML, walletSummary, createSetupIntent, confirmPaymentMethod, addTestCard, addAddress, stripeConfigured } from "./wallet.js";
 import { builderHTML } from "./builder-ui.js";
 import { refreshCatalog } from "./refresh.js";
 import { fileURLToPath } from "node:url";
@@ -177,6 +178,46 @@ export function createApp({ photonRef = { current: null } } = {}) {
 <h2 style="color:#8b0000">AARP account ${linked ? "linked ✓" : "link"}</h2>
 <p>${linked ? "You're set — head back to iMessage. Your Rewards and saved benefits are now personalized." : "We couldn't match this link to a conversation. Text the concierge first, then tap the link it sends you."}</p>
 <p style="color:#777;font-size:.85em">Prototype — demo linking only; no AARP credentials involved.</p></body>`);
+      }
+
+      // ---- Buy It For Me: wallet onboarding (PRD §§8-11) ----
+      const wPage = req.method === "GET" && req.url?.match(/^\/wallet\/([0-9a-f]{12})$/);
+      const wApi = req.url?.match(/^\/api\/wallet\/([0-9a-f]{12})\/(setup-intent|confirm|test-card|address)$/);
+      const memberByHash = (hash) => {
+        mkdirSync(MEMBERS_DIR, { recursive: true });
+        for (const f of readdirSync(MEMBERS_DIR).filter((f) => f.endsWith(".json"))) {
+          const id = f.replace(/\.json$/, "");
+          if (memberHash(id) === hash) return new MemberStore(id, MEMBERS_DIR);
+        }
+        return null;
+      };
+      if (wPage) {
+        const st = memberByHash(wPage[1]);
+        if (!st) return html(`<!doctype html><meta charset="utf-8"><body style="font:17px -apple-system,system-ui;max-width:420px;margin:3rem auto;text-align:center"><h2 style="color:#8b0000">Link not recognized</h2><p>Text the concierge first, then tap the wallet link it sends you.</p></body>`);
+        return html(walletHTML(wPage[1], walletSummary(st)));
+      }
+      if (wApi && req.method === "POST") {
+        const st = memberByHash(wApi[1]);
+        if (!st) return send(404, { error: "unknown member" });
+        try {
+          if (wApi[2] === "setup-intent") {
+            if (!stripeConfigured()) return send(400, { error: "Stripe not configured" });
+            return send(200, await createSetupIntent(st));
+          }
+          if (wApi[2] === "confirm") {
+            const { payment_method } = await readBody(req);
+            return send(200, { ok: true, method: await confirmPaymentMethod(st, payment_method) });
+          }
+          if (wApi[2] === "test-card") {
+            if (stripeConfigured()) return send(400, { error: "Stripe is configured — add a real card via the form" });
+            return send(200, { ok: true, method: addTestCard(st) });
+          }
+          if (wApi[2] === "address") {
+            const a = await readBody(req);
+            if (!a.line1 || !a.city || !a.state || !a.postal_code) return send(400, { ok: false, error: "street, city, state and ZIP are required" });
+            return send(200, { ok: true, address: addAddress(st, a) });
+          }
+        } catch (e) { return send(500, { error: e.message }); }
       }
 
       if (req.method === "POST" && req.url === "/onboard") {

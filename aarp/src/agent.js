@@ -2,6 +2,9 @@
 // Providers: "anthropic" (live, needs ANTHROPIC_API_KEY) | "fake" (deterministic, for tests).
 import { searchBenefits, benefitCard, loadCatalog, memberHash } from "./benefits.js";
 import { getConfig, renderConfigPrompt } from "./agent-config.js";
+import { searchProducts } from "./products.js";
+import { createProposal, pendingProposal, recordAuthorization, submitCheckout, proposalDisplay, blockedCategory } from "./purchases.js";
+import { walletSummary } from "./wallet.js";
 import { MemberStore } from "./memory.js";
 import { searchLocalRestaurants } from "./local_restaurants.js";
 import { getRewards } from "./rewards.js";
@@ -116,6 +119,28 @@ Member controls (honor immediately, confirm briefly): a bare "reset" / "start ov
 "don't send restaurant offers" → mute_category. "stop watching X" → remove_watch. "forget X" → forget. A savings goal
 ("help me save $500 this year") → set_savings_goal; report progress when asked.
 
+BUY IT FOR ME — you can find real products, prepare checkout, and place orders, but
+NEVER without explicit approval for that exact purchase. The platform enforces this:
+submit_checkout fails with PURCHASE_NOT_AUTHORIZED unless the member replied BUY (or
+"place the order" / "confirm purchase") after seeing the exact proposal. The flow:
+  1. search_products to find real options (respect remembered budgets/interests);
+     recommend 2-3 with prices, ask "Want me to prepare one?"
+  2. When they pick one: get_wallet first if you don't know their setup. If they have
+     no card/address, send their wallet link and stop.
+  3. prepare_checkout → the tool returns the exact display block. Send it VERBATIM as
+     your reply — item, merchant, totals, savings, card, ship-to, ending with
+     "Reply BUY to place this exact order." Never paraphrase amounts.
+  4. Only after the member replies BUY does the runtime authorize; then call
+     submit_checkout with the proposal id and confirm: "Done ✓ …" with total, savings,
+     estimated delivery.
+Never say you ordered something unless submit_checkout returned an order. "yes",
+"sounds good", "that's the one" are NOT purchase approval — they only mean prepare or
+proceed to the proposal. If anything about the order changes (price, item, quantity,
+address), prepare a fresh checkout and get a fresh BUY. No alcohol, weapons, gift
+cards, subscriptions, or other blocked categories — the tool will refuse; offer an
+eligible alternative. Purchases are simulated in this prototype (no real charge) —
+if asked, say so plainly.
+
 If the member says they used a benefit and what they spent, record it with
 record_benefit_used and tell them their running total. If they ask to watch for
 something ("keep an eye out for…"), create a watch and say you'll only reach out when
@@ -185,6 +210,31 @@ export const TOOLS = [
   { name: "reset_everything",
     description: "Wipe everything remembered about this member — memories, trips, watches, saved benefits, savings history — and start fresh. Use when the member says 'reset', 'start over', 'forget everything', or 'clear my data'. Confirm briefly afterward.",
     input_schema: { type: "object", properties: {} } },
+  { name: "search_products",
+    description: "Find real purchasable products (Buy It For Me). Query with need + recipient context + budget (e.g. 'birthday gift gymnastics girl age 7'). Returns products with prices/merchants; some carry an AARP discount_pct.",
+    input_schema: { type: "object", properties: {
+      query: { type: "string" }, budget: { type: "number" } }, required: ["query"] } },
+  { name: "get_wallet",
+    description: "The member's purchasing setup: saved cards, saved addresses (with labels like Home/Emma), whether they're ready to buy, and their wallet setup link to send if not.",
+    input_schema: { type: "object", properties: {} } },
+  { name: "prepare_checkout",
+    description: "Create the immutable purchase proposal for ONE chosen product and return the exact confirmation block to send verbatim. Requires the member to have a saved card + address. discount = dollar amount off (compute from discount_pct × price when applicable).",
+    input_schema: { type: "object", properties: {
+      merchant: { type: "string" }, product_name: { type: "string" },
+      product_url: { type: "string" }, variant: { type: "string" },
+      quantity: { type: "number" }, subtotal: { type: "number" },
+      discount: { type: "number" }, shipping: { type: "number" },
+      ship_to: { type: "string", description: "Saved address label, e.g. Home or Emma" },
+    }, required: ["merchant", "product_name", "subtotal"] } },
+  { name: "submit_checkout",
+    description: "Execute an APPROVED proposal. Fails with PURCHASE_NOT_AUTHORIZED unless the member explicitly replied BUY after seeing the exact proposal. Never call this speculatively.",
+    input_schema: { type: "object", properties: { proposal_id: { type: "string" } }, required: ["proposal_id"] } },
+  { name: "get_order_status",
+    description: "The member's orders — status, totals, estimated delivery.",
+    input_schema: { type: "object", properties: {} } },
+  { name: "cancel_order",
+    description: "Cancel a not-yet-shipped order by id (member asked to cancel).",
+    input_schema: { type: "object", properties: { order_id: { type: "string" } }, required: ["order_id"] } },
   { name: "get_link_url",
     description: "The member's secure account-linking URL (§37). Offer it when they want Rewards/saved history and aren't linked yet.",
     input_schema: { type: "object", properties: {} } },
@@ -229,6 +279,39 @@ export function invokeTool(name, input, store, now, deps = {}) {
       store.save();
       return { ok: true, target: input.target, saved_so_far: store.totalSaved() };
     case "reset_everything": { store.reset(now); return { ok: true, note: "Everything cleared. Confirm warmly in one short line and invite them to start." }; }
+    case "search_products": {
+      const blocked = blockedCategory(input.query);
+      if (blocked) return { error: `Agent purchasing is not available for ${blocked} (MVP policy). Offer an eligible alternative category.` };
+      return searchProducts({ query: input.query, budget: input.budget || null });
+    }
+    case "get_wallet": {
+      const w = walletSummary(store);
+      const pub = (process.env.AARP_PUBLIC_URL || "").replace(/\/$/, "");
+      return { ...w, wallet_link: pub ? `${pub}/wallet/${memberHash(store.state.member_id)}` : null };
+    }
+    case "prepare_checkout": {
+      try {
+        const prop = createProposal(store, input, now);
+        return { proposal_id: prop.id, expires_at: prop.expires_at,
+          display: proposalDisplay(prop),
+          note: "Send `display` verbatim. Do not call submit_checkout until the member replies BUY." };
+      } catch (e) { return { error: e.message }; }
+    }
+    case "submit_checkout": {
+      const r = submitCheckout(store, input.proposal_id, now);
+      if (r.order) return { ok: true, order: r.order,
+        note: `Confirm to the member: Done ✓, $${r.order.total.toFixed(2)}${r.order.discount ? `, saved $${r.order.discount.toFixed(2)} with AARP` : ""}, estimated delivery ${r.order.estimated_delivery}. (Simulated purchase — no real charge.)` };
+      return r;
+    }
+    case "get_order_status":
+      return { orders: (store.state.orders || []).slice(-5).reverse() };
+    case "cancel_order": {
+      const o = (store.state.orders || []).find((x) => x.id === input.order_id);
+      if (!o) return { error: "unknown order" };
+      if (["shipped", "delivered"].includes(o.status)) return { error: `order already ${o.status}` };
+      o.status = "cancelled"; o.updated_at = now; store.save();
+      return { ok: true, order: o };
+    }
     case "get_link_url": {
       const pub = process.env.AARP_PUBLIC_URL || "";
       return { url: `${pub.replace(/\/$/, "")}/link/${memberHash(store.state.member_id)}`,
@@ -358,6 +441,14 @@ function fakeTurn(store, userText, now) {
  */
 export async function converse(memberId, userText, { now = new Date().toISOString(), provider = process.env.AARP_PROVIDER || "anthropic", membersDir, images = [], useDraft = false, withTrace = false } = {}) {
   const store = new MemberStore(memberId, membersDir);
+  // §§4-5, hard-coded: an explicit BUY on a pending proposal mints the single-use
+  // authorization HERE, from the member's raw message — never from the model.
+  const auth = recordAuthorization(store, userText, now);
+  if (auth) {
+    userText = `${userText}\n\n[system note: purchase authorization ${auth.id} recorded for proposal ${auth.proposal_id} — call submit_checkout with that proposal_id now]`;
+  } else if (pendingProposal(store, now) && /\b(buy|order|purchase|confirm)\b/i.test(userText)) {
+    userText = `${userText}\n\n[system note: a proposal is pending but this message is NOT valid purchase approval — only an explicit "BUY" is. Do not call submit_checkout; if they seem to want it, ask them to reply BUY.]`;
+  }
   const memIdsBefore = new Set(store.activeMemories(now).map((m) => m.id));
   const trace = withTrace ? { tool_calls: [], memories_used: store.profileSummary(now).memory_lines } : null;
   store.logMessage("member", userText, now);
