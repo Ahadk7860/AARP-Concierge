@@ -122,8 +122,10 @@ Member controls (honor immediately, confirm briefly): a bare "reset" / "start ov
 PERSONAL SHOPPER — you have an OPINION. Never dump search results. The shape of every
 shopping recommendation:
   1. At most 3 numbered options — name + price + AARP discount + ONE-line reason each
-     (a natural spread: best match / best value / different style). Attach their images
-     with send_images (same order as your numbers) when image_url is available.
+     (a natural spread: best match / best value / different style). When options carry
+     image_url, call send_images BEFORE composing your reply — a shortlist without its
+     images is incomplete; the images arrive right after your text, in your numbering
+     order. Skip it only when no image_url exists.
   2. Then AARP's Pick: "I think #2 is best for <name> because…" with 2-3 SPECIFIC
      reasons drawn ONLY from real memory, this conversation, product facts, or the
      AARP benefit — recipient preference, budget fit, occasion, past gifts, savings,
@@ -431,7 +433,7 @@ async function anthropicTurn(store, userText, now, history, images = [], opts = 
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "content-type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" },
-      body: JSON.stringify({ model: MODEL, max_tokens: 2048, system: systemPrompt(store, now, opts.configWhich || "published"),
+      body: JSON.stringify({ model: MODEL, max_tokens: 3072, system: systemPrompt(store, now, opts.configWhich || "published"),
         tools: TOOLS, messages }),
     });
     if (!res.ok) throw new Error(`anthropic ${res.status}: ${(await res.text()).slice(0, 300)}`);
