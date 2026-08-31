@@ -19,6 +19,7 @@ import { onboardingHTML, normalizePhone, registerTester, lineNumber } from "./on
 import { refreshCatalog } from "./refresh.js";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { readFileSync, existsSync } from "node:fs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MEMBERS_DIR = process.env.AARP_MEMBERS_DIR || join(HERE, "..", "data", "members");
@@ -53,6 +54,14 @@ export function createApp({ photonRef = { current: null } } = {}) {
     try {
       if (req.method === "GET" && req.url === "/health") return send(200, { ok: true, line: lineNumber(), photon: !!photonRef.current });
       if (req.method === "GET" && (req.url === "/" || req.url === "/onboard")) return html(onboardingHTML());
+
+      // Agent Builder MVP — visual control-plane prototype (its own PRD), served
+      // as a static bundle at /builder.
+      if (req.method === "GET" && (req.url === "/builder" || req.url === "/builder/")) {
+        const p = join(HERE, "..", "builder", "index.html");
+        if (existsSync(p)) return html(readFileSync(p, "utf8"));
+        return send(404, { error: "builder bundle not found" });
+      }
       if (req.method === "GET" && req.url === "/analytics") return send(200, computeAnalytics(MEMBERS_DIR));
       if (req.method === "GET" && req.url === "/dashboard") return html(dashboardHTML(computeAnalytics(MEMBERS_DIR)));
 
